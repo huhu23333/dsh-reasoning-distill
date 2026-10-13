@@ -222,15 +222,21 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       return 'failed'
     }
   }
+  // Stamped when the view starts showing a session, not when its first report
+  // arrives: a slow first poll must not make a branch that landed after the tab
+  // opened look like history.
+  useEffect(() => {
+    viewOpenedAt.current = { sessionId, at: Date.now() }
+  }, [sessionId])
   useEffect(() => {
     const current = cache[sessionId]?.report
     if (current === undefined) return
     // The hand-off outcome lives on the entry, so the panel reads it there.
     const createdBranches = current.entries.filter(item => item.handoff?.state === 'created' && item.handoff.branchId !== undefined)
     if (viewOpenedAt.current.sessionId !== current.sessionId) {
-      // The view has just started showing this session: everything that already
-      // existed then is old news.
-      viewOpenedAt.current = { sessionId: current.sessionId, at: Date.now() }
+      // Only a fallback: the effect above normally stamped this before the first
+      // report could arrive.
+      viewOpenedAt.current = { sessionId: current.sessionId, at: 0 }
     }
     {
       // Newest by *hand-off time*, not by entry order: an older compression's
