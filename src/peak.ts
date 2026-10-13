@@ -45,6 +45,17 @@ interface WhaleConstants {
 }
 
 let whaleCache: WhaleConstants | null | undefined
+/** When a *negative* whale result was cached; only absences expire. */
+let whaleMissAt = 0
+/**
+ * How long a "not installed" answer is trusted.
+ *
+ * A positive result is kept (the bundle rarely changes while the host runs), but a
+ * negative one must not be permanent: installing `dsh-whale-widget` — or repairing
+ * an unreadable bundle — should start working without restarting DSH, which is what
+ * selecting the `whale` source promises.
+ */
+const WHALE_MISS_TTL_MS = 30_000
 
 /** Beijing calendar fields for one instant. */
 function beijing(time: number): { day: number; hour: number; date: string } {
@@ -89,8 +100,13 @@ function parseHolidays(source: string): readonly string[] | undefined {
  * @returns parsed constants, or null when the widget is absent or unreadable.
  */
 function readWhale(): WhaleConstants | null {
-  if (whaleCache !== undefined) return whaleCache
+  if (whaleCache !== undefined) {
+    // A cached *miss* expires so a later install is picked up; a hit is kept.
+    if (whaleCache !== null || Date.now() - whaleMissAt < WHALE_MISS_TTL_MS) return whaleCache
+    whaleCache = undefined
+  }
   whaleCache = null
+  whaleMissAt = Date.now()
   try {
     const profiles = join(dshHome(), 'profiles')
     for (const profile of readdirSync(profiles)) {
@@ -109,6 +125,7 @@ function readWhale(): WhaleConstants | null {
   } catch {
     whaleCache = null
   }
+  if (whaleCache === null) whaleMissAt = Date.now()
   return whaleCache
 }
 
