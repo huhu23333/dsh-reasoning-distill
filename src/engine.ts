@@ -136,7 +136,11 @@ export class ReasoningDistillEngine {
    * Only the *note* is retried: re-posting the backend request would create a
    * second branch, so the pending marker is not kept for this.
    */
-  private readonly owedHandoffNotes = new Map<string, { entryId: string; outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number } }>()
+  private readonly owedHandoffNotes = new Map<string, { entryId: string; outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number }; order: number }>()
+  /** Invocation order of hand-off attempts (owed notes are memory-only). */
+  private readonly handoffOrder = new Map<string, number>()
+  /** Latest successfully committed attempt per entry in this process. */
+  private readonly committedHandoffOrder = new Map<string, number>()
   /** Audit links known to be non-durable, keyed `sessionId:entryId`. */
   private readonly auditBroken = new Set<string>()
   /** Bumped whenever a session id is attached again; stale work checks it. */
@@ -758,7 +762,8 @@ export class ReasoningDistillEngine {
 
   /** Remember a hand-off note that could not be written, so the next pre-step retries it. */
   private oweNote(sessionId: string, entryId: string, outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number }): void {
-    this.owedHandoffNotes.set(`${sessionId}:${entryId}`, { entryId, outcome })
+    const key = `${sessionId}:${entryId}`
+    this.owedHandoffNotes.set(key, { entryId, outcome, order: this.handoffOrder.get(key) ?? 0 })
     this.ctx.logger.warn('reasoning-distill: hand-off note for %s could not be written yet; it will be retried', entryId)
   }
 
@@ -779,8 +784,14 @@ export class ReasoningDistillEngine {
     const prefix = `${session.id}:`
     for (const [key, note] of [...this.owedHandoffNotes]) {
       if (!key.startsWith(prefix)) continue
+      // A replay of an earlier invocation is not a new hand-off; it cannot
+      // supersede a newer outcome that already committed while it was owed.
+      if ((this.committedHandoffOrder.get(key) ?? 0) > note.order) {
+        if (this.owedHandoffNotes.get(key) === note) this.owedHandoffNotes.delete(key)
+        continue
+      }
       const written = await this.untilSettled(
-        this.recordHandoff(session.id, note.entryId, note.outcome),
+        this.recordHandoff(session.id, note.entryId, note.outcome, undefined, note.order),
         signal,
       )
       if (written === true && this.owedHandoffNotes.get(key) === note) this.owedHandoffNotes.delete(key)
@@ -802,7 +813,11 @@ export class ReasoningDistillEngine {
     entryId: string,
     outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number },
     generation?: number,
+    replayOrder?: number,
   ): Promise<boolean> {
+    const key = `${sessionId}:${entryId}`
+    const order = replayOrder ?? (this.handoffOrder.get(key) ?? 0) + 1
+    if (replayOrder === undefined) this.handoffOrder.set(key, order)
     let written = false
     try {
       await this.store.update(sessionId, (record) => {
@@ -813,12 +828,19 @@ export class ReasoningDistillEngine {
         if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return
         const entry = record.entries.find(item => item.id === entryId)
         if (entry === undefined) return
-        // Defensive against future queue changes: an older outcome cannot replace
-        // a newer durable report. Today store.update already serializes by enqueue order.
-        if (entry.handoff !== undefined && outcome.at < entry.handoff.at) return
+        // Replays keep the original invocation order. A newer committed
+        // outcome wins even when an older owed replay reaches the queue later.
+        if (replayOrder !== undefined && (this.committedHandoffOrder.get(key) ?? 0) > replayOrder) {
+          written = true
+          return
+        }
+        // store.update serializes by enqueue order: a later queued valid outcome
+        // replaces the earlier one. `at` is for display only, not ordering; the
+        // system clock can move backwards between real hand-off attempts.
         entry.handoff = outcome
         written = true
       })
+      if (written && (this.committedHandoffOrder.get(key) ?? 0) < order) this.committedHandoffOrder.set(key, order)
       return written
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not record the hand-off: %o', error)

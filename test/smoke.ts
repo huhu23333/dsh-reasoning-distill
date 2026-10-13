@@ -3152,6 +3152,82 @@ check('later same-millisecond failure is recorded in queue order without a refus
   && saved62d?.error === 'later backend failure' && engine62d.snapshot(s62d.id).pendingBranch === null,
   JSON.stringify({ firstResult62d, laterResult62d, saved62d }))
 
+console.log('scenario 62f: clock rollback cannot strand a later record-only failure')
+handlers.clear()
+const store62f = new SidecarStore()
+const update62f = store62f.update.bind(store62f)
+let writes62f = 0
+store62f.update = async (id, mutate) => {
+  if (id === 'session-clock-rollback-62f' && ++writes62f === 3) throw new Error('transient record-only disk failure')
+  return update62f(id, mutate)
+}
+const engine62f = new ReasoningDistillEngine(ctx as never, cfg10 as never, store62f)
+engine62f.start()
+const s62f = new FakeSession('session-clock-rollback-62f')
+sessions.set(s62f.id, s62f)
+await fire('session/created', s62f)
+await runStep40(engine62f, s62f, '62f')
+await settleFor(async () => (await store62f.load(s62f.id)).entries.length === 1)
+const entry62f = (await store62f.load(s62f.id)).entries[0]!
+const gen62f = engine62f.snapshot(s62f.id).generation
+const originalNow62f = Date.now
+const tick62f = originalNow62f()
+let first62f: { ok: boolean; recorded: boolean }
+let later62f: { ok: boolean; recorded: boolean }
+try {
+  Date.now = () => tick62f
+  first62f = await engine62f.handoff(s62f.id, false, 'old failure', entry62f.id, gen62f)
+  Date.now = () => tick62f - 1
+  later62f = await engine62f.handoff(s62f.id, false, 'new failure', entry62f.id, gen62f)
+} finally {
+  Date.now = originalNow62f
+}
+const owed62f = (engine62f as unknown as { owedHandoffNotes: Map<string, unknown> }).owedHandoffNotes
+const owedBeforeRetry62f = owed62f.has(`${s62f.id}:${entry62f.id}`)
+const backendCallsBeforeRetry62f = backendCalls.length
+await fire('agent/pre-step', { agent: { session: s62f } }, async () => ({ kind: 'enter' }))
+await settleFor(async () => (await store62f.load(s62f.id)).entries[0]?.handoff?.error === 'new failure')
+const saved62f = (await store62f.load(s62f.id)).entries[0]?.handoff
+check('rollback failure owed after transient disk error lands on retry without backend resend',
+  first62f!.recorded && later62f!.recorded === false && owedBeforeRetry62f
+  && saved62f?.error === 'new failure' && saved62f.at === tick62f - 1
+  && !owed62f.has(`${s62f.id}:${entry62f.id}`) && writes62f === 4
+  && engine62f.snapshot(s62f.id).pendingBranch === null
+  && backendCalls.length === backendCallsBeforeRetry62f,
+  JSON.stringify({ first62f: first62f!, later62f: later62f!, saved62f, owedBeforeRetry62f, owed: owed62f.size, writes62f, backendCallsBeforeRetry62f, backendCallsAfterRetry62f: backendCalls.length }))
+
+console.log('scenario 62g: an old owed failure cannot overwrite a newer durable failure')
+handlers.clear()
+const store62g = new SidecarStore()
+const update62g = store62g.update.bind(store62g)
+const s62g = new FakeSession('session-stale-owed-62g')
+let writes62g = 0
+store62g.update = async (id, mutate) => {
+  if (id === s62g.id && ++writes62g === 2) throw new Error('old failure note disk error')
+  return update62g(id, mutate)
+}
+const engine62g = new ReasoningDistillEngine(ctx as never, cfg10 as never, store62g)
+engine62g.start()
+sessions.set(s62g.id, s62g)
+await fire('session/created', s62g)
+await runStep40(engine62g, s62g, '62g')
+await settleFor(async () => (await store62g.load(s62g.id)).entries.length === 1)
+const entry62g = (await store62g.load(s62g.id)).entries[0]!
+const gen62g = engine62g.snapshot(s62g.id).generation
+const first62g = await engine62g.handoff(s62g.id, false, 'old failure', entry62g.id, gen62g)
+const newer62g = await engine62g.handoff(s62g.id, false, 'new failure', entry62g.id, gen62g)
+const owed62g = (engine62g as unknown as { owedHandoffNotes: Map<string, unknown> }).owedHandoffNotes
+const owedBeforeReplay62g = owed62g.has(`${s62g.id}:${entry62g.id}`)
+const backendCallsBeforeReplay62g = backendCalls.length
+await fire('agent/pre-step', { agent: { session: s62g } }, async () => ({ kind: 'enter' }))
+await settleFor(async () => !owed62g.has(`${s62g.id}:${entry62g.id}`))
+const saved62g = (await store62g.load(s62g.id)).entries[0]?.handoff
+check('replaying an old owed note does not replace the newer durable failure',
+  !first62g.recorded && newer62g.recorded && owedBeforeReplay62g
+  && saved62g?.error === 'new failure' && !owed62g.has(`${s62g.id}:${entry62g.id}`)
+  && backendCalls.length === backendCallsBeforeReplay62g,
+  JSON.stringify({ first62g, newer62g, saved62g, owedBeforeReplay62g, owed: owed62g.size, writes62g, backendCallsBeforeReplay62g, backendCallsAfterReplay62g: backendCalls.length }))
+
 console.log('scenario 62e: a failed record-only write is owed for the next pre-step')
 handlers.clear()
 const store62e = new SidecarStore()
