@@ -190,7 +190,9 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   // When this view mounted, every branch that already existed was old news: only a
   // hand-off that lands while the panel is open may pull the user across, or
   // returning to the original session would bounce them to an old branch forever.
-  const branchBaseline = useRef<{ sessionId: string; at: number } | undefined>(undefined)
+  // The moment this view started showing a session: a hand-off that lands after
+  // that belongs to the user's current visit, however long the first report took.
+  const viewOpenedAt = useRef<{ sessionId: string; at: number }>({ sessionId: '', at: 0 })
 
   /**
    * Settle one hand-off and say how it went.
@@ -225,26 +227,24 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     if (current === undefined) return
     // The hand-off outcome lives on the entry, so the panel reads it there.
     const createdBranches = current.entries.filter(item => item.handoff?.state === 'created' && item.handoff.branchId !== undefined)
-    if (branchBaseline.current?.sessionId !== current.sessionId) {
-      // First report for this session in this instance: adopt what already exists
-      // and open nothing, whatever another session's baseline said.
-      branchBaseline.current = {
-        sessionId: current.sessionId,
-        at: createdBranches.reduce((latest, item) => Math.max(latest, item.handoff?.at ?? 0), 0),
-      }
-    } else {
+    if (viewOpenedAt.current.sessionId !== current.sessionId) {
+      // The view has just started showing this session: everything that already
+      // existed then is old news.
+      viewOpenedAt.current = { sessionId: current.sessionId, at: Date.now() }
+    }
+    {
       // Newest by *hand-off time*, not by entry order: an older compression's
       // hand-off can land after a newer one's, and entry order would then open the
       // wrong branch (and redirect a second time on the next poll).
       const fresh = createdBranches
-        .filter(item => (item.handoff?.at ?? 0) > branchBaseline.current!.at)
+        .filter(item => (item.handoff?.at ?? 0) > viewOpenedAt.current.at)
         .reduce<typeof createdBranches[number] | undefined>(
           (best, item) => best === undefined || (item.handoff?.at ?? 0) > (best.handoff?.at ?? 0) ? item : best,
           undefined,
         )
       const branchId = fresh?.handoff?.branchId
       if (branchId !== undefined) {
-        branchBaseline.current = { sessionId: current.sessionId, at: fresh?.handoff?.at ?? branchBaseline.current!.at }
+        viewOpenedAt.current = { sessionId: current.sessionId, at: fresh?.handoff?.at ?? viewOpenedAt.current.at }
         if (!openedBranch.current.has(branchId)) {
           openedBranch.current.add(branchId)
           openSession(branchId)
