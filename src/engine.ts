@@ -623,7 +623,8 @@ export class ReasoningDistillEngine {
       const created = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       if (!response.ok || created === '') {
         const reason = typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`
-        await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
+        const noted = await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
+        if (noted === false) this.oweNote(session.id, entryId, reason)
         if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
         this.ctx.logger.warn('reasoning-distill: branch refused for %s (%s); carrying on in place', session.id, reason)
         return false
