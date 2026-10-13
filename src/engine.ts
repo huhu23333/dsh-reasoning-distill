@@ -569,6 +569,28 @@ export class ReasoningDistillEngine {
   }
 
   /**
+   * Mark one entry's audit session as not durably stored.
+   *
+   * The writer can attach successfully and still fail on flush (the host reports
+   * the first durability listener failure), leaving an audit link that dies with
+   * the process. The entry must not keep promising a record it does not have.
+   * @param sessionId - session that owns the entry.
+   * @param entryId - entry whose audit link is broken.
+   */
+  private async markAuditUndurable(sessionId: string, entryId: string): Promise<void> {
+    const generation = this.generation.get(sessionId) ?? 0
+    try {
+      await this.store.update(sessionId, (record) => {
+        if ((this.generation.get(sessionId) ?? 0) !== generation) return
+        const entry = record.entries.find(item => item.id === entryId)
+        if (entry !== undefined) entry.sessionMissing = true
+      })
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: could not mark the audit link undurable: %o', error)
+    }
+  }
+
+  /**
    * Record what a branch hand-off did, on the entry that was handed over.
    *
    * The choice is deliberate: nothing else about the turn changes on failure, so
@@ -1052,7 +1074,18 @@ export class ReasoningDistillEngine {
     const stale = (): boolean => (this.generation.get(session.id) ?? 0) !== generation
     const reasoning = reasoningOf(target.content)
     const maxInput = target.rule.maxInputChars
-    const input = maxInput > 0 && reasoning.length > maxInput ? reasoning.slice(0, maxInput) : reasoning
+    // The reasoning is the *subject* of the rewrite, not context: silently sending
+    // only its prefix would let the distiller drop decisions it never saw while
+    // the entry still reports a saving measured on the full text. A step too large
+    // to hand over whole is left alone instead.
+    if (maxInput > 0 && reasoning.length > maxInput) {
+      this.ctx.logger.info(
+        'reasoning-distill: leaving %s undistilled (reasoning %d chars exceeds the %d-char input limit)',
+        target.model, reasoning.length, maxInput,
+      )
+      return
+    }
+    const input = reasoning
     const userText = this.buildRequestText(session, target, input)
     const prompt = this.config.prompt.get() || DEFAULT_PROMPT
     const startedAt = Date.now()
@@ -1072,7 +1105,7 @@ export class ReasoningDistillEngine {
       // reasoning stays raw and nothing is substituted, so the session keeps
       // working; the failed compression session stays for inspection, and the
       // attempt is still recorded so its spending is not invisible.
-      this.failCompressionSession(sessionId, outcome.run.error ?? 'distiller returned no text')
+      this.failCompressionSession(sessionId, outcome.run.error ?? 'distiller returned no text', session.id, `${target.seq}-${startedAt}-failed`)
       this.ctx.logger.warn(
         'reasoning-distill: gave up on %s after %dms: %s',
         target.model, outcome.run.durationMs, outcome.run.error ?? 'empty answer',
@@ -1112,7 +1145,7 @@ export class ReasoningDistillEngine {
     }
     const ceiling = target.rule.maxOutputChars
     const distilled = ceiling > 0 && outcome.text.length > ceiling ? outcome.text.slice(0, ceiling) : outcome.text
-    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model)
+    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, `${target.seq}-${startedAt}`)
     const originalTokens = estimateChars(reasoning.length)
     const distilledTokens = estimateChars(distilled.length)
     const saved = originalTokens - distilledTokens
@@ -1239,10 +1272,11 @@ export class ReasoningDistillEngine {
         if (results.length > 0) {
           // Tool results can be far larger than the reasoning they justify; bound
           // this block on its own so one huge output cannot dominate the input.
-          const joined = results.join('\n\n')
           const cap = target.rule.maxInputChars
           parts.push('## Tool results (context only, never copy)')
-          parts.push(cap > 0 && joined.length > cap ? joined.slice(0, cap) : joined)
+          // Each result is its own context block, so the limit applies to each of
+          // them rather than to their concatenation.
+          parts.push(results.map(result => cap > 0 && result.length > cap ? result.slice(0, cap) : result).join('\n\n'))
         }
       }
     }
@@ -1396,7 +1430,7 @@ export class ReasoningDistillEngine {
    * @param sessionId - compression session, or an empty string when none opened.
    * @param reason - operator-facing failure text.
    */
-  private failCompressionSession(sessionId: string, reason: string): void {
+  private failCompressionSession(sessionId: string, reason: string, ownerId: string, entryId: string): void {
     if (sessionId === '') return
     const session = this.ctx.sessions.get(sessionId as SessionId)
     if (session === undefined) return
@@ -1406,14 +1440,20 @@ export class ReasoningDistillEngine {
         turn: 1,
         reason: { kind: 'error', error: { message: reason, code: 'REASONING_DISTILL_FAILED' } },
       })
-      void this.ctx.sessions.flush(session).catch(() => undefined)
+      void this.ctx.sessions.flush(session).catch((error: unknown) => {
+        this.ctx.logger.warn('reasoning-distill: failed-compression session %s did not persist: %o', session.id, error)
+        void this.markAuditUndurable(ownerId, entryId)
+      })
     } catch (error: unknown) {
+      // The append itself can fail (a writer that rejects mid-stream): the audit
+      // link is then no more durable than a failed flush, so say so too.
       this.ctx.logger.warn('reasoning-distill: could not settle a failed compression session: %o', error)
+      void this.markAuditUndurable(ownerId, entryId)
     }
   }
 
   /** Close the compression session with the distiller's answer. */
-  private finishCompressionSession(sessionId: string, text: string, provider: string, model: string): void {
+  private finishCompressionSession(sessionId: string, text: string, provider: string, model: string, ownerId: string, entryId: string): void {
     if (sessionId === '') return
     const session = this.ctx.sessions.get(sessionId as SessionId)
     if (session === undefined) return
@@ -1429,9 +1469,13 @@ export class ReasoningDistillEngine {
       }, { surfaceOp: 'append' })
       session.append('step/end', { turn: 1, step: 1 })
       session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-      void this.ctx.sessions.flush(session).catch(() => undefined)
+      void this.ctx.sessions.flush(session).catch((error: unknown) => {
+        this.ctx.logger.warn('reasoning-distill: audit session %s did not persist: %o', session.id, error)
+        void this.markAuditUndurable(ownerId, entryId)
+      })
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not settle a compression session: %o', error)
+      void this.markAuditUndurable(ownerId, entryId)
     }
   }
 }

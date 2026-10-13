@@ -2345,6 +2345,80 @@ check('the compression still lands', entry47.distilledText !== '')
 check('but the entry says its audit session is not durable', entry47.sessionMissing === true,
   JSON.stringify({ missing: entry47.sessionMissing, sessionId: entry47.distill.sessionId }))
 
+console.log('scenario 48: the input limit bounds context blocks, never the reasoning itself')
+// (1) A reasoning larger than the limit is left alone instead of being cut short.
+handlers.clear()
+let calls48 = 0
+const llm48 = { stream() {
+  calls48 += 1
+  return (async function* gen() { yield { type: 'text-delta', index: 0, text: 'x' }; yield { type: 'finish', reason: { kind: 'stop' } } })()
+} }
+const store48 = new SidecarStore()
+const rule48 = {
+  ...rule7,
+  maxInputChars: 200,
+  maxOutputChars: 0,
+  minSavedTokens: 5,
+  distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
+}
+// Both readers say 200, so whichever path resolves the limit the cap applies.
+const cfg48 = {
+  enabled: { get: () => true },
+  defaultRule: { get: () => rule48 },
+  models: { get: () => ({}) },
+  peakSource: { get: () => 'builtin' },
+  holidays: { get: () => [] },
+  prices: { get: () => ({}) },
+  rewriteBackend: { get: () => 'message-edit' },
+  branchTimeoutMs: { get: () => 0 },
+  prompt: { get: () => '' },
+  maxInputChars: { get: () => 200 },
+  maxOutputChars: { get: () => 0 },
+} as never
+const engine48 = new ReasoningDistillEngine({ ...ctx, llm: llm48 } as never, cfg48 as never, store48)
+engine48.start()
+const s48 = new FakeSession('session-cap-48')
+sessions.set(s48.id, s48)
+await fire('session/created', s48)
+// fatReasoning is ~2280 chars, well past the 200-char limit.
+await runStep40(engine48, s48, '48')
+await new Promise(resolve => setTimeout(resolve, 60))
+check('an oversized reasoning is not distilled at all', calls48 === 0,
+  JSON.stringify({ calls: calls48, rule: resolveRule('deepseek-flash', cfg48 as never), entries: (await store48.load(s48.id)).entries.length }))
+check('and nothing is recorded for it', (await store48.load(s48.id)).entries.length === 0)
+check('while the reasoning itself is replayed untouched',
+  s48.deriveMessages().some(message => JSON.stringify(message).includes('hmm, let me think.')))
+
+// (2) The limit applies to each context block, not to their concatenation.
+const manyResults = ['A'.repeat(300), 'B'.repeat(300)]
+const joined48 = manyResults.map(result => result.length > 120 ? result.slice(0, 120) : result).join('\n\n')
+check('each tool result is capped on its own',
+  joined48.includes('A'.repeat(120)) && joined48.includes('B'.repeat(120))
+  && !joined48.includes('A'.repeat(121)) && !joined48.includes('B'.repeat(121)))
+
+console.log('scenario 49: a flush that fails after the writer attached still marks the entry undurable')
+handlers.clear()
+const store49 = new SidecarStore()
+const flushCtx49 = {
+  ...ctx,
+  sessions: {
+    ...(ctx as unknown as { sessions: Record<string, unknown> }).sessions,
+    flush: () => Promise.reject(new Error('durability listener failed')),
+  },
+}
+const engine49 = new ReasoningDistillEngine(flushCtx49 as never, cfg10 as never, store49)
+engine49.start()
+const s49 = new FakeSession('session-flush-49')
+sessions.set(s49.id, s49)
+await fire('session/created', s49)
+await runStep40(engine49, s49, '49')
+await settleFor(async () => (await store49.load(s49.id)).entries.length === 1)
+await settleFor(async () => (await store49.load(s49.id)).entries[0]!.sessionMissing === true)
+const entry49 = (await store49.load(s49.id)).entries[0]!
+check('a rejected flush marks the audit link as missing', entry49.sessionMissing === true,
+  JSON.stringify({ missing: entry49.sessionMissing, session: entry49.distill.sessionId }))
+check('and the compression itself still landed', entry49.distilledText !== '')
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1
