@@ -112,7 +112,7 @@ export class ReasoningDistillEngine {
   /** Sessions whose next derivation is the model request; see the wrapper. */
   private readonly expectRequest = new Set<string>()
   /** Per-compression wait bound: its rule's distillation timeout, 0 = unbounded. */
-  private readonly waitBound = new Map<string, number>()
+  private readonly waitBound = new Map<string, { timeoutMs: number; launchedAt: number }>()
   /** Attempts whose wait bound expired: their adopted result must not land late. */
   private readonly abandoned = new Set<string>()
   /** Timers that would mark an attempt abandoned; cleared once it settles. */
@@ -974,7 +974,7 @@ export class ReasoningDistillEngine {
       return
     }
     this.pending.delete(key)
-    this.waitBound.set(key, target.rule.timeoutMs)
+    this.waitBound.set(key, { timeoutMs: target.rule.timeoutMs, launchedAt: Date.now() })
     this.running.set(key, {
       sessionId: session.id,
       turn: target.turn,
@@ -1038,24 +1038,32 @@ export class ReasoningDistillEngine {
       // aborted by its own provider call, so the wait is bounded just past that
       // as a backstop for adapters that ignore abort. `timeoutMs: 0` means no
       // limit, and then this genuinely waits until the compression ends.
-      const waits = Promise.allSettled(mine.map(([, promise]) => promise))
-      const bounds = mine.map(([key]) => this.waitBound.get(key) ?? 0)
-      if (bounds.includes(0)) {
-        // No configured limit: wait until the compression ends, but never past a
-        // user's own stop, which arrives as this signal.
-        await this.untilAborted(waits, signal)
-      } else {
-        let deadlineTimer: ReturnType<typeof setTimeout> | undefined
+      // Each compression is waited for up to *its own* bound, measured from when it
+      // was launched: one unlimited attempt must not remove the bound of a bounded
+      // one, and repeated pre-steps must not each restart the clock.
+      const waits = mine.map(async ([key, promise]) => {
+        const bound = this.waitBound.get(key)
+        if (bound === undefined || bound.timeoutMs === 0) {
+          await promise
+          return
+        }
+        const remaining = bound.timeoutMs + 30_000 - (Date.now() - bound.launchedAt)
+        if (remaining <= 0) {
+          void promise.catch(() => undefined)
+          return
+        }
+        let timer: ReturnType<typeof setTimeout> | undefined
         const deadline = new Promise<void>(resolve => {
-          deadlineTimer = setTimeout(resolve, Math.max(...bounds) + 30_000)
-          deadlineTimer.unref?.()
+          timer = setTimeout(resolve, remaining)
+          timer.unref?.()
         })
         try {
-          await this.untilAborted(Promise.race([waits, deadline]), signal)
+          await Promise.race([promise, deadline])
         } finally {
-          if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+          if (timer !== undefined) clearTimeout(timer)
         }
-      }
+      })
+      await this.untilAborted(Promise.all(waits), signal)
       return signal === undefined || !signal.aborted
     } finally {
       // Only clear the indicator this wait published: a successor generation may
