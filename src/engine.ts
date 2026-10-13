@@ -205,6 +205,9 @@ export class ReasoningDistillEngine {
       // A successful compression with a branch backend ends this turn *before* any
       // request goes out: the conversation continues on the branch instead.
       if (!signal?.aborted && await this.handOffToBranch(session, signal)) return { kind: 'reject' }
+      // The hand-off can wait for a backend: the id can be replaced underneath it
+      // too, and then this obsolete pre-step must not arm the successor.
+      if (this.replaced(session)) return next()
       // The loop assembles the request right after this returns; arming the
       // session here is what lets the wrapper tell that derivation apart from a
       // viewer's.
