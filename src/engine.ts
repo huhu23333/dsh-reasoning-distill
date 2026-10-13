@@ -134,7 +134,7 @@ export class ReasoningDistillEngine {
    * and the reported stock all read it, so a rewrite that cannot be applied (its
    * message no longer carries reasoning, say) can never be counted as saving.
    */
-  private readonly applied = new Map<string, Array<{ afterSeq: number; signature: number; ids: Map<string, number> }>>()
+  private readonly applied = new Map<string, Array<{ afterSeq: number; ids: Map<string, number> }>>()
   private readonly rawDerive = new Map<string, () => Message[]>()
 
   /**
@@ -392,10 +392,6 @@ export class ReasoningDistillEngine {
           const history = engine.applied.get(this.id) ?? []
           history.push({
             afterSeq: (nodes[nodes.length - 1] as number | undefined) ?? 0,
-            // A record only describes the surface it was taken from: a projection
-            // can change the node set without moving `afterSeq`, and a later
-            // answer must then be judged afresh rather than against this one.
-            signature: surfaceSignature(nodes),
             ids: result.applied,
           })
           // Only the recent derivations can still be awaiting a response.
@@ -1084,14 +1080,12 @@ export class ReasoningDistillEngine {
     // view, which is the weaker but still bounded answer.
     // Bind the credit to the request that carried these rewrites: pick the newest
     // derivation that happened at or before this response's seq.
-    const nodes = surface?.nodes ?? session.surface.nodes
-    // The event being answered has already been appended, so its own node is part
-    // of this surface while the request that produced it predates that append.
-    // Comparing the two is only meaningful over the nodes that existed then.
-    const atRequest = [...nodes].filter(node => node < seq)
-    const signature = surfaceSignature(atRequest)
+    // The answered request's own record: the newest one taken before this response.
+    // It is not filtered against the current node set, because a projection that
+    // lands while the response is in flight must not retroactively revoke a saving
+    // the request really carried (acceptance D-1(4)).
     const history = this.applied.get(sessionId) ?? []
-    const carried = history.filter(at => at.afterSeq <= seq && at.signature === signature).pop()?.ids
+    const carried = history.filter(at => at.afterSeq <= seq).pop()?.ids
     // A record that exists but describes another surface (the history moved after
     // the request) may not credit anything: the request demonstrably predates that
     // move, so this answer is not evidence that the rewrite shipped. Only a
@@ -1752,21 +1746,6 @@ function hashText(text: string): string {
   let hash = 5381
   for (let index = 0; index < text.length; index += 1) hash = ((hash * 33) ^ text.charCodeAt(index)) | 0
   return `${hash >>> 0}:${text.length}`
-}
-
-/**
- * Cheap order-sensitive fingerprint of a surface's node set.
- *
- * Accounting may only use a derivation record while the surface it was taken
- * from is still the same: a projection can replace nodes without appending
- * anything, which leaves the newest sequence number unchanged.
- * @param nodes - surface node sequence numbers, in order.
- * @returns a number that changes with the set or its order.
- */
-function surfaceSignature(nodes: Iterable<number>): number {
-  let hash = 0
-  for (const node of nodes) hash = (Math.imul(hash, 31) + node) | 0
-  return hash
 }
 
 function withDistilledReasoning(message: Message, text: string): Message | undefined {

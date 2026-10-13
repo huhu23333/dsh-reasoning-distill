@@ -2060,10 +2060,11 @@ const runArmed = async (sessionId: string, mutate?: (session: FakeSession) => vo
 const armed = await runArmed('session-armed-41')
 check('a request that shipped the rewrite is credited', armed.liveSaved > 0, JSON.stringify(armed))
 const mutated = await runArmed('session-armed-41b', session => {
-  // The history moves after the request but before its answer.
+  // The history moves after the request but before its answer. The request really
+  // shipped the rewrite, so per acceptance D-1(4) that saving stands.
   session.append('user/message', { id: 'late-user', role: 'user', content: [{ type: 'text', text: 'late' }], source: { kind: 'user' } })
 })
-check('a surface that moved after the request credits nothing', mutated.liveSaved === 0, JSON.stringify(mutated))
+check('a saving a request really shipped is not revoked by a later projection', mutated.liveSaved > 0, JSON.stringify(mutated))
 
 console.log('scenario 42: a stop ends the pre-step wait, and a disposed session cannot hold its successor')
 // (1) Cancellation must break the wait, not queue behind the distillation.
