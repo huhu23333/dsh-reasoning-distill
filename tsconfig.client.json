@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "include": [
+    "src/client",
+    "src/shared.ts",
+    "src/css-modules.d.ts",
+    "types"
+  ]
+}

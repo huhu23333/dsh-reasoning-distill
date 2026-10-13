@@ -1,0 +1,200 @@
+/**
+ * Settings write planning, kept free of React so it can be tested directly.
+ *
+ * Two rules make concurrent editing safe:
+ *
+ *  1. A save is diffed against the value its draft came from — never against the
+ *     latest host value — so a field this user never touched is not written back
+ *     from a stale draft.
+ *  2. The diff recurses into records and writes **field-level** operations, so a
+ *     change here never rewrites a sibling field another client changed inside
+ *     the same model or price entry.
+ * @module dsh-reasoning-distill/client/ops
+ */
+
+import type { ModelPrices, ModelRule } from '../config.ts'
+import { FALLBACK_RULE, mergeRule, withKindDefaults, type RuleOverride, type RuleSource } from '../rule.ts'
+
+/** Sparse per-model rule as stored, matching what the host schema accepts. */
+export type StoredRule = RuleOverride
+
+/**
+ * Whether a rule decides nothing because all three session kinds are off, in
+ * which case the rest of its fields are locked in the panel.
+ * @param rule - the rule being edited.
+ * @returns true when every kind switch is off.
+ */
+export function ruleFieldsIdle(rule: StoredRule): boolean {
+  return rule.enabled !== true && rule.continuableSubagents !== true && rule.oneShotSubagents !== true
+}
+
+/**
+ * Whether a subagent kind's depth cap is not editable because that kind is off.
+ *
+ * Each cap follows its OWN switch, not the rule-wide idle state: a rule with only
+ * main conversations enabled still shows both caps locked.
+ * @param rule - the rule being edited.
+ * @returns true when that kind's switch is off.
+ */
+export function continuableDepthDisabled(rule: StoredRule): boolean {
+  return rule.continuableSubagents !== true
+}
+
+/** @see continuableDepthDisabled for the one-shot kind. */
+export function oneShotDepthDisabled(rule: StoredRule): boolean {
+  return rule.oneShotSubagents !== true
+}
+
+/**
+ * Normalize one stored settings document for display and editing.
+ *
+ * Applies the same legacy derivation the engine resolver applies, so the panel
+ * shows what will actually run. Without it a stored `{ enabled: false }` renders
+ * as the fallback defaults and saving anything writes the derived value back,
+ * permanently changing behaviour the user never touched.
+ * @param value - the stored document.
+ * @param legacyOneShot - the retired global one-shot switch, when still present.
+ * @returns a draft whose rule layers match the engine's resolution.
+ */
+export function normalizeSettings(value: SettingsValue, legacyOneShot?: boolean): SettingsValue {
+  const models: Record<string, StoredRule> = {}
+  for (const [id, override] of Object.entries(value.models ?? {})) {
+    models[id] = withKindDefaults(override, legacyOneShot)
+  }
+  return {
+    ...value,
+    defaultRule: mergeRule(FALLBACK_RULE, withKindDefaults(value.defaultRule ?? {}, legacyOneShot), undefined),
+    models,
+    peakSource: value.peakSource ?? 'builtin',
+    holidays: [...(value.holidays ?? [])],
+    prices: structuredClone(value.prices ?? {}),
+    prompt: value.prompt ?? '',
+  }
+}
+
+/**
+ * Whether a poll response arrived too late to be applied.
+ *
+ * Compared against the last *applied* request, never against the newest issued
+ * one: a request slower than the poll interval would otherwise be discarded
+ * forever, leaving the panel permanently stale.
+ * @param request - the id of the response being considered.
+ * @param applied - the id of the newest response already applied.
+ * @returns true when this response must be ignored.
+ */
+export function isStaleResponse(request: number, applied: number): boolean {
+  return request <= applied
+}
+
+/** The settings document the panel edits. */
+export type SettingsValue = {
+  enabled: boolean
+  defaultRule: ModelRule
+  models: Record<string, StoredRule>
+  peakSource: string
+  holidays: string[]
+  prices: Record<string, Partial<ModelPrices>>
+  prompt: string
+  maxInputChars: number
+  maxOutputChars: number
+}
+
+/** One config mutation accepted by the settings form controller. */
+export type Operation = { op: 'set'; path: (string | number)[]; value: unknown }
+  | { op: 'unset'; path: (string | number)[] }
+
+/** Scalar fields the panel writes as a whole. */
+const SCALAR_FIELDS = [
+  'enabled', 'defaultRule', 'prompt', 'peakSource', 'holidays',
+] as const satisfies readonly (keyof SettingsValue)[]
+
+/** Fields keyed by model id, diffed per entry and per field. */
+const DICT_FIELDS = ['models', 'prices'] as const satisfies readonly (keyof SettingsValue)[]
+
+/**
+ * Plan one save.
+ *
+ * `latest` is accepted but deliberately **not** diffed against: it is only the
+ * fallback when this panel has no recorded origin yet. Diffing against it is the
+ * stale-draft bug — an untouched field that another client changed would be
+ * written back with the stale value.
+ * @param origin - the host value this draft was derived from, if known.
+ * @param latest - the host value right now, used only when `origin` is unknown.
+ * @param draft - what the panel currently shows.
+ * @returns the operations to apply.
+ */
+export function planSave(
+  origin: SettingsValue | null,
+  latest: SettingsValue,
+  draft: SettingsValue,
+): Operation[] {
+  return saveOperations(origin ?? latest, draft)
+}
+
+/**
+ * Plan the writes that turn `baseline` into `draft`.
+ *
+ * Only differences the user introduced count, at field granularity.
+ * @param baseline - the value the draft was derived from (or the latest value).
+ * @param draft - what the panel currently shows.
+ * @returns the operations to apply, in field order.
+ */
+export function saveOperations(baseline: SettingsValue, draft: SettingsValue): Operation[] {
+  const ops: Operation[] = []
+  for (const field of SCALAR_FIELDS) pushDiff(ops, [field], baseline[field], draft[field])
+  for (const field of DICT_FIELDS) {
+    const before = (baseline[field] ?? {}) as Record<string, unknown>
+    const after = (draft[field] ?? {}) as Record<string, unknown>
+    for (const [id, value] of Object.entries(after)) {
+      if (!Object.hasOwn(before, id)) {
+        // A brand-new entry is written whole; there is nothing to preserve.
+        ops.push({ op: 'set', path: [field, id], value })
+        continue
+      }
+      pushDiff(ops, [field, id], before[id], value)
+    }
+    for (const id of Object.keys(before)) {
+      if (!Object.hasOwn(after, id)) ops.push({ op: 'unset', path: [field, id] })
+    }
+  }
+  return ops
+}
+
+/**
+ * Push the writes that turn one value into another at one path.
+ *
+ * Plain objects are compared key by key and written field by field, so a change
+ * this user made never rewrites a sibling field another client changed in the
+ * meantime. Arrays and scalars are written whole.
+ * @param ops - accumulator.
+ * @param path - path of the value being compared.
+ * @param before - the value this draft came from.
+ * @param after - the value now shown.
+ */
+function pushDiff(ops: Operation[], path: (string | number)[], before: unknown, after: unknown): void {
+  if (isPlainObject(before) && isPlainObject(after)) {
+    for (const key of new Set([...Object.keys(before), ...Object.keys(after)])) {
+      if (!Object.hasOwn(after, key)) {
+        if (Object.hasOwn(before, key)) ops.push({ op: 'unset', path: [...path, key] })
+        continue
+      }
+      if (!Object.hasOwn(before, key)) {
+        ops.push({ op: 'set', path: [...path, key], value: after[key] })
+        continue
+      }
+      pushDiff(ops, [...path, key], before[key], after[key])
+    }
+    return
+  }
+  if (JSON.stringify(before) === JSON.stringify(after)) return
+  if (after === undefined) {
+    ops.push({ op: 'unset', path })
+    return
+  }
+  ops.push({ op: 'set', path, value: after })
+}
+
+/** Whether a value is a plain record (not an array, not null). */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
