@@ -138,7 +138,42 @@ export const REWRITE_BACKENDS: readonly RewriteBackend[] = [
     kind: 'in-place',
     probe: { method: 'POST', path: '/api/msg-edit/get-message', body: { sessionId: '', messageId: '' } },
   },
+  {
+    id: 'context-shaping',
+    kind: 'in-place',
+    probe: { method: 'POST', path: '/api/dsh-context-shaping/edit', body: { sessionId: '', messageId: '', part: 'thinking' } },
+  },
 ]
+
+/**
+ * Whether a probe response proves the backend is installed.
+ *
+ * A missing route is answered by the web server itself, while an installed
+ * backend answers even its own refusals (unknown session, bad body) with the
+ * JSON envelope of its API. `404` alone therefore cannot decide: the backends
+ * use it for "no such session" too.
+ * @param status - probe status code.
+ * @param contentType - probe content type, when the response carried one.
+ * @returns true when the backend answered as an API.
+ */
+export function backendInstalled(status: number, contentType: string | null): boolean {
+  if (status !== 404) return true
+  return (contentType ?? '').toLowerCase().includes('application/json')
+}
+
+/**
+ * The selection after one row is activated.
+ *
+ * A radio input cannot express this: once checked it stops firing change events,
+ * so the row could never be cleared again. Activation is therefore modelled here
+ * — clicking the current choice clears it, clicking another switches to it.
+ * @param current - the stored backend id.
+ * @param clicked - the row that was activated.
+ * @returns the next stored id, possibly empty.
+ */
+export function nextBackend(current: string, clicked: string): string {
+  return current === clicked ? '' : clicked
+}
 
 /** The backend with this id, or undefined for an unknown or empty id. */
 export function backendById(id: string): RewriteBackend | undefined {
@@ -179,6 +214,13 @@ export function rewriteRequest(
     return body === undefined ? undefined : { path: '/message-edit', body }
   }
   if (entry.targetMessageId === '') return undefined
+  if (backend.id === 'context-shaping') {
+    // Edits only the reasoning part of that exact assistant message, in place.
+    return {
+      path: '/api/dsh-context-shaping/edit',
+      body: { sessionId, messageId: entry.targetMessageId, part: 'thinking', role: 'assistant', text },
+    }
+  }
   return { path: '/api/msg-edit/rewrite-message', body: { sessionId, messageId: entry.targetMessageId, reasoning: text } }
 }
 

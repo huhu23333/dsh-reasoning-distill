@@ -6,7 +6,7 @@ import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  REWRITE_BACKENDS, backendById, continuableDepthDisabled, masterSwitchState, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
+  REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
 import { FALLBACK_RULE, mergeRule, sparseOverride } from '../rule.ts'
@@ -79,7 +79,8 @@ function BackendChooser({ value, onSelect, t }: {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(backend.probe.body),
       }).then(response => {
-        if (alive) setAvailable(current => ({ ...current, [backend.id]: response.status !== 404 }))
+        const installed = backendInstalled(response.status, response.headers.get('content-type'))
+        if (alive) setAvailable(current => ({ ...current, [backend.id]: installed }))
       }).catch(() => {
         if (alive) setAvailable(current => ({ ...current, [backend.id]: false }))
       })
@@ -92,11 +93,10 @@ function BackendChooser({ value, onSelect, t }: {
       const selected = value === backend.id
       return <label key={backend.id} className={css.inline}>
         <input
-          type="radio"
-          name="reasoning-distill-backend"
+          type="checkbox"
           checked={selected}
           disabled={!installed}
-          onChange={() => onSelect(selected ? '' : backend.id)}
+          onChange={() => onSelect(nextBackend(value, backend.id))}
         />
         <span>{backend.id} · {backend.kind === 'branch' ? t('settings.backendBranch') : t('settings.backendInPlace')}</span>
         <span className={css.muted}>{installed ? t('settings.backendInstalled') : t('settings.backendMissing')}</span>

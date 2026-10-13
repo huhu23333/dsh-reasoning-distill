@@ -309,8 +309,13 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 
 **安装方式（任选其一）**：
 
-1. **用打好补丁的包**：`vendor/dsh-message-edit-patched1.tgz`（已改名 `dsh-message-edit-patched`、版本 `0.2.3-patched1`）。
-   尝试：`dsh plugin --profile web add file:/home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill/vendor/dsh-message-edit-patched1.tgz`
+1. **用打好补丁的包**：`vendor/dsh-message-edit-0.2.3-patched1.tgz`（**保持包名 `dsh-message-edit`**，只把版本标为 `0.2.3-patched1`）：
+   ```bash
+   cd /home/huhu233/otherProject/deepseek-harness
+   pnpm dsh plugin --profile web add /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill/vendor/dsh-message-edit-0.2.3-patched1.tgz
+   ```
+
+   ⚠️ **不要给这个包改名**：它的客户端 bundle 里写死了 `id: "dsh-message-edit"`，一旦把 npm 包名改成别的（例如 `dsh-message-edit-patched`），DSH 就无法把 bundle 与插件行配对，**客户端半边（Timeline 标签页等）不会激活**——这正是"装了却看不到 Timeline"的原因。
 2. **装原版再打补丁**：`dsh plugin --profile web add dsh-message-edit`，
    然后 `python3 scripts/patch-message-edit.py`（默认路径 `~/.dsh/profiles/web/node_modules/dsh-message-edit/client.js`，幂等，可重复运行）。
 
@@ -324,6 +329,11 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 |---|---|---|---|
 | `message-edit` | `dsh-message-edit` 或 `@yunyv/dsh-message-edit` | `POST /message-edit` `{action:'edit', sessionId, eventSeq, blockIndex, text, cascade:'truncate'}` | **另开分支会话**（新增版本，原会话不动） |
 | `msg-edit` | `@moton16/dsh-msg-edit` | `POST /api/msg-edit/rewrite-message` `{sessionId, messageId, reasoning}` | **就地改写模型可见历史**（不截断后续） |
+| `context-shaping` | `zeranhub/dsh-context-shaping` | `POST /api/dsh-context-shaping/edit` `{sessionId, messageId, part:'thinking', role:'assistant', text}` | **就地只改思考部分**（该插件对含工具调用的消息默认拒绝整条重写） |
+
+**探测规则**：插件页挂载时对每个后端发一次探针请求；**`404` 且响应不是 JSON** 才算"未安装"——因为已安装的后端连自己的错误（会话不存在、请求体不合法）也是用它自己的 JSON 信封回答 `404`，单看状态码会误判成没装。
+
+**已知不能接入的**：`yumiao-dev/dsh-chat-thinking-editor` 只通过浏览器的 `assistantEdit/replace` **Remote**（RPC 通道）暴露能力，没有 HTTP 面，我们的客户端无法直接调用 → 记入不支持。
 
 规则（与面板实现一致）：
 

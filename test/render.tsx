@@ -12,7 +12,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionSessionsAction } from '../src/client/SessionsAction.tsx'
 import { CompressionActivity } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
-import { REWRITE_BACKENDS, backendById, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, oneShotDepthDisabled, planSave, rewriteRequest, ruleFieldsIdle, saveOperations, type SettingsValue } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, rewriteRequest, ruleFieldsIdle, saveOperations, type SettingsValue } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
@@ -167,10 +167,17 @@ check('empty text cannot be bridged', messageEditRequest('s', { targetSeq: 1, ta
 check('a session without an id cannot be bridged', messageEditRequest('', { targetSeq: 1, targetBlockIndex: 0 }, 'x') === undefined)
 
 console.log('client: the rewrite backend registry drives the panel')
-check('two backends are offered, one branching and one in place',
-  REWRITE_BACKENDS.length === 2
+check('three backends are offered: one branching, two in place',
+  REWRITE_BACKENDS.length === 3
   && backendById('message-edit')?.kind === 'branch'
-  && backendById('msg-edit')?.kind === 'in-place')
+  && backendById('msg-edit')?.kind === 'in-place'
+  && backendById('context-shaping')?.kind === 'in-place')
+// Detection must not confuse a backend's own 404 ("no such session") with a
+// missing route: the former answers with its JSON envelope.
+check('a JSON 404 still proves the backend is installed', backendInstalled(404, 'application/json; charset=utf-8'))
+check('a plain 404 means the route is absent', !backendInstalled(404, 'text/html'))
+check('and a 404 without a content type is absent too', !backendInstalled(404, null))
+check('any non-404 answer proves it is installed', backendInstalled(400, null) && backendInstalled(409, 'text/plain'))
 check('an empty or unknown id resolves to no backend',
   backendById('') === undefined && backendById('nope') === undefined)
 // Master switch: locked off with no backend, the user's choice otherwise.
@@ -194,8 +201,22 @@ check('a missing block index cannot be sent to the branch backend',
   rewriteRequest('message-edit', 'session-1', { ...target, targetBlockIndex: -1 }, 'short') === undefined)
 check('a missing message id cannot be sent to the in-place backend',
   rewriteRequest('msg-edit', 'session-1', { ...target, targetMessageId: '' }, 'short') === undefined)
+const shapingCall = rewriteRequest('context-shaping', 'session-1', target, 'short')
+check('the thinking-editing backend is asked for the reasoning part only',
+  shapingCall?.path === '/api/dsh-context-shaping/edit' && shapingCall.body['part'] === 'thinking'
+  && shapingCall.body['role'] === 'assistant' && shapingCall.body['messageId'] === 'm-12'
+  && shapingCall.body['text'] === 'short',
+  JSON.stringify(shapingCall))
 check('no backend means no request at all', rewriteRequest('', 'session-1', target, 'short') === undefined)
 check('empty text is never sent', rewriteRequest('msg-edit', 'session-1', target, '') === undefined)
+
+console.log('client: activating the chosen backend again clears it')
+check('clicking another backend switches to it', nextBackend('message-edit', 'msg-edit') === 'msg-edit')
+check('clicking a backend when none is chosen selects it', nextBackend('', 'message-edit') === 'message-edit')
+// A radio input cannot fire change once checked, which is exactly why the panel
+// must model deselection itself.
+check('clicking the chosen backend clears the choice', nextBackend('message-edit', 'message-edit') === '')
+check('and clearing it locks the master switch again', masterSwitchState(nextBackend('message-edit', 'message-edit'), true).locked)
 
 console.log('render: a report from an older host (version skew)')
 const legacy = modernReport()
