@@ -1070,8 +1070,13 @@ export class ReasoningDistillEngine {
       // Each compression is waited for up to *its own* bound, measured from when it
       // was launched: one unlimited attempt must not remove the bound of a bounded
       // one, and repeated pre-steps must not each restart the clock.
+      // A gate snapshotted before its `launch` ran has no recorded bound of its own;
+      // the configured limits still bound the wait (only an explicit 0 stays
+      // unlimited), so a stalled launch cannot pin the pre-step forever.
+      const backstop = this.ruleBackstopMs()
       const waits = mine.map(async ([key, promise]) => {
-        const bound = this.waitBound.get(key)
+        const recorded = this.waitBound.get(key)
+        const bound = recorded ?? (backstop > 0 ? { timeoutMs: backstop, launchedAt: Date.now() } : undefined)
         if (bound === undefined || bound.timeoutMs === 0) {
           await promise
           return
@@ -1110,6 +1115,15 @@ export class ReasoningDistillEngine {
    * @param signal - the turn's abort signal, when the host supplied one.
    * @returns the value, or undefined when the wait was abandoned.
    */
+  private ruleBackstopMs(): number {
+    const rules = [this.config.defaultRule.get(), ...Object.values(this.config.models.get())]
+    const finite = rules.map(rule => rule.timeoutMs).filter(value => value > 0)
+    // Any rule asking for no limit keeps that meaning; otherwise the largest
+    // configured limit bounds everything, including a gate that has not launched.
+    if (rules.some(rule => rule.timeoutMs === 0) || finite.length === 0) return 0
+    return Math.max(...finite)
+  }
+
   private async untilSettled<T>(work: Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
     if (signal === undefined) return work
     if (signal.aborted) {
