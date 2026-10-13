@@ -277,6 +277,9 @@ export class ReasoningDistillEngine {
     this.blocked.delete(sessionId)
     this.applied.delete(sessionId)
     this.rawDerive.delete(sessionId)
+    for (const key of [...this.auditBroken]) {
+      if (key.startsWith(prefix)) this.auditBroken.delete(key)
+    }
     this.storageBroken.delete(sessionId)
   }
 
@@ -579,14 +582,32 @@ export class ReasoningDistillEngine {
    * @param sessionId - session that owns the entry.
    * @param entryId - entry whose audit link is broken.
    */
-  private async markAuditUndurable(sessionId: string, entryId: string): Promise<void> {
+  /**
+   * Take the audited-broken marker for a to-be-built entry, consuming it.
+   *
+   * The marker is one-shot: it exists so an entry is born marked, and the
+   * store-level write in {@link markAuditUndurable} covers entries that already
+   * exist, so nothing is lost by clearing it here.
+   * @param sessionId - session that owns the entry.
+   * @param entryId - the id the entry will be recorded under.
+   * @returns whether that entry's audit link is known broken.
+   */
+  private takeAuditBroken(sessionId: string, entryId: string): boolean {
+    return this.auditBroken.delete(`${sessionId}:${entryId}`)
+  }
+
+  private async markAuditUndurable(sessionId: string, entryId: string, origin?: number): Promise<void> {
     // Remembered as well as written: a flush can reject before the entry is even
     // inserted, and then the entry must be born marked rather than marked later.
-    this.auditBroken.add(`${sessionId}:${entryId}`)
-    const generation = this.generation.get(sessionId) ?? 0
+    // The generation that started the compression, not the one current when this
+    // late failure arrives: a reused id must not mark its successor's entry.
+    if (origin !== undefined && (this.generation.get(sessionId) ?? 0) !== origin) return
+    const key = `${sessionId}:${entryId}`
+    this.auditBroken.add(key)
+    if (this.auditBroken.size > 512) this.auditBroken.clear()
     try {
       await this.store.update(sessionId, (record) => {
-        if ((this.generation.get(sessionId) ?? 0) !== generation) return
+        if (origin !== undefined && (this.generation.get(sessionId) ?? 0) !== origin) return
         const entry = record.entries.find(item => item.id === entryId)
         if (entry !== undefined) entry.sessionMissing = true
       })
@@ -1115,7 +1136,7 @@ export class ReasoningDistillEngine {
       // reasoning stays raw and nothing is substituted, so the session keeps
       // working; the failed compression session stays for inspection, and the
       // attempt is still recorded so its spending is not invisible.
-      this.failCompressionSession(sessionId, outcome.run.error ?? 'distiller returned no text', session.id, failedId)
+      this.failCompressionSession(sessionId, outcome.run.error ?? 'distiller returned no text', session.id, failedId, generation)
       this.ctx.logger.warn(
         'reasoning-distill: gave up on %s after %dms: %s',
         target.model, outcome.run.durationMs, outcome.run.error ?? 'empty answer',
@@ -1148,7 +1169,7 @@ export class ReasoningDistillEngine {
           liveRequests: 0,
           frozenSaved: 0,
           failed: true,
-          ...sessionId === '' || !opened.durable || this.auditBroken.has(`${session.id}:${failedId}`) ? { sessionMissing: true as const } : {},
+          ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, failedId) ? { sessionMissing: true as const } : {},
         })
       })
       return
@@ -1165,7 +1186,7 @@ export class ReasoningDistillEngine {
       )
       // Settle the audit session under the id this attempt will actually be
       // recorded as: a late failure must mark that entry, not the adopted one.
-      this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, skippedId)
+      this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, skippedId, generation)
       // The distiller was paid for, so the attempt is recorded even though the
       // rewrite was not adopted: otherwise the report understates the spend and
       // hides the audit session entirely.
@@ -1197,12 +1218,12 @@ export class ReasoningDistillEngine {
           liveRequests: 0,
           frozenSaved: 0,
           skipped: true,
-          ...sessionId === '' || !opened.durable || this.auditBroken.has(`${session.id}:${skippedId}`) ? { sessionMissing: true as const } : {},
+          ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, skippedId) ? { sessionMissing: true as const } : {},
         })
       })
       return
     }
-    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, adoptedId)
+    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, adoptedId, generation)
     // A substitution moves everything from the rewritten message to the end of
     // the next request out of the cache-hit prefix and into miss pricing.
     const { bucket: prices } = priceAt(target.model, this.config.prices.get(), startedAt, this.config)
@@ -1241,7 +1262,7 @@ export class ReasoningDistillEngine {
       liveSaved: 0,
       liveRequests: 0,
       frozenSaved: 0,
-      ...sessionId === '' || !opened.durable || this.auditBroken.has(`${session.id}:${adoptedId}`) ? { sessionMissing: true as const } : {},
+      ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, adoptedId) ? { sessionMissing: true as const } : {},
     }
     await this.store.update(session.id, (record) => {
       if (stale()) return
@@ -1448,7 +1469,7 @@ export class ReasoningDistillEngine {
    * @param sessionId - compression session, or an empty string when none opened.
    * @param reason - operator-facing failure text.
    */
-  private failCompressionSession(sessionId: string, reason: string, ownerId: string, entryId: string): void {
+  private failCompressionSession(sessionId: string, reason: string, ownerId: string, entryId: string, origin: number): void {
     if (sessionId === '') return
     const session = this.ctx.sessions.get(sessionId as SessionId)
     if (session === undefined) return
@@ -1460,18 +1481,18 @@ export class ReasoningDistillEngine {
       })
       void this.ctx.sessions.flush(session).catch((error: unknown) => {
         this.ctx.logger.warn('reasoning-distill: failed-compression session %s did not persist: %o', session.id, error)
-        void this.markAuditUndurable(ownerId, entryId)
+        void this.markAuditUndurable(ownerId, entryId, origin)
       })
     } catch (error: unknown) {
       // The append itself can fail (a writer that rejects mid-stream): the audit
       // link is then no more durable than a failed flush, so say so too.
       this.ctx.logger.warn('reasoning-distill: could not settle a failed compression session: %o', error)
-      void this.markAuditUndurable(ownerId, entryId)
+      void this.markAuditUndurable(ownerId, entryId, origin)
     }
   }
 
   /** Close the compression session with the distiller's answer. */
-  private finishCompressionSession(sessionId: string, text: string, provider: string, model: string, ownerId: string, entryId: string): void {
+  private finishCompressionSession(sessionId: string, text: string, provider: string, model: string, ownerId: string, entryId: string, origin: number): void {
     if (sessionId === '') return
     const session = this.ctx.sessions.get(sessionId as SessionId)
     if (session === undefined) return
@@ -1489,11 +1510,11 @@ export class ReasoningDistillEngine {
       session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
       void this.ctx.sessions.flush(session).catch((error: unknown) => {
         this.ctx.logger.warn('reasoning-distill: audit session %s did not persist: %o', session.id, error)
-        void this.markAuditUndurable(ownerId, entryId)
+        void this.markAuditUndurable(ownerId, entryId, origin)
       })
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not settle a compression session: %o', error)
-      void this.markAuditUndurable(ownerId, entryId)
+      void this.markAuditUndurable(ownerId, entryId, origin)
     }
   }
 }
