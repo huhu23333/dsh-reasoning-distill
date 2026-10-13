@@ -117,6 +117,13 @@ export class ReasoningDistillEngine {
   private readonly abandoned = new Set<string>()
   /** Timers that would mark an attempt abandoned; cleared once it settles. */
   private readonly abandonTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  /**
+   * Branch hand-off outcomes that could not be written, keyed `sessionId:entryId`.
+   *
+   * Only the *note* is retried: re-posting the backend request would create a
+   * second branch, so the pending marker is not kept for this.
+   */
+  private readonly owedHandoffNotes = new Map<string, { entryId: string; error: string }>()
   /** Audit links known to be non-durable, keyed `sessionId:entryId`. */
   private readonly auditBroken = new Set<string>()
   /** Bumped whenever a session id is attached again; stale work checks it. */
@@ -199,6 +206,7 @@ export class ReasoningDistillEngine {
       if (signal?.aborted || this.replaced(session)) return next()
       // A stop must end the wait, not queue behind it: the host only looks at its
       // signal once this handler returns.
+      void this.flushOwedNotes(session, signal)
       if (!await this.settle(session, signal)) return next()
       // The wait is even longer than the read: check again before acting for it.
       if (this.replaced(session)) return next()
@@ -591,7 +599,7 @@ export class ReasoningDistillEngine {
         state: 'failed',
         error: 'the host has no reachable web server port, so no branch could be created',
         at: Date.now(),
-      }, generation), signal)
+      }, generation), signal).then(ok => { if (ok === false) this.oweNote(session.id, entryId, 'no reachable web server port') })
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       return false
     }
@@ -621,6 +629,7 @@ export class ReasoningDistillEngine {
         return false
       }
       const recorded = await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, generation), signal)
+      if (recorded === false) this.oweNote(session.id, entryId, 'branch created but not recorded')
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       if (!recorded) {
         // The branch exists, but nothing the panel can see points at it. Ending the
@@ -640,7 +649,8 @@ export class ReasoningDistillEngine {
       // of implying nothing happened.
       const detail = error instanceof Error ? error.message : String(error)
       const reason = `branch request did not complete (${detail}); a branch may exist that this plugin cannot name`
-      await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
+      const noted = await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
+      if (noted === false) this.oweNote(session.id, entryId, reason)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       this.ctx.logger.warn('reasoning-distill: branch failed for %s (%s); carrying on in place', session.id, reason)
       return false
@@ -687,6 +697,25 @@ export class ReasoningDistillEngine {
       })
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not mark the audit link undurable: %o', error)
+    }
+  }
+
+  /** Remember a hand-off note that could not be written, so the next pre-step retries it. */
+  private oweNote(sessionId: string, entryId: string, error: string): void {
+    this.owedHandoffNotes.set(`${sessionId}:${entryId}`, { entryId, error })
+    this.ctx.logger.warn('reasoning-distill: hand-off note for %s could not be written yet; it will be retried', entryId)
+  }
+
+  /** Retry every hand-off note still owed for a session (never the backend request). */
+  private async flushOwedNotes(session: Session, signal?: AbortSignal): Promise<void> {
+    const prefix = `${session.id}:`
+    for (const [key, note] of [...this.owedHandoffNotes]) {
+      if (!key.startsWith(prefix)) continue
+      const written = await this.untilSettled(
+        this.recordHandoff(session.id, note.entryId, { state: 'failed', error: note.error, at: Date.now() }),
+        signal,
+      )
+      if (written === true) this.owedHandoffNotes.delete(key)
     }
   }
 
