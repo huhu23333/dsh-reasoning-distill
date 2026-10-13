@@ -3,6 +3,7 @@
  * @module dsh-reasoning-distill/report
  */
 
+import { backendById } from './backends.ts'
 import { BUILTIN_HOLIDAYS, BUILTIN_PRICES, resolveRule, type Config } from './config.ts'
 import { priceAt, resolvePeakSource, whaleStatus } from './peak.ts'
 import type { SessionRecord } from './store.ts'
@@ -145,7 +146,9 @@ export function buildReport(
     config: {
       // The master switch only means something with a backend to apply the result,
       // which is the same rule the engine and the settings panel enforce.
-      enabled: config.enabled.get() && config.rewriteBackend.get() !== '',
+      // The same readiness rule the settings page and the engine use: an unknown
+      // backend id means the feature is not actually on.
+      enabled: config.enabled.get() && backendById(config.rewriteBackend.get()) !== undefined,
       rewriteBackend: config.rewriteBackend.get(),
       defaultThresholdTokens: defaultRule.thresholdTokens,
       defaultDistiller: `${defaultRule.distiller.provider}/${defaultRule.distiller.model}`,

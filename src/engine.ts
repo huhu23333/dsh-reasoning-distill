@@ -1117,10 +1117,11 @@ export class ReasoningDistillEngine {
    */
   private ruleBackstopMs(): number {
     const rules = [this.config.defaultRule.get(), ...Object.values(this.config.models.get())]
-    const finite = rules.map(rule => rule.timeoutMs).filter(value => value > 0)
+    const limits = rules.map(rule => (rule === undefined ? undefined : rule.timeoutMs)).filter((value): value is number => value !== undefined)
+    const finite = limits.filter(value => value > 0)
     // Any rule asking for no limit keeps that meaning; otherwise the largest
     // configured limit bounds everything, including a gate that has not launched.
-    if (rules.some(rule => rule.timeoutMs === 0) || finite.length === 0) return 0
+    if (limits.length === 0 || limits.some(value => value === 0)) return 0
     return Math.max(...finite)
   }
 
