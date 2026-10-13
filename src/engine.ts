@@ -115,6 +115,8 @@ export class ReasoningDistillEngine {
   private readonly waitBound = new Map<string, number>()
   /** Bumped whenever a session id is attached again; stale work checks it. */
   private readonly generation = new Map<string, number>()
+  /** The session object currently attached for an id; late events are ignored. */
+  private readonly current = new Map<string, Session>()
   /** Cached derived-index maps keyed by session id. */
   /** Session ids whose accessor this engine already wrapped. */
   private readonly wrapped = new WeakSet<object>()
@@ -175,14 +177,19 @@ export class ReasoningDistillEngine {
       // `attach` preloads the sidecar fire-and-forget, so on a resumed session
       // the first request could otherwise be assembled from raw reasoning while
       // the read is still in flight. Single-flight makes this join that read.
-      const signal = payload.signal
-      await this.ensureLoaded(payload.agent.session)
+      // The host passes the turn's signal, but its event declaration does not
+      // always carry it, so read it defensively rather than trusting the type.
+      const signal = (payload as { signal?: AbortSignal }).signal
+      // A stalled sidecar read must not outlive a stop either: the host only looks
+      // at its signal once this handler returns.
+      await this.untilAborted(this.ensureLoaded(payload.agent.session), signal)
+      if (signal?.aborted) return next()
       // A stop must end the wait, not queue behind it: the host only looks at its
       // signal once this handler returns.
       if (!await this.settle(payload.agent.session, signal)) return next()
       // A successful compression with a branch backend ends this turn *before* any
       // request goes out: the conversation continues on the branch instead.
-      if (signal?.aborted !== true && await this.handOffToBranch(payload.agent.session, signal)) return { kind: 'reject' }
+      if (!signal?.aborted && await this.handOffToBranch(payload.agent.session, signal)) return { kind: 'reject' }
       // The loop assembles the request right after this returns; arming the
       // session here is what lets the wrapper tell that derivation apart from a
       // viewer's.
@@ -331,6 +338,7 @@ export class ReasoningDistillEngine {
     // one's record or block its requests.
     this.generation.set(session.id, (this.generation.get(session.id) ?? 0) + 1)
     this.releaseSession(session.id)
+    this.current.set(session.id, session)
     const original = session.deriveMessages.bind(session)
     const engine = this
     this.rawDerive.set(session.id, original)
@@ -490,6 +498,7 @@ export class ReasoningDistillEngine {
    * @returns true when the turn should be rejected in favour of the branch.
    */
   private async handOffToBranch(session: Session, signal?: AbortSignal): Promise<boolean> {
+    const generation = this.generation.get(session.id) ?? 0
     const entryId = this.pendingBranch.get(session.id)
     if (entryId === undefined) return false
     const backend = backendById(this.config.rewriteBackend.get())
@@ -527,12 +536,12 @@ export class ReasoningDistillEngine {
       const created = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       if (!response.ok || created === '') {
         const reason = typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`
-        await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() })
+        await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation)
         this.pendingBranch.delete(session.id)
         this.ctx.logger.warn('reasoning-distill: branch refused for %s (%s); carrying on in place', session.id, reason)
         return false
       }
-      await this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() })
+      await this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, generation)
       this.pendingBranch.delete(session.id)
       this.ctx.logger.info('reasoning-distill: handed %s over to branch %s', session.id, created)
       return true
@@ -559,7 +568,9 @@ export class ReasoningDistillEngine {
     sessionId: string,
     entryId: string,
     outcome: { state: 'created' | 'failed'; branchId?: string; error?: string; at: number },
+    generation?: number,
   ): Promise<void> {
+    if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return
     try {
       await this.store.update(sessionId, (record) => {
         const entry = record.entries.find(item => item.id === entryId)
@@ -640,6 +651,9 @@ export class ReasoningDistillEngine {
     event: { type: string; seq: number; time: number; data: unknown },
   ): void {
     if (this.ownSessions.has(session.id)) return
+    // A disposed session object can still emit queued events; they belong to the
+    // previous generation and must not stage work or move state for its successor.
+    if (this.current.get(session.id) !== session) return
     // Any event can change the surface (append, prune, projection, message
     // edit), so the position index is only valid until the next event.
     switch (event.type) {
@@ -674,7 +688,12 @@ export class ReasoningDistillEngine {
         // a distillation whose result could not be stored must not be bought. The
         // gate is registered as in-flight so a following pre-step still waits for
         // it rather than replaying raw reasoning once.
+        const atStep = this.generation.get(session.id) ?? 0
         const gate = this.ensureLoaded(session).then(async () => {
+          // The read is asynchronous: the session may have been disposed and the id
+          // reused while it was running, in which case this gate belongs to nobody
+          // and must neither launch nor touch the successor's state.
+          if ((this.generation.get(session.id) ?? 0) !== atStep) return
           if (this.storageBroken.has(session.id)) {
             this.pending.delete(key)
             if (this.inFlight.get(key) === gate) this.inFlight.delete(key)
@@ -689,7 +708,7 @@ export class ReasoningDistillEngine {
         }).catch((error: unknown) => {
           this.ctx.logger.warn('reasoning-distill: step end gate failed: %o', error)
         })
-        this.inFlight.set(key, gate)
+        if ((this.generation.get(session.id) ?? 0) === atStep) this.inFlight.set(key, gate)
         return
       }
       case 'compaction/end':
@@ -758,6 +777,7 @@ export class ReasoningDistillEngine {
 
   /** Start the distillation staged for one finished step. */
   private launch(session: Session, event: { type: string; data: unknown }): void {
+    if (this.current.get(session.id) !== session) return
     const data = event.data as { turn?: number; step?: number }
     const key = this.pendingKey(session.id, data.turn ?? 0, data.step ?? 0)
     const target = this.pending.get(key)
@@ -780,11 +800,16 @@ export class ReasoningDistillEngine {
     const promise = this.compress(session, target).catch((error: unknown) => {
       this.ctx.logger.warn('reasoning-distill: compression failed: %o', error)
     })
+    const generation = this.generation.get(session.id) ?? 0
+    const record = this.running.get(key)
     this.inFlight.set(key, promise)
     void promise.finally(() => {
-      this.inFlight.delete(key)
-      this.running.delete(key)
-      this.waitBound.delete(key)
+      // Only retire what this launch installed: a replacement session (a new
+      // generation) can have started its own work under the same turn/step key.
+      if (this.generation.get(session.id) !== generation) return
+      if (this.inFlight.get(key) === promise) this.inFlight.delete(key)
+      if (this.running.get(key) === record) this.running.delete(key)
+      if (this.waitBound.get(key) !== undefined) this.waitBound.delete(key)
     })
   }
 
@@ -821,7 +846,7 @@ export class ReasoningDistillEngine {
         })
         await this.untilAborted(Promise.race([waits, deadline]), signal)
       }
-      return signal?.aborted !== true
+      return signal === undefined || !signal.aborted
     } finally {
       this.blocked.delete(sessionId)
     }
@@ -1024,7 +1049,8 @@ export class ReasoningDistillEngine {
       )
       if (stale()) return
       await this.store.update(session.id, (record) => {
-        record.entries = record.entries.filter(item => item.targetSeq !== target.seq)
+      if (stale()) return
+      record.entries = record.entries.filter(item => item.targetSeq !== target.seq)
         record.entries.push({
           id: `${target.seq}-${startedAt}-failed`,
           targetSeq: target.seq,
@@ -1068,8 +1094,10 @@ export class ReasoningDistillEngine {
       // The distiller was paid for, so the attempt is recorded even though the
       // rewrite was not adopted: otherwise the report understates the spend and
       // hides the audit session entirely.
+      if (stale()) return
       await this.store.update(session.id, (record) => {
-        record.entries = record.entries.filter(item => item.targetSeq !== target.seq)
+      if (stale()) return
+      record.entries = record.entries.filter(item => item.targetSeq !== target.seq)
         record.entries.push({
           id: `${target.seq}-${startedAt}-skipped`,
           targetSeq: target.seq,
@@ -1140,6 +1168,7 @@ export class ReasoningDistillEngine {
       ...sessionId === '' ? { sessionMissing: true as const } : {},
     }
     await this.store.update(session.id, (record) => {
+      if (stale()) return
       record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq)
       record.entries.push(entry)
     })

@@ -2123,6 +2123,105 @@ check('and the disposed generation does not hand a rewrite to the successor',
   after43.entries.every(entry => entry.targetSeq !== oldSeq) || after43.entries.length === 0,
   JSON.stringify({ oldSeq, entries: after43.entries.map(entry => entry.targetSeq) }))
 
+console.log('scenario 43: a stalled record read, and a replacement that reuses the turn key')
+// (1) The read before the wait must also honour a stop.
+handlers.clear()
+const stalled = new SidecarStore()
+// A store whose read never settles stands in for a hung disk or a lock.
+Object.defineProperty(stalled, 'load', { value: () => new Promise(() => undefined) })
+Object.defineProperty(stalled, 'peek', { value: () => undefined })
+const engine43b = new ReasoningDistillEngine({ ...ctx, llm: slowLlm } as never, cfg42 as never, stalled as never)
+engine43b.start()
+const s43 = new FakeSession('session-stalled-43')
+sessions.set(s43.id, s43)
+await fire('session/created', s43)
+let readStopDone = false
+const readStop = new AbortController()
+const pending43 = (async () => {
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    await fn({ agent: { session: s43 }, signal: readStop.signal }, async () => ({ kind: 'enter', messages: [] }))
+  }
+  readStopDone = true
+})()
+await new Promise(resolve => setTimeout(resolve, 60))
+check('a stalled read holds the pre-step', !readStopDone)
+const readStoppedAt = Date.now()
+readStop.abort()
+await Promise.race([pending43, new Promise(resolve => setTimeout(resolve, 300))])
+check('and a stop releases it too', readStopDone && Date.now() - readStoppedAt < 250, `${Date.now() - readStoppedAt}ms`)
+
+// (2) A disposed generation finishing later must not retire the successor's gate.
+handlers.clear()
+const store43c = new SidecarStore()
+const engine43c = new ReasoningDistillEngine({ ...ctx, llm: slowLlm } as never, cfg42 as never, store43c)
+engine43c.start()
+const old43 = new FakeSession('session-key-reuse-43')
+sessions.set(old43.id, old43)
+await fire('session/created', old43)
+await runStep40(engine43c, old43, '43old')
+// Same id, same turn/step: the successor installs its own gate under the same key.
+await fire('session/disposed', old43)
+const new43 = new FakeSession('session-key-reuse-43')
+sessions.set(new43.id, new43)
+await fire('session/created', new43)
+await runStep40(engine43c, new43, '43new')
+// Long enough for the old generation's promise to settle and run its finalizer.
+await new Promise(resolve => setTimeout(resolve, 120))
+let successorStillWaits = false
+const successorProbe = (async () => {
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    await fn({ agent: { session: new43 } }, async () => ({ kind: 'enter', messages: [] }))
+  }
+  successorStillWaits = true
+})()
+await new Promise(resolve => setTimeout(resolve, 60))
+check('the successor still waits for its own work after the old generation settles', !successorStillWaits)
+await successorProbe
+
+console.log('scenario 44: late events from a disposed session object are ignored')
+handlers.clear()
+const store44 = new SidecarStore()
+const engine44 = new ReasoningDistillEngine({ ...ctx, llm: slowLlm } as never, cfg42 as never, store44)
+engine44.start()
+const before44 = new FakeSession('session-late-44')
+sessions.set(before44.id, before44)
+await fire('session/created', before44)
+// Stage and fire a step, but leave the slow compression running.
+before44.append('user/message', { id: 'u44', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const lateSeq44 = before44.append('assistant/message', {
+  turn: 1, step: 1,
+  message: { id: 'a44', role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+}).seq
+await fire('session/event', before44, before44.eventAt(lateSeq44))
+// Dispose it and reuse the id for a fresh object.
+await fire('session/disposed', before44)
+const after44 = new FakeSession('session-late-44')
+sessions.set(after44.id, after44)
+await fire('session/created', after44)
+// The disposed object now emits the events it had queued: a step boundary and an
+// assistant message, both for the same turn/step the successor will use.
+const lateEnd = before44.append('step/end', { turn: 1, step: 1 })
+await fire('session/event', before44, before44.eventAt(lateEnd.seq))
+const lateAssistant44 = before44.append('assistant/message', {
+  turn: 1, step: 1,
+  message: { id: 'late-a44', role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'late' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+})
+await fire('session/event', before44, before44.eventAt(lateAssistant44.seq))
+// The successor's pre-step must not be held by anything the late events launched.
+let lateDone = false
+const lateProbe = (async () => {
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    await fn({ agent: { session: after44 } }, async () => ({ kind: 'enter', messages: [] }))
+  }
+  lateDone = true
+})()
+await Promise.race([lateProbe, new Promise(resolve => setTimeout(resolve, 150))])
+check('late events from a disposed object neither block nor stage for the successor', lateDone)
+check('and nothing was recorded for the successor', (await store44.load(after44.id)).entries.length === 0,
+  JSON.stringify((await store44.load(after44.id)).entries.length))
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1
