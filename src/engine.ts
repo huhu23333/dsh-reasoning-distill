@@ -229,8 +229,14 @@ export class ReasoningDistillEngine {
    * @param session - session entering a pre-step boundary.
    */
   private async ensureLoaded(session: Session): Promise<void> {
+    // The read is awaited, so its outcome belongs to the generation that asked for
+    // it: a stale result must neither mark a successor's storage broken nor clear
+    // a real failure and let it spend money on an unreadable record.
+    const generation = this.generation.get(session.id) ?? 0
+    const stale = (): boolean => this.replaced(session) || (this.generation.get(session.id) ?? 0) !== generation
     try {
       await this.store.load(session.id)
+      if (stale()) return
       this.storageBroken.delete(session.id)
     } catch (error: unknown) {
       // A sidecar that cannot be read disables the feature for this session: it
@@ -238,6 +244,7 @@ export class ReasoningDistillEngine {
       // not be recorded — it must not spend money on a distillation either.
       // Every pre-step retries the read, so this clears itself once the record
       // is readable again.
+      if (stale()) return
       if (!this.storageBroken.has(session.id)) {
         this.ctx.logger.warn('reasoning-distill: leaving %s undistilled while its record is unreadable: %o', session.id, error)
       }
@@ -598,12 +605,12 @@ export class ReasoningDistillEngine {
       const created = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       if (!response.ok || created === '') {
         const reason = typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`
-        await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation)
+        await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
         if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
         this.ctx.logger.warn('reasoning-distill: branch refused for %s (%s); carrying on in place', session.id, reason)
         return false
       }
-      const recorded = await this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, generation)
+      const recorded = await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, generation), signal)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       if (!recorded) {
         // The branch exists, but nothing the panel can see points at it. Ending the
@@ -623,7 +630,7 @@ export class ReasoningDistillEngine {
       // of implying nothing happened.
       const detail = error instanceof Error ? error.message : String(error)
       const reason = `branch request did not complete (${detail}); a branch may exist that this plugin cannot name`
-      await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation)
+      await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       this.ctx.logger.warn('reasoning-distill: branch failed for %s (%s); carrying on in place', session.id, reason)
       return false
@@ -1016,6 +1023,35 @@ export class ReasoningDistillEngine {
       // already have published its own.
       if (this.blocked.get(sessionId)?.since === startedAt) this.blocked.delete(sessionId)
     }
+  }
+
+  /**
+   * Await one promise unless the signal aborts first, then leave it running.
+   *
+   * Used for hand-off bookkeeping: a stop must return the pre-step immediately,
+   * but the write itself may still complete in the background.
+   * @param work - the promise to observe.
+   * @param signal - the turn's abort signal, when the host supplied one.
+   * @returns the value, or undefined when the wait was abandoned.
+   */
+  private async untilSettled<T>(work: Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
+    if (signal === undefined) return work
+    if (signal.aborted) {
+      void work.catch(() => undefined)
+      return undefined
+    }
+    return new Promise<T | undefined>(resolve => {
+      const done = (): void => {
+        signal.removeEventListener('abort', done)
+        resolve(undefined)
+        void work.catch(() => undefined)
+      }
+      signal.addEventListener('abort', done, { once: true })
+      void work.then(
+        value => { signal.removeEventListener('abort', done); resolve(value) },
+        () => { signal.removeEventListener('abort', done); resolve(undefined) },
+      )
+    })
   }
 
   /**
