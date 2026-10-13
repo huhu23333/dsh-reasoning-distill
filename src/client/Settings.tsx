@@ -169,6 +169,8 @@ function RuleFields({ rule, catalog, onChange, t, isModel = false }: {
       <Count label={t('settings.threshold')} value={rule.thresholdTokens} disabled={idle} onChange={thresholdTokens => change({ thresholdTokens })} />
       <Count label={t('settings.minimum')} value={rule.minSavedTokens} disabled={idle} onChange={minSavedTokens => change({ minSavedTokens })} />
       <Count label={t('settings.timeout')} value={rule.timeoutMs} disabled={idle} onChange={timeoutMs => change({ timeoutMs })} />
+      <Count label={t('settings.maxInput')} value={rule.maxInputChars} disabled={idle} onChange={maxInputChars => change({ maxInputChars })} />
+      <Count label={t('settings.maxOutput')} value={rule.maxOutputChars} disabled={idle} onChange={maxOutputChars => change({ maxOutputChars })} />
     </div>
     <p className={css.note}>{t('settings.timeoutHint')}</p>
     <RouteFields rule={rule} catalog={catalog} onChange={onChange} t={t} disabled={idle} />

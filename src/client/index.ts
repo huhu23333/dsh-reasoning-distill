@@ -6,7 +6,6 @@ import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import { ReasoningDistillSettings } from './Settings.tsx'
 import { CompressionActivity } from './ActivityChip.tsx'
-import { CompressionSessionsAction } from './SessionsAction.tsx'
 import { ReasoningDistillView } from './View.tsx'
 import { en, NS, zh } from './locales.ts'
 
@@ -44,17 +43,6 @@ export function apply(ctx: Context): void {
   }, ReasoningDistillSettings))
   // Free single seat beside the submit button: the one place a user already
   // looks when a request seems stuck, so the wait can name itself there.
-  ctx.slots.inject('conversation.input.activity', () => ctx.slots.register({
-    name: 'conversation.input.activity', id: 'reasoning-distill-activity', locale: NS,
-    inject: (sessionId) => ({ sessionId }),
-  }, CompressionActivity))
-  // Parallel to the shipped subagent catalog: its own seat in the same header
-  // action row, listing this session's one-shot compression sessions.
-  ctx.slots.inject('conversation.session.header.actions', () => ctx.slots.register({
-    name: 'conversation.session.header.actions', id: 'reasoning-distill-sessions',
-    order: -20, locale: NS,
-    inject: (sessionId) => ({ sessionId, openSession: (id: string) => ctx.uiWorkspace.openSession(id as SessionTarget) }),
-  }, CompressionSessionsAction))
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view', id: 'reasoning-distill', order: 30,
     locale: NS, label: () => t('view.tab'),

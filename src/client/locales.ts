@@ -1,6 +1,8 @@
 export const NS = 'reasoningDistill'
 
 export const zh = {
+  'view.sessions': '压缩会话', 'view.sessionExpired': '会话已随上次运行结束（内容见下方明细）',
+  'settings.maxInput': '背景块长度上限（字符）', 'settings.maxOutput': '蒸馏结果长度上限（字符）',
   'settings.branchTimeout': '分支超时（毫秒）', 'settings.branchTimeoutHint': '宿主等待分支型后端建好分支的时限；超时就按“无事发生”继续原会话。仅分支型后端使用，0 = 永不超时。', 'view.branchCreated': '已创建分支', 'view.branchKept': '已按原会话继续',
   'settings.backend': '助手消息改写后端（单选）', 'settings.backendHint': '只列出已安装的后端；未选的置灰。再次点击已选中的后端可取消选择。没有选择后端时无法把改写写回会话历史，因此「启用思考压缩」会强制关闭并锁定。', 'settings.backendBranch': '另开分支会话', 'settings.backendInPlace': '就地改写模型可见历史', 'settings.backendInstalled': '已安装', 'settings.backendMissing': '未安装', 'settings.masterLocked': '未选择改写后端：总开关已锁定为关闭。', 'view.branchFailed': '创建分支失败',
   'view.avoided': '已避免的开销',
@@ -60,7 +62,7 @@ export const zh = {
   'view.lifetime': '（历史累计）', 'view.savedTotal': '历史累计节省', 'view.net': '净收益',
   'view.stockNote': '当前生效的改写让【这一次请求】少带的估算 token（不是跨请求累计）：改写被整段压缩淘汰时相应减少、全部淘汰归零。金额按命中价估算。',
   'view.resetNote': '改写被整段压缩淘汰时「当前单次请求减量」相应减少；「历史累计节省」永不重置。',
-  'view.entries': '触发记录', 'view.sessions': '压缩会话',
+  'view.entries': '触发记录',
   'view.turn': '轮', 'view.step': '步', 'view.original': '原始思考',
   'view.result': '压缩结果', 'view.request': '压缩原文',
   'view.input': '输入', 'view.cache': '缓存命中', 'view.output': '输出', 'view.model': '蒸馏路由',
@@ -68,12 +70,14 @@ export const zh = {
   'view.tokens': '估算 token', 'view.chars': '字符', 'view.session': '会话 ID',
   'view.open': '打开会话', 'view.copy': '复制会话 ID', 'view.copied': '已复制',
   'view.noSession': '没有会话 ID', 'view.failedRun': '压缩失败',
-  'view.abandoned': '已放弃', 'view.skipped': '未采用', 'view.skippedNote': '蒸馏跑完了（开销已计入），但节省低于该模型的最低节省阈值，因此没有替换——原始思考保持不变。', 'view.estimated': '估算', 'view.sessionMissing': '未能创建审计会话（替换仍已生效）', 'view.sessionExpired': '会话已随上次运行结束（内容见下方明细）',
+  'view.abandoned': '已放弃', 'view.skipped': '未采用', 'view.skippedNote': '蒸馏跑完了（开销已计入），但节省低于该模型的最低节省阈值，因此没有替换——原始思考保持不变。', 'view.estimated': '估算', 'view.sessionMissing': '未能创建审计会话（替换仍已生效）',
   'view.peak': '峰时', 'view.off': '谷时', 'view.estimate': '约',
   'view.notAvailable': '不可用', 'view.historical': '（历史累计，含已被前文压缩淘汰的）',
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
+  'view.sessions': 'Distillation sessions', 'view.sessionExpired': 'session ended with the previous run (full text below)',
+  'settings.maxInput': 'Context block limit (chars)', 'settings.maxOutput': 'Distilled result limit (chars)',
   'settings.branchTimeout': 'Branch timeout (ms)', 'settings.branchTimeoutHint': 'How long the host waits for a branch backend before carrying on in the original conversation; only used by branch-type backends. 0 waits forever.', 'view.branchCreated': 'Branch created', 'view.branchKept': 'the original conversation carried on',
   'settings.backend': 'Assistant-rewrite backend (one)', 'settings.backendHint': 'Only installed backends are listed; the rest are greyed out. Clicking the selected one again clears the choice. With no backend nothing can write a rewrite back into the history, so the master switch is forced off and locked.', 'settings.backendBranch': 'opens a branch session', 'settings.backendInPlace': 'rewrites the model-visible history in place', 'settings.backendInstalled': 'installed', 'settings.backendMissing': 'not installed', 'settings.masterLocked': 'No rewrite backend selected: the master switch is locked off.', 'view.branchFailed': 'Branching failed',
   'view.avoided': 'Spending avoided so far',
@@ -133,7 +137,7 @@ export const en: Record<keyof typeof zh, string> = {
   'view.lifetime': '(lifetime)', 'view.savedTotal': 'Lifetime savings', 'view.net': 'Net benefit',
   'view.stockNote': 'Estimated tokens THIS request carries less thanks to the rewrites in force right now — a stock, not a running total. It shrinks as compaction retires their targets and returns to zero when none remain; money is estimated at the hit rate.',
   'view.resetNote': 'A rewrite retired by compaction reduces the per-request figure; lifetime savings never reset.',
-  'view.entries': 'Triggers', 'view.sessions': 'Distillation sessions',
+  'view.entries': 'Triggers',
   'view.turn': 'Turn', 'view.step': 'Step', 'view.original': 'Original reasoning',
   'view.result': 'Distilled result', 'view.request': 'Original distillation request',
   'view.input': 'Input', 'view.cache': 'Cache hits', 'view.output': 'Output', 'view.model': 'Distiller route',
@@ -141,7 +145,7 @@ export const en: Record<keyof typeof zh, string> = {
   'view.tokens': 'estimated tokens', 'view.chars': 'characters', 'view.session': 'Session ID',
   'view.open': 'Open session', 'view.copy': 'Copy session ID', 'view.copied': 'Copied',
   'view.noSession': 'No session ID', 'view.failedRun': 'Distillation failed',
-  'view.abandoned': 'Abandoned', 'view.skipped': 'Not adopted', 'view.skippedNote': 'The distillation completed (its cost is counted) but saved less than this model’s minimum, so nothing was replaced and the original reasoning stands.', 'view.estimated': 'estimated', 'view.sessionMissing': 'no audit session could be created (the rewrite still applied)', 'view.sessionExpired': 'session ended with the previous run (full text below)',
+  'view.abandoned': 'Abandoned', 'view.skipped': 'Not adopted', 'view.skippedNote': 'The distillation completed (its cost is counted) but saved less than this model’s minimum, so nothing was replaced and the original reasoning stands.', 'view.estimated': 'estimated', 'view.sessionMissing': 'no audit session could be created (the rewrite still applied)',
   'view.peak': 'Peak', 'view.off': 'Off-peak', 'view.estimate': 'approx.',
   'view.notAvailable': 'Unavailable', 'view.historical': '(lifetime, rewrites retired by earlier compaction included)',
 }

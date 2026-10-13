@@ -151,6 +151,8 @@ function makeConfig(overrides: Record<string, unknown> = {}): never {
       includeToolResults: true,
       includeFinalTurns: true,
       timeoutMs: 5000,
+      maxInputChars: 100000,
+      maxOutputChars: 0,
       peakPricing: false,
       distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
     }) },

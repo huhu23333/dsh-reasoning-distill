@@ -11,9 +11,36 @@
 import type { DistillRoute, ModelRule } from './config.ts'
 
 /** The slice of configuration that rule resolution reads. */
+/**
+ * Fill the block-size limits of one stored rule that predates them.
+ *
+ * They used to live at the top level, so a document saved before the move still
+ * carries the values there; a layer that never mentions them must inherit those
+ * rather than silently jump to the built-in default.
+ * @param rule - one stored rule layer.
+ * @param legacy - the retired top-level limits, when the document still has them.
+ * @returns the layer with the limits resolved.
+ */
+export function withLimitDefaults(
+  rule: RuleOverride,
+  legacy: { maxInputChars?: number; maxOutputChars?: number },
+): RuleOverride {
+  const resolved: RuleOverride = { ...rule }
+  if (!Object.hasOwn(rule, 'maxInputChars') && legacy.maxInputChars !== undefined) {
+    resolved.maxInputChars = legacy.maxInputChars
+  }
+  if (!Object.hasOwn(rule, 'maxOutputChars') && legacy.maxOutputChars !== undefined) {
+    resolved.maxOutputChars = legacy.maxOutputChars
+  }
+  return resolved
+}
+
 export interface RuleSource {
   defaultRule: { get(): RuleOverride | undefined }
   models: { get(): Record<string, RuleOverride> | undefined }
+  /** Retired top-level limits; present only in documents saved before the move. */
+  maxInputChars?: { get(): number | undefined }
+  maxOutputChars?: { get(): number | undefined }
 }
 
 /** Sparse stored form of a {@link ModelRule}: unset fields keep inheriting. */
@@ -91,6 +118,7 @@ export const FALLBACK_RULE: ModelRule = {
   oneShotSubagents: false, oneShotMaxDepth: 0,
   thresholdTokens: 4000, minSavedTokens: 600,
   includeToolResults: true, includeFinalTurns: true, timeoutMs: 60000,
+  maxInputChars: 120000, maxOutputChars: 0,
   distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
 }
 

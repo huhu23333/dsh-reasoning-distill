@@ -864,8 +864,8 @@ export class ReasoningDistillEngine {
    */
   private async compress(session: Session, target: PendingTarget): Promise<void> {
     const reasoning = reasoningOf(target.content)
-    const maxInput = this.config.maxInputChars.get()
-    const input = reasoning.length > maxInput ? reasoning.slice(0, maxInput) : reasoning
+    const maxInput = target.rule.maxInputChars
+    const input = maxInput > 0 && reasoning.length > maxInput ? reasoning.slice(0, maxInput) : reasoning
     const userText = this.buildRequestText(session, target, input)
     const prompt = this.config.prompt.get() || DEFAULT_PROMPT
     const startedAt = Date.now()
@@ -921,7 +921,7 @@ export class ReasoningDistillEngine {
       })
       return
     }
-    const ceiling = this.config.maxOutputChars.get()
+    const ceiling = target.rule.maxOutputChars
     const distilled = ceiling > 0 && outcome.text.length > ceiling ? outcome.text.slice(0, ceiling) : outcome.text
     this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model)
     const originalTokens = estimateChars(reasoning.length)
@@ -1048,7 +1048,7 @@ export class ReasoningDistillEngine {
           // Tool results can be far larger than the reasoning they justify; bound
           // this block on its own so one huge output cannot dominate the input.
           const joined = results.join('\n\n')
-          const cap = this.config.maxInputChars.get()
+          const cap = target.rule.maxInputChars
           parts.push('## Tool results (context only, never copy)')
           parts.push(cap > 0 && joined.length > cap ? joined.slice(0, cap) : joined)
         }

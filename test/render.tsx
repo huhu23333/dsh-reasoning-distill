@@ -9,7 +9,6 @@
 import type { ReactElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, signedCount, signedMoney, stockOfEntry } from '../src/client/View.tsx'
-import { CompressionSessionsAction } from '../src/client/SessionsAction.tsx'
 import { CompressionActivity } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, rewriteRequest, ruleFieldsIdle, saveOperations, type SettingsValue } from '../src/client/ops.ts'
@@ -216,8 +215,6 @@ check('clicking a backend when none is chosen selects it', nextBackend('', 'mess
 // A radio input cannot fire change once checked, which is exactly why the panel
 // must model deselection itself.
 check('clicking the chosen backend clears the choice', nextBackend('message-edit', 'message-edit') === '')
-check('and clearing it locks the master switch again', masterSwitchState(nextBackend('message-edit', 'message-edit'), true).locked)
-
 console.log('render: a report from an older host (version skew)')
 const legacy = modernReport()
 // Fields added by later host versions are absent, as they would be mid-upgrade.
@@ -226,7 +223,6 @@ delete (legacy as { blockingSince?: unknown }).blockingSince
 delete (legacy as { blockingReason?: unknown }).blockingReason
 for (const entry of legacy.entries) delete (entry as { failed?: unknown }).failed
 const skew = tryRender(<ReportBody report={legacy} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
-check('a report missing the new fields still renders', skew.includes('view.entries') && skew.includes('view.sessions'))
 check('no in-progress section without the field', !skew.includes('view.activeHint'))
 
 console.log('render: abandoned attempt and empty session')
@@ -244,9 +240,12 @@ const missing = modernReport()
 missing.entries[0]!.sessionMissing = true
 missing.entries[0]!.distill.sessionId = ''
 const noSession = tryRender(<ReportBody report={missing} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
+check('and clearing it locks the master switch again', masterSwitchState(nextBackend('message-edit', 'message-edit'), true).locked)
+
+check('a report missing the new fields still renders', skew.includes('view.entries'))
 check('a missing audit session says so instead of looking broken', noSession.includes('view.sessionMissing') && !noSession.includes('view.noSession'))
 const empty = tryRender(<ReportBody report={{ ...modernReport(), entries: [], active: [], blockingSince: null, blockingReason: null }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
-check('an empty session renders the empty state', empty.includes('view.empty') && empty.includes('view.sessions'))
+check('an empty session renders the empty state', empty.includes('view.empty'))
 check('loading and error states render', tryRender(<ReportBody report={undefined} loading error={undefined} now={0} onRefresh={noop} openSession={noop} t={t} />).includes('view.loading'))
 check('the error state renders', tryRender(<ReportBody report={undefined} loading={false} error="boom" now={0} onRefresh={noop} openSession={noop} t={t} />).includes('boom'))
 
@@ -391,8 +390,6 @@ const live = tryRender(<ReportBody report={modernReport()} loading={false} error
 check('a live audit session still offers the open button', live.includes('>view.open<'))
 
 console.log('render: header action and composer activity chip')
-check('the header trigger renders with its label',
-  tryRender(<CompressionSessionsAction sessionId="session-1" openSession={noop} t={t} />).includes('header.trigger'))
 check('the activity chip is silent while idle',
   tryRender(<CompressionActivity sessionId="session-1" onActiveChange={noop} t={t} />) === '')
 

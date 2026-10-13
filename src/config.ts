@@ -7,7 +7,7 @@
 import type { Volatile } from '@deepseek-ai/cosmokit'
 import z from '@deepseek-ai/schemastery'
 
-import { legacyOneShotSwitch, mergeRule, withKindDefaults, type RuleOverride, type RuleSource } from './rule.ts'
+import { legacyOneShotSwitch, mergeRule, withKindDefaults, withLimitDefaults, type RuleOverride, type RuleSource } from './rule.ts'
 
 /** One API price bucket, in currency units per million tokens. */
 export interface PriceBucket {
@@ -74,6 +74,10 @@ export interface ModelRule {
   includeToolResults: boolean
   /** Distill the reasoning of steps that requested no tool call (final answers). */
   includeFinalTurns: boolean
+  /** Longest single context block (a tool result, say) handed to the distiller; 0 = no bound. */
+  maxInputChars: number
+  /** Longest distillation result accepted; 0 = no bound. */
+  maxOutputChars: number
   distiller: DistillRoute
   /**
    * One value for both sides of the wait: the distillation must finish within
@@ -140,6 +144,8 @@ const ModelRuleFields = {
   includeToolResults: z.boolean(),
   includeFinalTurns: z.boolean(),
   timeoutMs: z.number(),
+  maxInputChars: z.number(),
+  maxOutputChars: z.number(),
   distiller: DistillRouteSchema,
 }
 
@@ -166,6 +172,8 @@ export const DEFAULT_RULE: ModelRule = {
   includeToolResults: true,
   includeFinalTurns: true,
   timeoutMs: 60000,
+  maxInputChars: 120000,
+  maxOutputChars: 0,
   distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
 }
 
@@ -262,9 +270,13 @@ export { withKindDefaults } from './rule.ts'
 
 export function resolveRule(model: string, config: RuleSource): ModelRule {
   const legacy = legacyOneShotSwitch(config)
+  const limits = {
+    ...config.maxInputChars?.get() === undefined ? {} : { maxInputChars: config.maxInputChars.get() as number },
+    ...config.maxOutputChars?.get() === undefined ? {} : { maxOutputChars: config.maxOutputChars.get() as number },
+  }
   return mergeRule(
     DEFAULT_RULE,
-    withKindDefaults(config.defaultRule.get() ?? {}, legacy),
-    withKindDefaults(config.models.get()?.[model] ?? {}, legacy),
+    withLimitDefaults(withKindDefaults(config.defaultRule.get() ?? {}, legacy), limits),
+    withLimitDefaults(withKindDefaults(config.models.get()?.[model] ?? {}, legacy), limits),
   )
 }
