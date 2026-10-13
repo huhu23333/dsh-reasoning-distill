@@ -182,6 +182,21 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   // Entries whose rewrite request is still open: the report polls every few
   // seconds, and a slow backend must not be asked twice for the same entry.
   const applyingPending = useRef(new Set<string>())
+  // Attempts whose backend call already succeeded but whose hand-off settle did
+  // not: the panel must retry *only* the settle, never the backend request.
+  const settlePending = useRef(new Set<string>())
+
+  const settleHandoff = (current: SessionReport, entryId: string, error?: string): Promise<boolean> => fetch(HANDOFF_ROUTE, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+    sessionId: current.sessionId,
+      cancel: false,
+    entryId,
+    generation: current.generation,
+      ...error === undefined ? {} : { error },
+    }),
+  }).then(response => response.ok).catch(() => false)
   useEffect(() => {
     const current = cache[sessionId]?.report
     if (current === undefined) return
@@ -194,8 +209,21 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       return
     }
     const pending = current.pendingBranch
+    if (pending == null) return
     const attemptKey = `${current.sessionId}:${pending}`
     if (appliedPending.current.has(attemptKey) || applyingPending.current.has(attemptKey)) return
+    if (settlePending.current.has(attemptKey)) {
+      // The rewrite is already in the history; only the host's pending flag is left.
+      applyingPending.current.add(attemptKey)
+      void settleHandoff(current, pending).then(settled => {
+        applyingPending.current.delete(attemptKey)
+        if (settled) {
+          settlePending.current.delete(attemptKey)
+          appliedPending.current.add(attemptKey)
+        }
+      })
+      return
+    }
     const entry = current.entries.find(item => item.id === pending)
     if (entry === undefined) return
     // The engine caps the answer at maxOutputChars and replays that stored text;
@@ -204,17 +232,7 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     const request = rewriteRequest(current.config.rewriteBackend, current.sessionId, entry, entry.distilledText)
     if (request === undefined) return
     /** Tell the host how the hand-off went; in-place keeps the turn going. */
-    const settle = (error?: string): Promise<void> => fetch(HANDOFF_ROUTE, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        sessionId: current.sessionId,
-        cancel: false,
-        entryId: pending,
-        generation: current.generation,
-        ...error === undefined ? {} : { error },
-      }),
-    }).then(() => undefined).catch(() => undefined)
+
     applyingPending.current.add(attemptKey)
     void fetch(request.path, {
       method: 'POST',
@@ -226,13 +244,19 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       if (!outcome.done) {
         // A backend that refused must not look like a completed hand-off: record
         // why on the entry so the panel shows it.
-        await settle(outcome.error ?? `HTTP ${response.status}`)
+        await settleHandoff(current, pending, outcome.error ?? `HTTP ${response.status}`)
         return
       }
-      appliedPending.current.add(attemptKey)
-      await settle()
+      const settled = await settleHandoff(current, pending)
+      if (settled) {
+        appliedPending.current.add(attemptKey)
+      } else {
+        // Keep the rewrite and retry the settle on a later poll instead of
+        // re-posting a backend request that already succeeded.
+        settlePending.current.add(attemptKey)
+      }
     }).catch(async (error: unknown) => {
-      await settle(error instanceof Error ? error.message : String(error))
+      await settleHandoff(current, pending, error instanceof Error ? error.message : String(error))
     }).finally(() => {
       // Released once the attempt is over: whether to try again is decided by the
       // host's pending flag, not by this marker.

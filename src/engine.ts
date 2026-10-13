@@ -113,6 +113,10 @@ export class ReasoningDistillEngine {
   private readonly expectRequest = new Set<string>()
   /** Per-compression wait bound: its rule's distillation timeout, 0 = unbounded. */
   private readonly waitBound = new Map<string, number>()
+  /** Attempts whose wait bound expired: their adopted result must not land late. */
+  private readonly abandoned = new Set<string>()
+  /** Timers that would mark an attempt abandoned; cleared once it settles. */
+  private readonly abandonTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /** Audit links known to be non-durable, keyed `sessionId:entryId`. */
   private readonly auditBroken = new Set<string>()
   /** Bumped whenever a session id is attached again; stale work checks it. */
@@ -277,6 +281,15 @@ export class ReasoningDistillEngine {
     this.blocked.delete(sessionId)
     this.applied.delete(sessionId)
     this.rawDerive.delete(sessionId)
+    for (const key of [...this.abandoned]) {
+      if (key.startsWith(prefix)) this.abandoned.delete(key)
+    }
+    for (const [key, timer] of [...this.abandonTimers]) {
+      if (key.startsWith(prefix)) {
+        clearTimeout(timer)
+        this.abandonTimers.delete(key)
+      }
+    }
     for (const key of [...this.auditBroken]) {
       if (key.startsWith(prefix)) this.auditBroken.delete(key)
     }
@@ -877,6 +890,16 @@ export class ReasoningDistillEngine {
       this.ctx.logger.warn('reasoning-distill: compression failed: %o', error)
     })
     const generation = this.generation.get(session.id) ?? 0
+    // The wait bound also covers our own storage work: once it expires the attempt
+    // is abandoned, so a stalled audit writer or file write cannot make its result
+    // land after the next request has already gone out with the raw reasoning.
+    const existingTimer = this.abandonTimers.get(key)
+    if (existingTimer !== undefined) clearTimeout(existingTimer)
+    if (target.rule.timeoutMs > 0) {
+      const timer = setTimeout(() => { this.abandoned.add(key) }, target.rule.timeoutMs + 30_000)
+      timer.unref?.()
+      this.abandonTimers.set(key, timer)
+    }
     const record = this.running.get(key)
     this.inFlight.set(key, promise)
     void promise.finally(() => {
@@ -886,6 +909,12 @@ export class ReasoningDistillEngine {
       if (this.inFlight.get(key) === promise) this.inFlight.delete(key)
       if (this.running.get(key) === record) this.running.delete(key)
       if (this.waitBound.get(key) !== undefined) this.waitBound.delete(key)
+      this.abandoned.delete(key)
+      const timer = this.abandonTimers.get(key)
+      if (timer !== undefined) {
+        clearTimeout(timer)
+        this.abandonTimers.delete(key)
+      }
     })
   }
 
@@ -1111,6 +1140,8 @@ export class ReasoningDistillEngine {
     const reasoning = reasoningOf(target.content)
     // Captured before any replacement: a later in-place edit must retire this entry.
     const originalHash = hashText(reasoning)
+    const attemptKey = this.pendingKey(session.id, target.turn, target.step)
+    const abandonedNow = (): boolean => this.abandoned.has(attemptKey)
     const maxInput = target.rule.maxInputChars
     // The reasoning is the *subject* of the rewrite, not context: silently sending
     // only its prefix would let the distiller drop decisions it never saw while
@@ -1280,13 +1311,15 @@ export class ReasoningDistillEngine {
       ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, adoptedId) ? { sessionMissing: true as const } : {},
     }
     await this.store.update(session.id, (record) => {
-      if (stale()) return
+      // Abandoned attempts never adopt: their spend stays visible through the audit
+      // session, but the rewrite itself must not appear after the wait gave up.
+      if (stale() || abandonedNow()) return
       record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq)
       record.entries.push(entry)
     })
     // The rewrite is now durable and worth writing into the history itself: the
     // panel asks the selected backend to do that, then stops this turn.
-    if (!stale() && this.config.enabled.get() && this.config.rewriteBackend.get() !== '') {
+    if (!stale() && !abandonedNow() && this.config.enabled.get() && this.config.rewriteBackend.get() !== '') {
       this.pendingBranch.set(session.id, entry.id)
     }
     this.ctx.logger.info(
@@ -1422,6 +1455,9 @@ export class ReasoningDistillEngine {
       try { blocks = assembler.blocks() } catch { blocks = [] }
       const text = blocks.filter(block => block.type === 'text').map(block => block.text).join('').trim()
       run.responseText = usable ? text : ''
+      // A timeout set earlier in this attempt is the real reason; the assembler's
+      // default finish kind must not relabel it as a plain stream end.
+      const failureReason = run.error
       const usage: TokenUsage | undefined = assembler.usage
       if (usage !== undefined) {
         run.inputTokens = usage.inputTokens
@@ -1431,6 +1467,7 @@ export class ReasoningDistillEngine {
         reported = true
       }
       if (!usable) run.error = `distiller stream ended as ${finish}`
+      if (failureReason !== undefined) run.error = failureReason
     } catch (error: unknown) {
       run.error = error instanceof Error ? error.message : String(error)
     }

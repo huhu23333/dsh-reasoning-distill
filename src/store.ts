@@ -261,6 +261,10 @@ export class SidecarStore {
           throw new Error(`reasoning-distill: ${dir} is not a directory`)
         }
         await chmod(dir, 0o700).catch(() => undefined)
+        const tightened = await stat(dir).catch(() => undefined)
+        if (tightened === undefined || (tightened.mode & 0o077) !== 0) {
+          throw new Error(`reasoning-distill: ${dir} is not private (mode ${(tightened?.mode ?? 0).toString(8)}); refusing to store reasoning in it`)
+        }
         const target = fileFor(sessionId)
         // Unique per write: two stores (a reload, a second instance in tests) can
         // otherwise pick the same name in the same millisecond and one rename then
