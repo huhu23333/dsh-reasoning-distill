@@ -233,7 +233,15 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
         at: createdBranches.reduce((latest, item) => Math.max(latest, item.handoff?.at ?? 0), 0),
       }
     } else {
-      const fresh = createdBranches.filter(item => (item.handoff?.at ?? 0) > branchBaseline.current!.at).pop()
+      // Newest by *hand-off time*, not by entry order: an older compression's
+      // hand-off can land after a newer one's, and entry order would then open the
+      // wrong branch (and redirect a second time on the next poll).
+      const fresh = createdBranches
+        .filter(item => (item.handoff?.at ?? 0) > branchBaseline.current!.at)
+        .reduce<typeof createdBranches[number] | undefined>(
+          (best, item) => best === undefined || (item.handoff?.at ?? 0) > (best.handoff?.at ?? 0) ? item : best,
+          undefined,
+        )
       const branchId = fresh?.handoff?.branchId
       if (branchId !== undefined) {
         branchBaseline.current = { sessionId: current.sessionId, at: fresh?.handoff?.at ?? branchBaseline.current!.at }
