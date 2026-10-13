@@ -41,6 +41,15 @@ interface Surface {
 /** Marker property recording that one session's accessor is already wrapped. */
 const WRAPPED = Symbol('reasoning-distill/wrapped')
 
+/** Optional host services must not trigger Cordis's uninjected-property guard. */
+function optionalService<T>(ctx: Context, name: string): T | undefined {
+  try {
+    return ctx.get(name) as T | undefined
+  } catch {
+    return undefined
+  }
+}
+
 /** Estimated tokens for one string, matching the harness's chars-per-token estimate. */
 function estimateChars(chars: number): number {
   return Math.ceil(chars / 4)
@@ -609,13 +618,7 @@ export class ReasoningDistillEngine {
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       return false
     }
-    let port: number | undefined
-    try {
-      port = (this.ctx.get('webServer') as { port?: number } | undefined)?.port
-    } catch (error: unknown) {
-      // Optional services can be missing or guarded by a throwing host getter.
-      // Both cases must take the same no-port path below.
-    }
+    const port = optionalService<{ port?: number }>(this.ctx, 'webServer')?.port
     if (typeof port !== 'number') {
       // The panel can drive an in-place backend itself, but a *branch* backend must
       // be driven from here: the panel's in-place path would create a branch and
@@ -828,8 +831,12 @@ export class ReasoningDistillEngine {
     if (!cancel) return { ok: true, recorded }
     // Only a hand-off this plugin is completing may stop a turn: cancelling would
     // otherwise let any same-origin caller end an unrelated session's turn.
-    const agents = (this.ctx as unknown as { agents?: { get(id: string): { cancel(cause: { kind: string }): void } | undefined } }).agents
-    agents?.get(sessionId)?.cancel({ kind: 'user' })
+    const agents = optionalService<{ get(id: string): { cancel(cause: { kind: string }): void } | undefined }>(this.ctx, 'agents')
+    if (agents === undefined) {
+      this.ctx.logger.warn('reasoning-distill: could not stop the turn for %s: agents service is unavailable', sessionId)
+    } else {
+      agents.get(sessionId)?.cancel({ kind: 'user' })
+    }
     return { ok: true, recorded }
   }
 

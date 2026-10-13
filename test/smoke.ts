@@ -20,6 +20,8 @@ process.env['DSH_HOME'] = home
 const { ReasoningDistillEngine } = await import('../src/engine.ts')
 const { SidecarStore, dshHome, legacySidecarPath, sidecarPath } = await import('../src/store.ts')
 const { buildReport } = await import('../src/report.ts')
+const { registerRoutes } = await import('../src/route.ts')
+const { HANDOFF_ROUTE } = await import('../src/shared.ts')
 
 /** Minimal in-memory session. */
 class FakeSession {
@@ -112,7 +114,7 @@ const ctx = {
   },
   llm: fakeLlm,
   // Mirror Cordis's optional service lookup without requiring an injection.
-  get(name: string): unknown { return name === 'webServer' ? Reflect.get(this, name) : undefined },
+  get(name: string): unknown { return name === 'webServer' || name === 'agents' ? Reflect.get(this, name) : undefined },
   on: (name: string, fn: Function) => {
     const list = handlers.get(name) ?? []
     list.push(fn)
@@ -1966,6 +1968,57 @@ for (const mode of ['throwing getter', 'absent service'] as const) {
     secondError === undefined && (second as { kind?: string } | undefined)?.kind === 'enter'
     && continued === 2 && (await store38b.load(session.id)).entries[0]!.handoff?.at === entry.handoff?.at,
     String(secondError ?? JSON.stringify(second)))
+}
+
+console.log('scenario 38d: default-cancel settle survives an unavailable agents service')
+for (const mode of ['absent service', 'throwing getter'] as const) {
+  handlers.clear()
+  const ctx38d = mode === 'throwing getter'
+    ? Object.defineProperty({ ...ctx }, 'agents', { get: () => { throw new Error('cannot get property "agents" without inject') } })
+    : { ...ctx }
+  const store38d = new SidecarStore()
+  const engine38d = new ReasoningDistillEngine(ctx38d as never, cfg10 as never, store38d)
+  engine38d.start()
+  const session = new FakeSession(`session-no-agents-${mode.replace(' ', '-')}`)
+  sessions.set(session.id, session)
+  await fire('session/created', session)
+  const seq = session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: { id: 'a38d', role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+    stream: [],
+  }).seq
+  session.append('step/end', { turn: 1, step: 1 })
+  await fire('session/event', session, session.eventAt(seq))
+  await fire('session/event', session, session.eventAt(session.log.length - 1))
+  await settleFor(async () => (await store38d.load(session.id)).entries.length === 1)
+  const entry = (await store38d.load(session.id)).entries[0]!
+  check(`${mode}: a rewrite is pending before default-cancel settle`, engine38d.snapshot(session.id).pendingBranch === entry.id)
+  const warningStart = info.length
+  let routeFetch: ((request: Request) => Promise<Response>) | undefined
+  registerRoutes({
+    ...ctx38d,
+    inject: (_names: string[], callback: (child: unknown) => void) => callback({
+      get: (name: string) => name === 'connection'
+        ? { fetch: { register: (route: { path: string; fetch: (request: Request) => Promise<Response> }) => {
+          if (route.path === HANDOFF_ROUTE) routeFetch = route.fetch
+          return async () => undefined
+        } } }
+        : name === 'sessions' ? ctx38d.sessions : name === 'llm' ? ctx38d.llm : undefined,
+      effect: (register: () => unknown) => { register() },
+    }),
+  } as never, cfg10 as never, store38d, engine38d)
+  const response = await routeFetch!(new Request('http://localhost/api/reasoning-distill/handoff', {
+    method: 'POST', body: JSON.stringify({ sessionId: session.id, entryId: entry.id, error: 'backend said no' }),
+  }))
+  const result = await response.json() as { ok?: boolean; recorded?: boolean; error?: string }
+  check(`${mode}: route answers success without throwing or returning 5xx`,
+    response.status === 200 && result.ok === true && result.recorded === true, JSON.stringify({ status: response.status, result }))
+  check(`${mode}: pending marker clears and failure note is recorded`,
+    engine38d.snapshot(session.id).pendingBranch === null
+    && (await store38d.load(session.id)).entries[0]?.handoff?.error === 'backend said no')
+  check(`${mode}: unable to stop turn emits a clear warning`,
+    info.slice(warningStart).some(line => line.includes('agents service') && line.includes('could not stop')),
+    JSON.stringify(info.slice(warningStart)))
 }
 
 console.log('scenario 38c: unexpected plugin handler errors stay inside the plugin')
