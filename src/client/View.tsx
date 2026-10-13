@@ -194,19 +194,29 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     if (entry === undefined) return
     const request = rewriteRequest(current.config.rewriteBackend, current.sessionId, entry, entry.distill.responseText)
     if (request === undefined) return
-    appliedPending.current.add(pending)
+    /** Tell the host how the hand-off went; in-place keeps the turn going. */
+    const settle = (error?: string): Promise<void> => fetch(HANDOFF_ROUTE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId: current.sessionId, cancel: false, ...error === undefined ? {} : { error } }),
+    }).then(() => undefined).catch(() => undefined)
     void fetch(request.path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request.body),
-    }).then(async () => {
-      // Clear the host's pending flag; an in-place rewrite keeps the turn going.
-      await fetch(HANDOFF_ROUTE, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId: current.sessionId, cancel: false }),
-      }).catch(() => undefined)
-    }).catch(() => undefined)
+    }).then(async response => {
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: string } | null
+        // A backend that refused must not look like a completed hand-off: record
+        // why on the entry so the panel shows it.
+        await settle(payload?.error ?? `HTTP ${response.status}`)
+        return
+      }
+      appliedPending.current.add(pending)
+      await settle()
+    }).catch(async (error: unknown) => {
+      await settle(error instanceof Error ? error.message : String(error))
+    })
   }, [cache, sessionId, openSession])
   const current = cache[sessionId]
   const report = current?.report
@@ -238,7 +248,6 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
   t: Translate
 }) {
   // Every entry ever recorded, including ones a compaction has since shadowed.
-  const lifetimeRemovedTokens = report?.entries.reduce((sum, entry) => sum + entry.savedTokensPerRequest, 0) ?? 0
   const stockTokens = report?.stockTokens ?? 0
   const stockSaved = report?.stockSaved ?? 0
   const lifetimeTokens = report?.lifetimeTokens ?? 0
@@ -249,7 +258,7 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
     {error && <p role="alert" className={css.error}>{t('view.failure')}: {error}</p>}
     {report && <>
       <div className={css.summary}>
-        <div><span>{t('view.triggers')}</span><strong>{t('view.succeeded')} {count(report.succeeded)}</strong><small>{t('view.attempts')} {count(report.triggers)} · {t('view.estimate')} {signedCount(-lifetimeRemovedTokens)} {t('view.tokens')} {t('view.historical')}</small></div>
+        <div><span>{t('view.triggers')}</span><strong>{t('view.succeeded')} {count(report.succeeded)}</strong><small>{t('view.attempts')} {count(report.triggers)} · {t('view.estimate')} {signedCount(-lifetimeTokens)} {t('view.tokens')} {t('view.historical')}</small></div>
         <div><span>{t('view.distillCost')}</span><strong>{signedMoney(report.distillCost)}</strong><small>{count(report.entries.reduce((sum, entry) => sum + entry.distill.inputTokens + entry.distill.outputTokens, 0))} token</small></div>
         <div><span>{t('view.stock')}</span><strong>{signedMoney(-stockSaved)}</strong><small>{t('view.estimate')} {signedCount(-stockTokens)} {t('view.tokens')} · {t('view.stockNote')}</small></div>
         <div><span>{t('view.savedTotal')}</span><strong>{signedMoney(-report.savedTotal)}</strong><small>{t('view.estimate')} {signedCount(-lifetimeTokens)} {t('view.tokens')} {t('view.lifetime')}</small></div>

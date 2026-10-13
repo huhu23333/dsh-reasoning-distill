@@ -13,7 +13,7 @@
  */
 
 import type { ModelPrices, ModelRule } from '../config.ts'
-import { FALLBACK_RULE, mergeRule, withKindDefaults, type RuleOverride, type RuleSource } from '../rule.ts'
+import { FALLBACK_RULE, mergeRule, withKindDefaults, withLimitDefaults, type RuleOverride, type RuleSource } from '../rule.ts'
 
 /** Sparse per-model rule as stored, matching what the host schema accepts. */
 export type StoredRule = RuleOverride
@@ -57,13 +57,20 @@ export function oneShotDepthDisabled(rule: StoredRule): boolean {
  * @returns a draft whose rule layers match the engine's resolution.
  */
 export function normalizeSettings(value: SettingsValue, legacyOneShot?: boolean): SettingsValue {
+  // Limits moved from the top level into each rule; a document saved before the
+  // move still carries them outside, and the panel must resolve them exactly the
+  // way the host does, or it would show (and then persist) the wrong value.
+  const legacyLimits = {
+    ...typeof value.maxInputChars === 'number' ? { maxInputChars: value.maxInputChars } : {},
+    ...typeof value.maxOutputChars === 'number' ? { maxOutputChars: value.maxOutputChars } : {},
+  }
   const models: Record<string, StoredRule> = {}
   for (const [id, override] of Object.entries(value.models ?? {})) {
-    models[id] = withKindDefaults(override, legacyOneShot)
+    models[id] = withLimitDefaults(withKindDefaults(override, legacyOneShot), legacyLimits)
   }
   return {
     ...value,
-    defaultRule: mergeRule(FALLBACK_RULE, withKindDefaults(value.defaultRule ?? {}, legacyOneShot), undefined),
+    defaultRule: mergeRule(FALLBACK_RULE, withLimitDefaults(withKindDefaults(value.defaultRule ?? {}, legacyOneShot), legacyLimits), undefined),
     models,
     peakSource: value.peakSource ?? 'builtin',
     rewriteBackend: value.rewriteBackend ?? '',
@@ -127,8 +134,10 @@ export type SettingsValue = {
   rewriteBackend: string
   branchTimeoutMs: number
   prompt: string
-  maxInputChars: number
-  maxOutputChars: number
+  /** @deprecated Retired top-level limit; only a document saved before the move has it. */
+  maxInputChars?: number
+  /** @deprecated Retired top-level limit; only a document saved before the move has it. */
+  maxOutputChars?: number
 }
 
 /** One config mutation accepted by the settings form controller. */

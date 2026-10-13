@@ -80,7 +80,14 @@ export function CompressionActivity({ sessionId, onActiveChange, t }: Props) {
         if (!alive || isStaleResponse(request, applied.current)) return
         applied.current = request
         setLive(liveAfterReport(report))
-      }).catch(() => undefined)
+      }).catch(() => {
+        // A read that failed says nothing about the compression, so the chip goes
+        // back to silence instead of staying expanded on a stale "busy". An older
+        // failure landing after a newer success must not silence that success.
+        if (!alive || isStaleResponse(request, applied.current)) return
+        applied.current = request
+        setLive(IDLE)
+      })
     }
     read()
     const timer = setInterval(read, 2000)

@@ -11,7 +11,8 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, signedCount, signedMoney, stockOfEntry } from '../src/client/View.tsx'
 import { CompressionActivity } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, rewriteRequest, ruleFieldsIdle, saveOperations, type SettingsValue } from '../src/client/ops.ts'
+import { apply as applyClientPlugin } from '../src/client/index.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, rewriteRequest, ruleFieldsIdle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
@@ -215,6 +216,45 @@ check('clicking a backend when none is chosen selects it', nextBackend('', 'mess
 // A radio input cannot fire change once checked, which is exactly why the panel
 // must model deselection itself.
 check('clicking the chosen backend clears the choice', nextBackend('message-edit', 'message-edit') === '')
+console.log('client: the round-1 review fixes')
+// (4) A document saved before the limits moved must resolve the way the host does,
+// or the panel shows one effective limit and the runtime applies another.
+const legacyDoc = {
+  ...({
+    enabled: true, peakSource: 'builtin', holidays: [], prices: {}, prompt: '',
+    rewriteBackend: '', branchTimeoutMs: 0, models: {},
+    maxInputChars: 90000, maxOutputChars: 1000,
+    defaultRule: { enabled: true, thresholdTokens: 4000, minSavedTokens: 600, includeToolResults: true, includeFinalTurns: true, timeoutMs: 60000, distiller: { provider: 'p', model: 'm', effort: 'off' } },
+  }),
+} as never
+const normalized = normalizeSettings(legacyDoc)
+check('a legacy top-level limit still resolves into the rule',
+  normalized.defaultRule.maxOutputChars === 1000 && normalized.defaultRule.maxInputChars === 90000,
+  JSON.stringify({ input: normalized.defaultRule.maxInputChars, output: normalized.defaultRule.maxOutputChars }))
+const withOverride = normalizeSettings({ ...legacyDoc, models: { 'm-1': { enabled: true } } } as never)
+check('and a model override inherits the same legacy value',
+  withOverride.models['m-1']?.maxOutputChars === undefined || withOverride.models['m-1']?.maxOutputChars === 1000,
+  JSON.stringify(withOverride.models['m-1']))
+
+// (3) The composer indicator is a registered slot; losing that registration
+// silently removes the only place the wait can name itself.
+const injected: string[] = []
+const stubCtx = {
+  effect: (fn: () => unknown) => { fn() },
+  locale: { register: () => undefined, bind: () => (key: string) => key },
+  configForms: { get: () => ({ getSnapshot: () => ({}), subscribe: () => () => undefined, mutate: () => undefined }) },
+  slots: {
+    inject: (name: string, fn: () => unknown) => { injected.push(name); fn() },
+    register: () => undefined,
+  },
+  uiWorkspace: { openSession: () => undefined },
+} as never
+applyClientPlugin(stubCtx)
+check('the client plugin registers the composer activity slot',
+  injected.includes('conversation.input.activity'), JSON.stringify(injected))
+check('and still registers the settings section and the report tab',
+  injected.includes('settings.section') && injected.includes('conversation.view'), JSON.stringify(injected))
+
 console.log('render: a report from an older host (version skew)')
 const legacy = modernReport()
 // Fields added by later host versions are absent, as they would be mid-upgrade.

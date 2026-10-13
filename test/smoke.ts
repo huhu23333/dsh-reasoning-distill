@@ -1940,6 +1940,80 @@ check('and that shows as a created branch',
   && (never39.handoff as { branchId?: string }).branchId === 'session-slow-branch', JSON.stringify(never39.handoff))
 await new Promise<void>(resolve => slowBackend.close(() => { resolve() }))
 
+console.log('scenario 40: the reviewer round-1 fixes (same-seq projection, handoff error, unbounded wait)')
+// Runs one step to completion and returns the stages a pre-step needs.
+const runStep40 = async (engine: ReasoningDistillEngine, session: FakeSession, label: string): Promise<number> => {
+  session.append('user/message', { id: `u-${label}`, role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+  const seq = session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: { id: `a-${label}`, role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+    stream: [],
+  }).seq
+  session.append('step/end', { turn: 1, step: 1 })
+  await fire('session/event', session, session.eventAt(seq))
+  await fire('session/event', session, session.eventAt(session.log.length - 1))
+  return seq
+}
+
+// (2) A projection that keeps the seq but swaps the message must not stay "alive".
+handlers.clear()
+const store40 = new SidecarStore()
+const engine40 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store40)
+engine40.start()
+const s40 = new FakeSession('session-projected-40')
+sessions.set(s40.id, s40)
+await fire('session/created', s40)
+const seq40 = await runStep40(engine40, s40, '40')
+await settleFor(async () => (await store40.load(s40.id)).entries.length === 1)
+const entry40 = (await store40.load(s40.id)).entries[0]!
+check('the compression is live before the projection', engine40.stock(s40.id).tokens > 0,
+  JSON.stringify({ stock: engine40.stock(s40.id) }),
+  JSON.stringify({ stock: engine40.stock(s40.id), entry: entry40 }))
+// Same seq, different message: exactly what a content projection does.
+const holder = s40.eventAt(seq40) as { data: { message: { id: string } } }
+holder.data.message.id = 'projected-replacement'
+s40.append('compaction/end', { compactionId: 'c-40', turn: 1 })
+await fire('session/event', s40, s40.eventAt(s40.log.length - 1))
+const after40 = (await store40.load(s40.id)).entries.find(item => item.id === entry40.id)!
+check('a same-seq projection freezes the entry instead of keeping it active',
+  after40.inactive === true && after40.liveSaved === 0 && after40.liveRequests === 0,
+  JSON.stringify({ inactive: after40.inactive, live: after40.liveSaved }))
+
+// (1) A backend that refused is recorded, not silently marked done.
+engine40.handoff(s40.id, false, 'backend said no')
+await settleFor(async () => {
+  const stored = (await store40.load(s40.id)).entries.find(item => item.id === entry40.id)!
+  return stored.handoff !== undefined
+})
+const refused40 = (await store40.load(s40.id)).entries.find(item => item.id === entry40.id)!
+check('the hand-off failure is recorded on the entry',
+  refused40.handoff?.state === 'failed' && refused40.handoff.error === 'backend said no',
+  JSON.stringify(refused40.handoff))
+check('and clearing it does not stop the turn', engine40.snapshot(s40.id).pendingBranch === null)
+
+// (7) timeoutMs: 0 means the next request waits for the distillation, however slow.
+handlers.clear()
+const slowStore40 = new SidecarStore()
+const slowCfg40 = makeConfig({ defaultRule: { get: () => ({ ...rule7, timeoutMs: 0 }) } })
+const engineSlow = new ReasoningDistillEngine({ ...ctx, llm: slowLlm } as never, slowCfg40 as never, slowStore40)
+engineSlow.start()
+const s40b = new FakeSession('session-unbounded')
+sessions.set(s40b.id, s40b)
+await fire('session/created', s40b)
+await runStep40(engineSlow, s40b, '40b')
+let preStepSettled = false
+const preStep = (async () => {
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    await fn({ agent: { session: s40b } }, async () => ({ kind: 'enter', messages: [] }))
+  }
+  preStepSettled = true
+})()
+await new Promise(resolve => setTimeout(resolve, 150))
+check('with timeoutMs 0 a 400ms distillation still holds the pre-step', !preStepSettled)
+await preStep
+check('and the pre-step finishes once the distillation does', preStepSettled
+  && (await slowStore40.load(s40b.id)).entries.length === 1)
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1

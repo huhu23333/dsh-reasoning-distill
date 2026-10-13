@@ -109,6 +109,10 @@ export class ReasoningDistillEngine {
    * backend, then stops the original turn through {@link ReasoningDistillEngine.handoff}.
    */
   private readonly pendingBranch = new Map<string, string>()
+  /** Sessions whose next derivation is the model request; see the wrapper. */
+  private readonly expectRequest = new Set<string>()
+  /** Per-compression wait bound: its rule's distillation timeout, 0 = unbounded. */
+  private readonly waitBound = new Map<string, number>()
   /** Cached derived-index maps keyed by session id. */
   /** Session ids whose accessor this engine already wrapped. */
   private readonly wrapped = new WeakSet<object>()
@@ -120,7 +124,7 @@ export class ReasoningDistillEngine {
    * and the reported stock all read it, so a rewrite that cannot be applied (its
    * message no longer carries reasoning, say) can never be counted as saving.
    */
-  private readonly applied = new Map<string, Array<{ afterSeq: number; ids: Map<string, number> }>>()
+  private readonly applied = new Map<string, Array<{ afterSeq: number; signature: number; ids: Map<string, number> }>>()
   private readonly rawDerive = new Map<string, () => Message[]>()
 
   /**
@@ -174,6 +178,10 @@ export class ReasoningDistillEngine {
       // A successful compression with a branch backend ends this turn *before* any
       // request goes out: the conversation continues on the branch instead.
       if (await this.handOffToBranch(payload.agent.session)) return { kind: 'reject' }
+      // The loop assembles the request right after this returns; arming the
+      // session here is what lets the wrapper tell that derivation apart from a
+      // viewer's.
+      this.expectRequest.add(payload.agent.session.id)
       return next()
     })
   }
@@ -221,6 +229,7 @@ export class ReasoningDistillEngine {
     this.sessionKind.delete(sessionId)
     this.storageBroken.delete(sessionId)
     this.pendingBranch.delete(sessionId)
+    this.expectRequest.delete(sessionId)
     this.blocked.delete(sessionId)
     for (const key of [...this.pending.keys()]) {
       if (key.startsWith(`${sessionId}:`)) this.pending.delete(key)
@@ -306,12 +315,26 @@ export class ReasoningDistillEngine {
         const result = engine.applyRewrites(this, messages)
         // Remember exactly what this request carried: accounting settles against
         // it rather than re-deriving an answer from a later surface.
-        const nodes = this.surface.nodes
-        const history = engine.applied.get(this.id) ?? []
-        history.push({ afterSeq: (nodes[nodes.length - 1] as number | undefined) ?? 0, ids: result.applied })
-        // Only the recent derivations can still be awaiting a response.
-        if (history.length > 8) history.splice(0, history.length - 8)
-        engine.applied.set(this.id, history)
+        // Only the derivation that assembles the model request may record what
+        // that request carried: a viewer or another plugin deriving the same
+        // session must not be able to rewrite the accounting of a request that is
+        // already in flight. `agent/pre-step` arms the session just before the
+        // loop assembles, so unarmed derivations are ignored.
+        if (engine.expectRequest.delete(this.id)) {
+          const nodes = this.surface.nodes
+          const history = engine.applied.get(this.id) ?? []
+          history.push({
+            afterSeq: (nodes[nodes.length - 1] as number | undefined) ?? 0,
+            // A record only describes the surface it was taken from: a projection
+            // can change the node set without moving `afterSeq`, and a later
+            // answer must then be judged afresh rather than against this one.
+            signature: surfaceSignature(nodes),
+            ids: result.applied,
+          })
+          // Only the recent derivations can still be awaiting a response.
+          if (history.length > 8) history.splice(0, history.length - 8)
+          engine.applied.set(this.id, history)
+        }
         return result.out
       },
     })
@@ -343,7 +366,14 @@ export class ReasoningDistillEngine {
     const nodes = surface?.nodes ?? new Set<number>(session.surface.nodes)
     if (!nodes.has(entry.targetSeq)) return false
     const slots = surface?.slots ?? this.derivedIndex(session)
-    return slots.has(entry.targetSeq)
+    if (!slots.has(entry.targetSeq)) return false
+    // A projection can keep the seq while replacing the message, and a later step
+    // can fold the reasoning block away; either way the rewrite would not apply,
+    // so the entry must stop counting as alive.
+    const event = session.eventAt(entry.targetSeq as Parameters<Session['eventAt']>[0])
+    const message = event === undefined ? null : session.deriveEventMessage(event)
+    if (message === null || message.id !== entry.targetMessageId) return false
+    return withDistilledReasoning(message, entry.distilledText) !== undefined
   }
 
   /**
@@ -519,10 +549,15 @@ export class ReasoningDistillEngine {
    * version it just replaced.
    * @param sessionId - session whose turn may end.
    * @param cancel - false to clear the pending hand-off without stopping the turn.
+   * @param error - why a panel-driven backend could not apply the rewrite.
    * @returns whether a running agent was found and asked to stop.
    */
-  handoff(sessionId: string, cancel = true): boolean {
+  handoff(sessionId: string, cancel = true, error?: string): boolean {
+    const pending = this.pendingBranch.get(sessionId)
     this.pendingBranch.delete(sessionId)
+    if (error !== undefined && pending !== undefined) {
+      void this.recordHandoff(sessionId, pending, { state: 'failed', error, at: Date.now() })
+    }
     const agents = (this.ctx as unknown as { agents?: { get(id: string): { cancel(cause: { kind: string }): void } | undefined } }).agents
     if (!cancel) return false
     const agent = agents?.get(sessionId)
@@ -594,6 +629,9 @@ export class ReasoningDistillEngine {
       case 'step/end': {
         const data = event.data as { turn?: number; step?: number }
         const key = this.pendingKey(session.id, data.turn ?? 0, data.step ?? 0)
+        // A step boundary closes the arming window: the next one is opened by the
+        // pre-step that actually leads to a request.
+        this.expectRequest.delete(session.id)
         // The record is read *before* paying, not merely before the next request:
         // a distillation whose result could not be stored must not be bought. The
         // gate is registered as in-flight so a following pre-step still waits for
@@ -690,6 +728,7 @@ export class ReasoningDistillEngine {
       return
     }
     this.pending.delete(key)
+    this.waitBound.set(key, target.rule.timeoutMs)
     this.running.set(key, {
       sessionId: session.id,
       turn: target.turn,
@@ -707,6 +746,7 @@ export class ReasoningDistillEngine {
     void promise.finally(() => {
       this.inFlight.delete(key)
       this.running.delete(key)
+      this.waitBound.delete(key)
     })
   }
 
@@ -725,11 +765,22 @@ export class ReasoningDistillEngine {
     // The wait is published so the UI can say why a step has not been sent.
     this.blocked.set(sessionId, { since: Date.now(), reason: blockingReason(session) })
     try {
-      // An adapter that ignores its abort signal must not block the next request
-      // forever: the wait is bounded independently of the provider.
-      const grace = 180_000
-      const deadline = new Promise<void>(resolve => { const timer = setTimeout(resolve, grace); timer.unref?.() })
-      await Promise.race([Promise.allSettled(mine.map(([, promise]) => promise)), deadline])
+      // Waiting is the contract: the next request is assembled only once the
+      // rewrite is in place. A compression whose rule sets a timeout is already
+      // aborted by its own provider call, so the wait is bounded just past that
+      // as a backstop for adapters that ignore abort. `timeoutMs: 0` means no
+      // limit, and then this genuinely waits until the compression ends.
+      const waits = Promise.allSettled(mine.map(([, promise]) => promise))
+      const bounds = mine.map(([key]) => this.waitBound.get(key) ?? 0)
+      if (bounds.includes(0)) {
+        await waits
+      } else {
+        const deadline = new Promise<void>(resolve => {
+          const timer = setTimeout(resolve, Math.max(...bounds) + 30_000)
+          timer.unref?.()
+        })
+        await Promise.race([waits, deadline])
+      }
     } finally {
       this.blocked.delete(sessionId)
     }
@@ -801,7 +852,11 @@ export class ReasoningDistillEngine {
     // view, which is the weaker but still bounded answer.
     // Bind the credit to the request that carried these rewrites: pick the newest
     // derivation that happened at or before this response's seq.
-    const carried = (this.applied.get(sessionId) ?? []).filter(at => at.afterSeq <= seq).pop()?.ids
+    const nodes = surface?.nodes ?? session.surface.nodes
+    const signature = surfaceSignature(nodes)
+    const carried = (this.applied.get(sessionId) ?? [])
+      .filter(at => at.afterSeq <= seq && at.signature === signature)
+      .pop()?.ids
     const counting = record.entries.filter(entry =>
       (carried === undefined ? this.survives(session, entry, surface) : carried.has(entry.id))
       && entry.targetSeq < seq
@@ -1322,6 +1377,21 @@ function collectToolResults(session: Session, turn: number, step: number): strin
  * @param text - distilled reasoning.
  * @returns the substituted message, or undefined when it has no reasoning.
  */
+/**
+ * Cheap order-sensitive fingerprint of a surface's node set.
+ *
+ * Accounting may only use a derivation record while the surface it was taken
+ * from is still the same: a projection can replace nodes without appending
+ * anything, which leaves the newest sequence number unchanged.
+ * @param nodes - surface node sequence numbers, in order.
+ * @returns a number that changes with the set or its order.
+ */
+function surfaceSignature(nodes: Iterable<number>): number {
+  let hash = 0
+  for (const node of nodes) hash = (Math.imul(hash, 31) + node) | 0
+  return hash
+}
+
 function withDistilledReasoning(message: Message, text: string): Message | undefined {
   if (message.role !== 'assistant') return undefined
   const replay = replayBlocksOf(message.source)

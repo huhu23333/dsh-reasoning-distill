@@ -41,8 +41,13 @@ export function apply(ctx: Context): void {
     label: () => t('settings.nav'), locale: NS,
     inject: () => ({ form: formFace }),
   }, ReasoningDistillSettings))
-  // Free single seat beside the submit button: the one place a user already
-  // looks when a request seems stuck, so the wait can name itself there.
+  // The composer seat already exists and is the one place a user looks when the
+  // conversation seems stuck, so the wait names itself there.
+  ctx.slots.inject('conversation.input.activity', () => ctx.slots.register({
+    name: 'conversation.input.activity', id: 'reasoning-distill', order: 30,
+    locale: NS,
+    inject: (sessionId) => ({ sessionId }),
+  }, CompressionActivity))
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view', id: 'reasoning-distill', order: 30,
     locale: NS, label: () => t('view.tab'),
