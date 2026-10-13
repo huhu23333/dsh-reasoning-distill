@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { backendById, isStaleResponse, rewriteRequest } from './ops.ts'
-import { REPORT_ROUTE, type CompressionEntry, type SessionReport } from '../shared.ts'
+import { isStaleResponse, rewriteRequest } from './ops.ts'
+import { HANDOFF_ROUTE, REPORT_ROUTE, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
 
@@ -94,40 +94,11 @@ export function stockOfEntry(entry: CompressionEntry, live?: readonly string[]):
   return entry.savedTokensPerRequest
 }
 
-function Entry({ entry, t, liveStockIds, sessionId, backendId, openSession }: {
+function Entry({ entry, t, liveStockIds }: {
   entry: CompressionEntry
   t: Translate
   liveStockIds?: readonly string[]
-  sessionId: string
-  backendId: string
-  openSession: (id: string) => void
 }) {
-  const [branch, setBranch] = useState<{ state: 'idle' | 'working' | 'failed' | 'missing'; detail?: string }>({ state: 'idle' })
-  /**
-   * Ask the companion plugin for a version whose reasoning block is the
-   * distilled text. That is the supported way to make a history carry it: the
-   * companion creates a new session, so this one is never rewritten.
-   */
-  const branchHere = (): void => {
-    const request = rewriteRequest(backendId, sessionId, entry, entry.distill.responseText)
-    if (request === undefined) return
-    setBranch({ state: 'working' })
-    void fetch(request.path, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(request.body),
-    }).then(async response => {
-      if (response.status === 404) { setBranch({ state: 'missing' }); return }
-      const payload = await response.json().catch(() => null) as { sessionId?: string; error?: string } | null
-      if (!response.ok) { setBranch({ state: 'failed', detail: payload?.error ?? `HTTP ${response.status}` }); return }
-      const created = payload?.sessionId
-      setBranch({ state: 'idle' })
-      if (typeof created === 'string' && created !== '') openSession(created)
-    }).catch((error: unknown) => { setBranch({ state: 'failed', detail: String(error) }) })
-  }
-  const canBranch = stockOfEntry(entry, liveStockIds) > 0 && entry.distill.responseText !== ''
-    && rewriteRequest(backendId, sessionId, entry, entry.distill.responseText) !== undefined
-
   const run = entry.distill
   const estimated = run.estimated === true
   const notAdopted = entry.failed === true || entry.skipped === true
@@ -148,15 +119,6 @@ function Entry({ entry, t, liveStockIds, sessionId, backendId, openSession }: {
         <div><span>{t('view.cost')}</span><strong>{money(run.cost)}{estimated ? ` (${t('view.estimated')})` : ''}</strong></div>
         <div><span>{t('view.period')}</span><strong>{t(run.period === 'peak' ? 'view.peak' : 'view.off')}</strong></div>
         <div><span>{t('view.avoided')}</span><strong>{signedMoney(-reducedOfEntry(entry))}</strong></div>
-        <div><span>{t('view.branch')}</span><strong>
-          {canBranch
-            ? <button type="button" className={css.secondary} disabled={branch.state === 'working'} onClick={branchHere}>{branch.state === 'working'
-              ? t('view.branching')
-              : backendById(backendId)?.kind === 'branch' ? t('view.branchCreate') : t('view.applyRewrite')}</button>
-            : <span className={css.muted}>{backendById(backendId) === undefined ? t('view.backendUnset') : t('view.branchUnavailable')}</span>}
-          {branch.state === 'missing' && <span className={css.error}> · {t('view.branchNeedsPlugin')}</span>}
-          {branch.state === 'failed' && <span className={css.error}> · {t('view.branchFailed')}: {branch.detail ?? ''}</span>}
-        </strong></div>
         <div><span>{t('view.stock')}</span><strong>{count(stockOfEntry(entry, liveStockIds))} token</strong> · <strong>{signedCount(-entry.savedTokensPerRequest * entry.liveRequests)} {t('view.tokens')} {t('view.lifetime')}</strong></div>
       </div>
       <TextBlock label={t('view.request')} value={run.requestText} />
@@ -209,6 +171,39 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     }
   }, [sessionId])
   const retry = useCallback(() => readRef.current(), [])
+  // One follow-up per session: the host creates the branch before the original
+  // turn would have called the model, so all that is left here is to go there.
+  const openedBranch = useRef(new Set<string>())
+  const appliedPending = useRef(new Set<string>())
+  useEffect(() => {
+    const current = cache[sessionId]?.report
+    if (current === undefined) return
+    const branch = current.branch
+    if (branch != null && !openedBranch.current.has(branch.sessionId)) {
+      openedBranch.current.add(branch.sessionId)
+      openSession(branch.sessionId)
+      return
+    }
+    const pending = current.pendingBranch
+    if (pending == null || appliedPending.current.has(pending)) return
+    const entry = current.entries.find(item => item.id === pending)
+    if (entry === undefined) return
+    const request = rewriteRequest(current.config.rewriteBackend, current.sessionId, entry, entry.distill.responseText)
+    if (request === undefined) return
+    appliedPending.current.add(pending)
+    void fetch(request.path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(request.body),
+    }).then(async () => {
+      // Clear the host's pending flag; an in-place rewrite keeps the turn going.
+      await fetch(HANDOFF_ROUTE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: current.sessionId, cancel: false }),
+      }).catch(() => undefined)
+    }).catch(() => undefined)
+  }, [cache, sessionId, openSession])
   const current = cache[sessionId]
   const report = current?.report
   // Declared after `report`: referencing it above its declaration is a TDZ throw.
@@ -259,6 +254,7 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
       <p className={css.note}>{t('view.resetNote')}</p>
       <p className={css.note}>{t('view.stockNote')}</p>
       <p className={css.note}>{t('view.signNote')}</p>
+      {report?.branchError != null && <p className={css.note}>{t('view.branchFailed')}: {report.branchError}</p>}
       {activity && <section className={css.section}><h3>{t('view.active')}</h3><p className={css.note}>{t('view.activeHint')}</p>
         {report?.blockingSince != null && <p role="status" className={css.blockedBanner}><span className={css.activityDotBlocked} aria-hidden /><strong>{t('activity.blocked')}</strong> · {t(`activity.reason.${report.blockingReason ?? 'other'}` as 'activity.reason.tool')} · {Math.max(0, Math.round((now - report.blockingSince) / 1000))}s</p>}
         {(report?.active ?? []).map(item => <div key={`${item.startedAt}-${item.turn}-${item.step}`} className={css.activeRow}>
@@ -270,7 +266,7 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
           <span className={css.metric}>{Math.max(0, Math.round((now - item.startedAt) / 1000))}s</span>
         </div>)}
       </section>}
-      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}{report.entries.map(entry => <Entry key={entry.id} entry={entry} t={t} liveStockIds={report.stockIds} sessionId={report.sessionId} backendId={report.config.rewriteBackend} openSession={openSession} />)}</section>
+      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}{report.entries.map(entry => <Entry key={entry.id} entry={entry} t={t} liveStockIds={report.stockIds} />)}</section>
       <section className={css.section}><h3>{t('view.sessions')}</h3>{report.entries.map(entry => <SessionRow key={entry.id} entry={entry} t={t} openSession={openSession} />)}</section>
     </>}
   </div>

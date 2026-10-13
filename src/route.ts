@@ -9,7 +9,7 @@ import type { Config } from './config.ts'
 import { buildCatalog, buildReport } from './report.ts'
 import type { ActiveCompression, BlockingReason } from './shared.ts'
 import type { SidecarStore } from './store.ts'
-import { CATALOG_ROUTE, REPORT_ROUTE } from './shared.ts'
+import { CATALOG_ROUTE, HANDOFF_ROUTE, REPORT_ROUTE } from './shared.ts'
 
 /** Minimal shape of the Connection fetch registry this plugin consumes. */
 interface FetchRouteRegistrar {
@@ -40,8 +40,16 @@ export function registerRoutes(
   config: Config,
   store: SidecarStore,
   engine: {
-    snapshot(sessionId: string): { active: ActiveCompression[]; blockingSince: number | null; blockingReason: BlockingReason | null }
+    snapshot(sessionId: string): {
+      active: ActiveCompression[]
+      blockingSince: number | null
+      blockingReason: BlockingReason | null
+      pendingBranch: string | null
+      branch: { sessionId: string; entryId: string } | null
+      branchError: string | null
+    }
     stock(sessionId: string): { tokens: number; saved: number; ids: string[] } | undefined
+    handoff(sessionId: string, cancel?: boolean): boolean
   },
 ): void {
   ctx.inject(['connection', 'sessions', 'llm'], (child) => {
@@ -117,5 +125,25 @@ export function registerRoutes(
        }
       },
     }), 'reasoning-distill: catalog route')
+    child.effect(() => register({
+      path: HANDOFF_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      // The panel has written the distilled text into the history (a branch, or
+      // the surface itself); the original turn is stopped here, host-side, the
+      // same way the user's own stop button stops it.
+      fetch: async (request: Request): Promise<Response> => {
+        try {
+          const body = await request.json() as { sessionId?: unknown; cancel?: unknown }
+          const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
+          if (sessionId === '') return json({ error: 'sessionId is required' }, 400)
+          // In-place backends rewrite the history the turn keeps using, so their
+          // hand-off clears the pending flag without stopping the conversation.
+          return json({ ok: engine.handoff(sessionId, body.cancel !== false) })
+        } catch (error: unknown) {
+          return json({ error: error instanceof Error ? error.message : String(error) }, 500)
+        }
+      },
+    }), 'reasoning-distill: handoff route')
   })
 }

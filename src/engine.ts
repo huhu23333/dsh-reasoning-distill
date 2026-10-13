@@ -21,6 +21,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-subagent'
 
+import { backendById, rewriteRequest } from './backends.ts'
 import { resolveRule, type Config, type ModelRule } from './config.ts'
 import { priceAt } from './peak.ts'
 import { DEFAULT_PROMPT } from './prompt.ts'
@@ -102,6 +103,16 @@ export class ReasoningDistillEngine {
    * pre-step retries the read, so this clears itself once the record is back.
    */
   private readonly storageBroken = new Set<string>()
+  /**
+   * The rewrite awaiting a hand-off, per session: the entry whose distilled text
+   * some backend should write into the history. The panel picks it up, asks the
+   * backend, then stops the original turn through {@link ReasoningDistillEngine.handoff}.
+   */
+  private readonly pendingBranch = new Map<string, string>()
+  /** Branch created for a session by the host-side hand-off, awaiting the panel. */
+  private readonly branch = new Map<string, { sessionId: string; entryId: string }>()
+  /** Why the last hand-off fell back to the original conversation. */
+  private readonly branchError = new Map<string, string>()
   /** Cached derived-index maps keyed by session id. */
   /** Session ids whose accessor this engine already wrapped. */
   private readonly wrapped = new WeakSet<object>()
@@ -164,6 +175,9 @@ export class ReasoningDistillEngine {
       // the read is still in flight. Single-flight makes this join that read.
       await this.ensureLoaded(payload.agent.session)
       await this.settle(payload.agent.session)
+      // A successful compression with a branch backend ends this turn *before* any
+      // request goes out: the conversation continues on the branch instead.
+      if (await this.handOffToBranch(payload.agent.session)) return { kind: 'reject' }
       return next()
     })
   }
@@ -210,6 +224,9 @@ export class ReasoningDistillEngine {
     this.ownSessions.delete(sessionId)
     this.sessionKind.delete(sessionId)
     this.storageBroken.delete(sessionId)
+    this.pendingBranch.delete(sessionId)
+    this.branch.delete(sessionId)
+    this.branchError.delete(sessionId)
     this.blocked.delete(sessionId)
     for (const key of [...this.pending.keys()]) {
       if (key.startsWith(`${sessionId}:`)) this.pending.delete(key)
@@ -405,6 +422,91 @@ export class ReasoningDistillEngine {
       saved += entry.savedTokensPerRequest * (priceAt(entry.model, prices, now, this.config).bucket.hit / 1_000_000)
     }
     return { tokens, saved, ids: [...applied.keys()] }
+  }
+
+  /**
+   * Hand a turn over to a branch the moment a compression succeeded.
+   *
+   * Only a *branch* backend can be driven from here: its endpoint lives on the
+   * web server and needs no browser session, so the branch is ready before the
+   * pre-step would assemble a request — the original conversation then ends
+   * without spending a single call. An in-place backend is applied by the panel
+   * instead (its `/api/*` routes require the browser's credentials), and the
+   * request it would have sent is already short thanks to the replay rewrite.
+   * @param session - session whose pre-step is running.
+   * @returns true when the turn should be rejected in favour of the branch.
+   */
+  private async handOffToBranch(session: Session): Promise<boolean> {
+    const entryId = this.pendingBranch.get(session.id)
+    if (entryId === undefined) return false
+    const backend = backendById(this.config.rewriteBackend.get())
+    if (backend === undefined || backend.kind !== 'branch') return false
+    const record = this.store.peek(session.id)
+    const entry = record?.entries.find(item => item.id === entryId)
+    if (entry === undefined || entry.distilledText === '') {
+      this.pendingBranch.delete(session.id)
+      return false
+    }
+    const port = (this.ctx as unknown as { webServer?: { port?: number } }).webServer?.port
+    if (typeof port !== 'number') {
+      // No reachable endpoint: leave the hand-off to the panel rather than
+      // wedging the turn.
+      this.ctx.logger.debug('reasoning-distill: no web server port; branch hand-off deferred to the panel')
+      return false
+    }
+    const request = rewriteRequest(backend.id, session.id, {
+      targetSeq: entry.targetSeq,
+      targetMessageId: entry.targetMessageId,
+      targetBlockIndex: entry.targetBlockIndex ?? -1,
+    }, entry.distilledText)
+    if (request === undefined) {
+      this.pendingBranch.delete(session.id)
+      return false
+    }
+    try {
+      const response = await fetch(`http://127.0.0.1:${port}${request.path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request.body),
+        signal: AbortSignal.timeout(15_000),
+      })
+      const payload = await response.json().catch(() => null) as { sessionId?: unknown; error?: unknown } | null
+      const created = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
+      if (!response.ok || created === '') {
+        this.branchError.set(session.id, typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`)
+        this.pendingBranch.delete(session.id)
+        return false
+      }
+      this.branch.set(session.id, { sessionId: created, entryId })
+      this.branchError.delete(session.id)
+      this.pendingBranch.delete(session.id)
+      this.ctx.logger.info('reasoning-distill: handed %s over to branch %s', session.id, created)
+      return true
+    } catch (error: unknown) {
+      this.branchError.set(session.id, error instanceof Error ? error.message : String(error))
+      this.pendingBranch.delete(session.id)
+      return false
+    }
+  }
+
+  /**
+   * Stop a session's running turn, as the user's own stop button does.
+   *
+   * Called once the distilled text has been written into a new or rewritten
+   * history: the original conversation must not keep spending on the long
+   * version it just replaced.
+   * @param sessionId - session whose turn may end.
+   * @param cancel - false to clear the pending hand-off without stopping the turn.
+   * @returns whether a running agent was found and asked to stop.
+   */
+  handoff(sessionId: string, cancel = true): boolean {
+    this.pendingBranch.delete(sessionId)
+    const agents = (this.ctx as unknown as { agents?: { get(id: string): { cancel(cause: { kind: string }): void } | undefined } }).agents
+    if (!cancel) return false
+    const agent = agents?.get(sessionId)
+    if (agent === undefined) return false
+    agent.cancel({ kind: 'user' })
+    return true
   }
 
   /** The live session behind an id, when this engine still knows it. */
@@ -616,7 +718,7 @@ export class ReasoningDistillEngine {
    * @param sessionId - session being reported.
    * @returns running compressions and whether a step is currently blocked.
    */
-  snapshot(sessionId: string): { active: ActiveCompression[]; blockingSince: number | null; blockingReason: BlockingReason | null } {
+  snapshot(sessionId: string): { active: ActiveCompression[]; blockingSince: number | null; blockingReason: BlockingReason | null; pendingBranch: string | null; branch: { sessionId: string; entryId: string } | null; branchError: string | null } {
     const active: ActiveCompression[] = []
     for (const entry of this.running.values()) {
       if (entry.sessionId !== sessionId) continue
@@ -624,7 +726,14 @@ export class ReasoningDistillEngine {
       active.push(rest)
     }
     const blocked = this.blocked.get(sessionId)
-    return { active, blockingSince: blocked?.since ?? null, blockingReason: blocked?.reason ?? null }
+    return {
+      active,
+      blockingSince: blocked?.since ?? null,
+      blockingReason: blocked?.reason ?? null,
+      pendingBranch: this.pendingBranch.get(sessionId) ?? null,
+      branch: this.branch.get(sessionId) ?? null,
+      branchError: this.branchError.get(sessionId) ?? null,
+    }
   }
 
   /** Pending-map key for one step. */
@@ -881,6 +990,11 @@ export class ReasoningDistillEngine {
       record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq)
       record.entries.push(entry)
     })
+    // The rewrite is now durable and worth writing into the history itself: the
+    // panel asks the selected backend to do that, then stops this turn.
+    if (this.config.enabled.get() && this.config.rewriteBackend.get() !== '') {
+      this.pendingBranch.set(session.id, entry.id)
+    }
     this.ctx.logger.info(
       'reasoning-distill: %s %s reasoning %d -> %d tokens, saved %.1f 元 per later request',
       target.provider, target.model, originalTokens, distilledTokens,

@@ -1,9 +1,7 @@
 export const NS = 'reasoningDistill'
 
 export const zh = {
-  'view.applyRewrite': '就地应用改写', 'view.backendUnset': '未选择助手消息改写后端（见设置）',
-  'settings.backend': '助手消息改写后端（单选）', 'settings.backendHint': '只列出已安装的后端；未选的置灰。再次点击已选中的后端可取消选择。没有选择后端时无法把改写写回会话历史，因此「启用思考压缩」会强制关闭并锁定。', 'settings.backendBranch': '另开分支会话', 'settings.backendInPlace': '就地改写模型可见历史', 'settings.backendInstalled': '已安装', 'settings.backendMissing': '未安装', 'settings.masterLocked': '未选择改写后端：总开关已锁定为关闭。',
-  'view.branch': '以蒸馏版开分支', 'view.branchCreate': '创建分支', 'view.branching': '创建中…', 'view.branchUnavailable': '（该条已不在上下文中，无法分支）', 'view.branchNeedsPlugin': '需要安装 dsh-message-edit 才能创建分支', 'view.branchFailed': '创建分支失败',
+  'settings.backend': '助手消息改写后端（单选）', 'settings.backendHint': '只列出已安装的后端；未选的置灰。再次点击已选中的后端可取消选择。没有选择后端时无法把改写写回会话历史，因此「启用思考压缩」会强制关闭并锁定。', 'settings.backendBranch': '另开分支会话', 'settings.backendInPlace': '就地改写模型可见历史', 'settings.backendInstalled': '已安装', 'settings.backendMissing': '未安装', 'settings.masterLocked': '未选择改写后端：总开关已锁定为关闭。', 'view.branchFailed': '创建分支失败',
   'view.avoided': '已避免的开销',
   'view.entryLedger': '增加开销 − 已避免开销', 'view.signNote': '符号约定统一为“一本账”：正数=多花的开销，负数=省下的开销；token 同约定。',
   'settings.catalogFailure': '模型目录加载失败：暂时无法选择蒸馏模型，稍后重试或直接填 provider/模型名。',
@@ -75,9 +73,7 @@ export const zh = {
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
-  'view.applyRewrite': 'Apply rewrite in place', 'view.backendUnset': 'no assistant-rewrite backend selected (Settings)',
-  'settings.backend': 'Assistant-rewrite backend (one)', 'settings.backendHint': 'Only installed backends are listed; the rest are greyed out. Clicking the selected one again clears the choice. With no backend nothing can write a rewrite back into the history, so the master switch is forced off and locked.', 'settings.backendBranch': 'opens a branch session', 'settings.backendInPlace': 'rewrites the model-visible history in place', 'settings.backendInstalled': 'installed', 'settings.backendMissing': 'not installed', 'settings.masterLocked': 'No rewrite backend selected: the master switch is locked off.',
-  'view.branch': 'Branch with the distilled text', 'view.branchCreate': 'Create branch', 'view.branching': 'Creating…', 'view.branchUnavailable': '(not in the current context — nothing to branch)', 'view.branchNeedsPlugin': 'install dsh-message-edit to create branches', 'view.branchFailed': 'Branching failed',
+  'settings.backend': 'Assistant-rewrite backend (one)', 'settings.backendHint': 'Only installed backends are listed; the rest are greyed out. Clicking the selected one again clears the choice. With no backend nothing can write a rewrite back into the history, so the master switch is forced off and locked.', 'settings.backendBranch': 'opens a branch session', 'settings.backendInPlace': 'rewrites the model-visible history in place', 'settings.backendInstalled': 'installed', 'settings.backendMissing': 'not installed', 'settings.masterLocked': 'No rewrite backend selected: the master switch is locked off.', 'view.branchFailed': 'Branching failed',
   'view.avoided': 'Spending avoided so far',
   'view.entryLedger': 'Increase − already avoided', 'view.signNote': 'Signs read as one ledger: positive means extra spending, negative means spending avoided. Same convention for tokens.',
   'settings.catalogFailure': 'Could not load the model catalog: the distiller cannot be picked right now — retry later or type the provider/model directly.',

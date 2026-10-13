@@ -1799,6 +1799,90 @@ check('no rewrite is recorded either', (await store36.load(s36.id)).entries.leng
 check('and the reasoning is replayed untouched',
   s36.deriveMessages().some(message => JSON.stringify(message).includes('hmm, let me think.')))
 
+console.log('scenario 37: a successful compression ends the turn before any request')
+handlers.clear()
+const { createServer } = await import('node:http')
+/** A stand-in for the branch backend; records what the host asked it to do. */
+const backendCalls: Array<{ path: string; body: Record<string, unknown> }> = []
+let backendStatus = 200
+let backendReply: Record<string, unknown> = { sessionId: 'session-branch-1' }
+const backend = createServer((request, response) => {
+  const chunks: Buffer[] = []
+  request.on('data', (chunk: Buffer) => chunks.push(chunk))
+  request.on('end', () => {
+    let body: Record<string, unknown> = {}
+    try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown> } catch { body = {} }
+    backendCalls.push({ path: request.url ?? '', body })
+    response.writeHead(backendStatus, { 'content-type': 'application/json' })
+    response.end(JSON.stringify(backendReply))
+  })
+})
+await new Promise<void>(resolve => backend.listen(0, '127.0.0.1', resolve))
+const backendPort = (backend.address() as { port: number }).port
+/** Dispatch one event and keep the handler's decision. */
+const decide = async (name: string, ...args: unknown[]): Promise<unknown> => {
+  let decision: unknown
+  for (const fn of handlers.get(name) ?? []) decision = await fn(...args)
+  return decision
+}
+const ctx37 = { ...ctx, webServer: { port: backendPort } }
+const store37 = new SidecarStore()
+const engine37 = new ReasoningDistillEngine(ctx37 as never, cfg10 as never, store37)
+engine37.start()
+const s37 = new FakeSession('session-handoff')
+sessions.set(s37.id, s37)
+await fire('session/created', s37)
+s37.append('user/message', { id: 'u37', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const seq37 = s37.append('assistant/message', {
+  turn: 1, step: 1,
+  message: { id: 'a37', role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+}).seq
+s37.append('step/end', { turn: 1, step: 1 })
+await fire('session/event', s37, s37.eventAt(seq37))
+await fire('session/event', s37, s37.eventAt(s37.log.length - 1))
+await settleFor(async () => (await store37.load(s37.id)).entries.length === 1)
+let nextCalled37 = false
+const decision37 = await decide('agent/pre-step', { agent: { session: s37 } }, async () => { nextCalled37 = true; return { kind: 'enter', messages: [] } })
+check('the finished compression is handed to the branch backend',
+  backendCalls.length === 1 && backendCalls[0]!.path === '/message-edit', JSON.stringify(backendCalls))
+check('the backend is asked to edit exactly that reasoning block',
+  backendCalls[0]?.body['action'] === 'edit' && backendCalls[0]?.body['eventSeq'] === seq37
+  && backendCalls[0]?.body['blockIndex'] === 0 && backendCalls[0]?.body['text'] === 'Distilled: ask for Paris weather and call the tool.',
+  JSON.stringify(backendCalls[0]?.body))
+check('the original turn is rejected before any request goes out',
+  (decision37 as { kind?: string }).kind === 'reject' && !nextCalled37, JSON.stringify(decision37))
+const snap37 = engine37.snapshot(s37.id)
+check('and the branch is published for the panel to open',
+  snap37.branch?.sessionId === 'session-branch-1' && snap37.pendingBranch === null, JSON.stringify(snap37.branch))
+
+console.log('scenario 38: a backend that refuses leaves the conversation where it was')
+backendStatus = 500
+backendReply = { error: 'backend said no' }
+const store38 = new SidecarStore()
+const engine38 = new ReasoningDistillEngine(ctx37 as never, cfg10 as never, store38)
+engine38.start()
+const s38 = new FakeSession('session-handoff-fail')
+sessions.set(s38.id, s38)
+await fire('session/created', s38)
+s38.append('user/message', { id: 'u38', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const seq38 = s38.append('assistant/message', {
+  turn: 1, step: 1,
+  message: { id: 'a38', role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+}).seq
+s38.append('step/end', { turn: 1, step: 1 })
+await fire('session/event', s38, s38.eventAt(seq38))
+await fire('session/event', s38, s38.eventAt(s38.log.length - 1))
+await settleFor(async () => (await store38.load(s38.id)).entries.length === 1)
+let nextCalled38 = false
+const decision38 = await decide('agent/pre-step', { agent: { session: s38 } }, async () => { nextCalled38 = true; return { kind: 'enter', messages: [] } })
+check('the turn continues on the original conversation', nextCalled38 && (decision38 as { kind?: string }).kind === 'enter', JSON.stringify(decision38))
+check('and the failure is reported instead of silently retrying',
+  engine38.snapshot(s38.id).branchError === 'backend said no', String(engine38.snapshot(s38.id).branchError))
+check('no branch is published', engine38.snapshot(s38.id).branch === null)
+await new Promise<void>(resolve => backend.close(() => { resolve() }))
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1

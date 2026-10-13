@@ -110,6 +110,15 @@ export interface SessionReport {
    * Authoritative for the per-entry stock; absent means offline.
    */
   stockIds?: string[]
+  /**
+   * Entry id whose distilled text still has to be written into the history by a
+   * backend, or null. The panel applies it and then calls the hand-off route.
+   */
+  pendingBranch?: string | null
+  /** Branch the host created for the last successful compression, if any. */
+  branch?: { sessionId: string; entryId: string } | null
+  /** Why that hand-off fell back to continuing on the original conversation. */
+  branchError?: string | null
   /** savedTotal − distillCost − cacheBreakCost. */
   net: number
   triggers: number
@@ -200,4 +209,6 @@ export interface CatalogReport {
 
 /** Route paths owned by this plugin. */
 export const REPORT_ROUTE = '/api/reasoning-distill/report'
+/** Same-origin route that stops a session's turn once a rewrite has landed. */
+export const HANDOFF_ROUTE = '/api/reasoning-distill/handoff'
 export const CATALOG_ROUTE = '/api/reasoning-distill/catalog'

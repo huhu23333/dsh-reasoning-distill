@@ -47,6 +47,12 @@ export function buildReport(
     stock?: { tokens: number; saved: number; ids: string[] }
     /** Clock used to price the fallback stock; defaults to now. */
     now?: number
+    /** Entry awaiting a backend hand-off, when one is owed. */
+    pendingBranch?: string | null
+    /** Branch the host already created for this turn, for the panel to open. */
+    branch?: { sessionId: string; entryId: string } | null
+    /** Why the last hand-off fell back to the original conversation. */
+    branchError?: string | null
   } = { active: [], blockingSince: null, blockingReason: null },
 ): SessionReport {
   const entries: CompressionEntry[] = record.entries
@@ -145,6 +151,9 @@ export function buildReport(
       defaultDistiller: `${defaultRule.distiller.provider}/${defaultRule.distiller.model}`,
       peak: peakInfo(config),
     },
+    pendingBranch: live.pendingBranch ?? null,
+    branch: live.branch ?? null,
+    branchError: live.branchError ?? null,
     active: live.active,
     blockingSince: live.blockingSince,
     blockingReason: live.blockingReason,
