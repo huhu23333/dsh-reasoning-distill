@@ -189,23 +189,26 @@ export class ReasoningDistillEngine {
       // A queued pre-step from a session object that a successor has replaced must
       // not act for the new one. Only a *different* known object counts: an id the
       // engine never attached (resumed before this plugin loaded) is left alone.
-      const attached = this.current.get(session.id)
-      if (attached !== undefined && attached !== session) return next()
+      if (this.replaced(session)) return next()
       const signal = (payload as { signal?: AbortSignal }).signal
       // A stalled sidecar read must not outlive a stop either: the host only looks
       // at its signal once this handler returns.
-      await this.untilAborted(this.ensureLoaded(payload.agent.session), signal)
-      if (signal?.aborted) return next()
+      await this.untilAborted(this.ensureLoaded(session), signal)
+      // The read is awaited: the id can be replaced underneath it, and then this
+      // obsolete pre-step must not settle, hand off or arm anything.
+      if (signal?.aborted || this.replaced(session)) return next()
       // A stop must end the wait, not queue behind it: the host only looks at its
       // signal once this handler returns.
-      if (!await this.settle(payload.agent.session, signal)) return next()
+      if (!await this.settle(session, signal)) return next()
+      // The wait is even longer than the read: check again before acting for it.
+      if (this.replaced(session)) return next()
       // A successful compression with a branch backend ends this turn *before* any
       // request goes out: the conversation continues on the branch instead.
-      if (!signal?.aborted && await this.handOffToBranch(payload.agent.session, signal)) return { kind: 'reject' }
+      if (!signal?.aborted && await this.handOffToBranch(session, signal)) return { kind: 'reject' }
       // The loop assembles the request right after this returns; arming the
       // session here is what lets the wrapper tell that derivation apart from a
       // viewer's.
-      this.expectRequest.add(payload.agent.session.id)
+      this.expectRequest.add(session.id)
       return next()
     })
   }
@@ -365,6 +368,19 @@ export class ReasoningDistillEngine {
   }
 
   /** Wrap one session's derived-history accessor exactly once. */
+  /**
+   * Whether a session object has been superseded by another object on its id.
+   *
+   * Ids the engine never attached (a session resumed before this plugin loaded)
+   * are not replacements and must keep working.
+   * @param session - the object an event or hook is acting for.
+   * @returns true when a different object now owns that id.
+   */
+  private replaced(session: Session): boolean {
+    const attached = this.current.get(session.id)
+    return attached !== undefined && attached !== session
+  }
+
   private attach(session: Session): void {
     if (this.wrapped.has(session)) return
     this.wrapped.add(session)
@@ -962,7 +978,8 @@ export class ReasoningDistillEngine {
     // for the promise to settle is the whole guarantee: the next request is
     // built only after the rewrite is in place, or after that compression gave up.
     // The wait is published so the UI can say why a step has not been sent.
-    this.blocked.set(sessionId, { since: Date.now(), reason: blockingReason(session) })
+    const startedAt = Date.now()
+    this.blocked.set(sessionId, { since: startedAt, reason: blockingReason(session) })
     try {
       // Waiting is the contract: the next request is assembled only once the
       // rewrite is in place. A compression whose rule sets a timeout is already
@@ -989,7 +1006,9 @@ export class ReasoningDistillEngine {
       }
       return signal === undefined || !signal.aborted
     } finally {
-      this.blocked.delete(sessionId)
+      // Only clear the indicator this wait published: a successor generation may
+      // already have published its own.
+      if (this.blocked.get(sessionId)?.since === startedAt) this.blocked.delete(sessionId)
     }
   }
 
