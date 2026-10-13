@@ -409,8 +409,10 @@ export class ReasoningDistillEngine {
       writable: true,
       value: function deriveMessagesDistilled(this: Session): Message[] {
         const messages = original()
-        // A loaded plugin must not keep rewriting prompts after it is unloaded.
-        if (!engine.active) return messages
+        // A loaded plugin must not keep rewriting prompts after it is unloaded, and
+        // a session object a successor has replaced must not be rewritten at all:
+        // its stale turn would otherwise receive another generation's rewrite.
+        if (!engine.active || engine.replaced(this)) return messages
         const result = engine.applyRewrites(this, messages)
         // Remember exactly what this request carried: accounting settles against
         // it rather than re-deriving an answer from a later surface.
