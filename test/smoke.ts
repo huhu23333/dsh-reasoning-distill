@@ -2520,8 +2520,70 @@ check('a settle from a different generation is refused',
   engine53.handoff(s53.id, true, 'x', second53.id, engine53.snapshot(s53.id).generation + 1) === false
   && engine53.snapshot(s53.id).pendingBranch === second53.id)
 check('and the attempt that does own it can settle',
-  engine53.handoff(s53.id, false, undefined, second53.id, engine53.snapshot(s53.id).generation) === false
+  // An in-place settle reports that it took effect (true) even though it never
+  // stops the turn, which is what the route's `ok` now means.
+  engine53.handoff(s53.id, false, undefined, second53.id, engine53.snapshot(s53.id).generation) === true
   && engine53.snapshot(s53.id).pendingBranch === null)
+
+console.log('scenario 54: a branch that cannot be recorded must not stop the original turn')
+handlers.clear()
+const { createServer: createServer54 } = await import('node:http')
+let failWrites54 = false
+const branchBackend54 = createServer54((request, response) => {
+  request.on('data', () => undefined)
+  request.on('end', () => {
+    // The branch is created; from here on the local record cannot be written.
+    failWrites54 = true
+    response.writeHead(200, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ sessionId: 'branch-54' }))
+  })
+})
+await new Promise<void>(resolve => branchBackend54.listen(0, '127.0.0.1', resolve))
+const port54 = (branchBackend54.address() as { port: number }).port
+const realStore54 = new SidecarStore()
+const flakyStore54 = {
+  load: (id: string) => realStore54.load(id),
+  peek: (id: string) => realStore54.peek(id),
+  update: async (id: string, mutate: (record: never) => void) => {
+    if (failWrites54) throw new Error('disk full')
+    return realStore54.update(id, mutate as never)
+  },
+} as never
+const engine54 = new ReasoningDistillEngine({ ...ctx, webServer: { port: port54 } } as never, cfg10 as never, flakyStore54)
+engine54.start()
+const s54 = new FakeSession('session-record-54')
+sessions.set(s54.id, s54)
+await fire('session/created', s54)
+await runStep40(engine54, s54, '54')
+await settleFor(async () => (await realStore54.load(s54.id)).entries.length === 1)
+const entry54 = (await realStore54.load(s54.id)).entries[0]!
+let nextCalled54 = false
+let decision54: unknown
+for (const fn of handlers.get('agent/pre-step') ?? []) {
+  decision54 = await fn({ agent: { session: s54 } }, async () => { nextCalled54 = true; return { kind: 'enter', messages: [] } })
+}
+check('an unrecordable branch leaves the original turn running',
+  nextCalled54 && (decision54 as { kind?: string }).kind === 'enter', JSON.stringify(decision54))
+check('and the entry records no branch it cannot point at',
+  (await realStore54.load(s54.id)).entries.find(item => item.id === entry54.id)?.handoff === undefined)
+await new Promise<void>(resolve => branchBackend54.close(() => { resolve() }))
+
+console.log('scenario 55: an in-place settle reports that it took effect')
+handlers.clear()
+const store55 = new SidecarStore()
+const engine55 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store55)
+engine55.start()
+const s55 = new FakeSession('session-settle-55')
+sessions.set(s55.id, s55)
+await fire('session/created', s55)
+await runStep40(engine55, s55, '55')
+await settleFor(async () => (await store55.load(s55.id)).entries.length === 1)
+const entry55 = (await store55.load(s55.id)).entries[0]!
+const gen55 = engine55.snapshot(s55.id).generation
+check('an in-place settle reports success even though no turn was stopped',
+  engine55.handoff(s55.id, false, undefined, entry55.id, gen55) === true && engine55.snapshot(s55.id).pendingBranch === null)
+check('a settle with no pending rewrite reports that nothing was settled',
+  engine55.handoff(s55.id, false, undefined, entry55.id, gen55) === false)
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

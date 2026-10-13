@@ -575,8 +575,15 @@ export class ReasoningDistillEngine {
         this.ctx.logger.warn('reasoning-distill: branch refused for %s (%s); carrying on in place', session.id, reason)
         return false
       }
-      await this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, generation)
+      const recorded = await this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, generation)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
+      if (!recorded) {
+        // The branch exists, but nothing the panel can see points at it. Ending the
+        // turn here would strand the user in a stopped conversation with no route
+        // to the branch, so the original continues instead.
+        this.ctx.logger.warn('reasoning-distill: branch %s was created but not recorded; continuing in the original', created)
+        return false
+      }
       this.ctx.logger.info('reasoning-distill: handed %s over to branch %s', session.id, created)
       // Only the generation that asked for this hand-off may have its turn ended:
       // a disposed one is already gone.
@@ -648,7 +655,7 @@ export class ReasoningDistillEngine {
     entryId: string,
     outcome: { state: 'created' | 'failed'; branchId?: string; error?: string; at: number },
     generation?: number,
-  ): Promise<void> {
+  ): Promise<boolean> {
     try {
       await this.store.update(sessionId, (record) => {
         // Checked inside the mutator: the write is queued, so the generation can
@@ -657,8 +664,10 @@ export class ReasoningDistillEngine {
         const entry = record.entries.find(item => item.id === entryId)
         if (entry !== undefined) entry.handoff = outcome
       })
+      return true
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not record the hand-off: %o', error)
+      return false
     }
   }
 
@@ -684,6 +693,11 @@ export class ReasoningDistillEngine {
     if (error !== undefined && pending !== undefined) {
       void this.recordHandoff(sessionId, pending, { state: 'failed', error, at: Date.now() })
     }
+    // The returned value means "this settle took effect" (the pending rewrite of
+    // that entry is gone). Ending a turn is a side effect, not the outcome: an
+    // in-place settle never stops the turn yet has still settled successfully.
+    if (!cancel) return true
+    if (pending === undefined) return false
     const agents = (this.ctx as unknown as { agents?: { get(id: string): { cancel(cause: { kind: string }): void } | undefined } }).agents
     // Only a hand-off this plugin is completing may stop a turn: without a pending
     // rewrite of ours there is nothing to hand over, and cancelling would let any
