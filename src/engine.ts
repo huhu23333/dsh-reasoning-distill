@@ -382,12 +382,12 @@ export class ReasoningDistillEngine {
         const result = engine.applyRewrites(this, messages)
         // Remember exactly what this request carried: accounting settles against
         // it rather than re-deriving an answer from a later surface.
-        // Only the derivation that assembles the model request may record what
-        // that request carried: a viewer or another plugin deriving the same
-        // session must not be able to rewrite the accounting of a request that is
-        // already in flight. `agent/pre-step` arms the session just before the
-        // loop assembles, so unarmed derivations are ignored.
-        if (engine.expectRequest.delete(this.id)) {
+        // Only derivations inside the window the pre-step opened may record what a
+        // request carried, so a viewer or another plugin deriving an already
+        // in-flight request cannot rewrite its accounting. The marker is *not*
+        // consumed: another pre-step hook may derive the same messages for
+        // inspection first, and the request's own derivation must still record.
+        if (engine.expectRequest.has(this.id)) {
           const nodes = this.surface.nodes
           const history = engine.applied.get(this.id) ?? []
           history.push({
@@ -399,7 +399,7 @@ export class ReasoningDistillEngine {
             ids: result.applied,
           })
           // Only the recent derivations can still be awaiting a response.
-          if (history.length > 8) history.splice(0, history.length - 8)
+          if (history.length > 16) history.splice(0, history.length - 16)
           engine.applied.set(this.id, history)
         }
         return result.out
@@ -480,6 +480,10 @@ export class ReasoningDistillEngine {
       // The message must still carry reasoning: a projection can rewrite it (or
       // strip the reasoning) at the same seq, and then this rewrite has nothing
       // to replace and must not be recorded as applied.
+      // The message actually being replaced decides: an earlier wrapper may have
+      // edited the reasoning in its returned list while the durable event stayed
+      // the same, and that edit must not be overwritten by stale distillation.
+      if (entry.originalHash !== undefined && hashText(reasoningTextOf(source)) !== entry.originalHash) continue
       const replaced = withDistilledReasoning(source, entry.distilledText)
       if (replaced === undefined) continue
       out ??= [...messages]
@@ -696,7 +700,7 @@ export class ReasoningDistillEngine {
     const pending = this.pendingBranch.get(sessionId)
     this.pendingBranch.delete(sessionId)
     if (error !== undefined && pending !== undefined) {
-      void this.recordHandoff(sessionId, pending, { state: 'failed', error, at: Date.now() })
+      void this.recordHandoff(sessionId, pending, { state: 'failed', error, at: Date.now() }, generation)
     }
     // The returned value means "this settle took effect" (the pending rewrite of
     // that entry is gone). Ending a turn is a side effect, not the outcome: an
@@ -965,11 +969,16 @@ export class ReasoningDistillEngine {
         // user's own stop, which arrives as this signal.
         await this.untilAborted(waits, signal)
       } else {
+        let deadlineTimer: ReturnType<typeof setTimeout> | undefined
         const deadline = new Promise<void>(resolve => {
-          const timer = setTimeout(resolve, Math.max(...bounds) + 30_000)
-          timer.unref?.()
+          deadlineTimer = setTimeout(resolve, Math.max(...bounds) + 30_000)
+          deadlineTimer.unref?.()
         })
-        await this.untilAborted(Promise.race([waits, deadline]), signal)
+        try {
+          await this.untilAborted(Promise.race([waits, deadline]), signal)
+        } finally {
+          if (deadlineTimer !== undefined) clearTimeout(deadlineTimer)
+        }
       }
       return signal === undefined || !signal.aborted
     } finally {
@@ -1330,10 +1339,22 @@ export class ReasoningDistillEngine {
       originalHash,
       ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, adoptedId) ? { sessionMissing: true as const } : {},
     }
+    if (abandonedNow()) {
+      // The wait bound expired while this attempt was still finishing. It must not
+      // adopt its rewrite, but the spend is real: record it as an abandoned attempt
+      // so the report shows why nothing was substituted.
+      await this.store.update(session.id, (record) => {
+        if ((this.generation.get(session.id) ?? 0) !== generation) return
+        record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq || (item.failed !== true && item.skipped !== true))
+        // Same id as the adopted entry would have had: the audit settlement and
+        // its auditBroken marker both refer to that id, so a late flush failure
+        // must still find this row and mark it.
+        record.entries.push({ ...entry, failed: true, distill: { ...entry.distill, error: 'abandoned before the wait bound expired' } })
+      })
+      return
+    }
     await this.store.update(session.id, (record) => {
-      // Abandoned attempts never adopt: their spend stays visible through the audit
-      // session, but the rewrite itself must not appear after the wait gave up.
-      if (stale() || abandonedNow()) return
+      if (stale()) return
       record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq)
       record.entries.push(entry)
     })

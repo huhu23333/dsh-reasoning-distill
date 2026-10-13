@@ -186,22 +186,43 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   // not: the panel must retry *only* the settle, never the backend request.
   const settlePending = useRef(new Set<string>())
 
-  const settleHandoff = (current: SessionReport, entryId: string, error?: string): Promise<boolean> => fetch(HANDOFF_ROUTE, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-    sessionId: current.sessionId,
-      cancel: false,
-    entryId,
-    generation: current.generation,
-      ...error === undefined ? {} : { error },
-    }),
-  }).then(response => response.ok).catch(() => false)
+  /**
+   * Settle one hand-off and say how it went.
+   *
+   * `settled` means the host cleared that rewrite's pending flag; `refused` means
+   * the host answered `{ok:false}` because that attempt is no longer the current
+   * one (nothing to retry); `failed` means the request itself did not complete, so
+   * the settle is still owed.
+   */
+  const settleHandoff = async (current: SessionReport, entryId: string, error?: string): Promise<'settled' | 'refused' | 'failed'> => {
+    try {
+      const response = await fetch(HANDOFF_ROUTE, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          sessionId: current.sessionId,
+          cancel: false,
+          entryId,
+          generation: current.generation,
+          ...error === undefined ? {} : { error },
+        }),
+      })
+      if (!response.ok) return 'failed'
+      const payload = await response.json().catch(() => null) as { ok?: unknown } | null
+      return payload?.ok === false ? 'refused' : 'settled'
+    } catch {
+      return 'failed'
+    }
+  }
   useEffect(() => {
     const current = cache[sessionId]?.report
     if (current === undefined) return
     // The hand-off outcome lives on the entry, so the panel reads it there.
-    const created = current.entries.find(item => item.handoff?.state === 'created' && item.handoff.branchId !== undefined)
+    // Newest first: earlier branches were opened when they were created, and the
+    // first successful branch must not shadow every later one.
+    const created = current.entries
+      .filter(item => item.handoff?.state === 'created' && item.handoff.branchId !== undefined)
+      .pop()
     const branchId = created?.handoff?.branchId
     if (branchId !== undefined && !openedBranch.current.has(branchId)) {
       openedBranch.current.add(branchId)
@@ -215,9 +236,9 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     if (settlePending.current.has(attemptKey)) {
       // The rewrite is already in the history; only the host's pending flag is left.
       applyingPending.current.add(attemptKey)
-      void settleHandoff(current, pending).then(settled => {
+      void settleHandoff(current, pending).then(verdict => {
         applyingPending.current.delete(attemptKey)
-        if (settled) {
+        if (verdict !== 'failed') {
           settlePending.current.delete(attemptKey)
           appliedPending.current.add(attemptKey)
         }
@@ -243,17 +264,20 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       const outcome = rewriteApplyOutcome(response.ok, payload)
       if (!outcome.done) {
         // A backend that refused must not look like a completed hand-off: record
-        // why on the entry so the panel shows it.
-        await settleHandoff(current, pending, outcome.error ?? `HTTP ${response.status}`)
+        // why on the entry, and never re-post it (an in-place rewrite is not
+        // idempotent). Only an unfinished settle is retried.
+        const verdict = await settleHandoff(current, pending, outcome.error ?? `HTTP ${response.status}`)
+        appliedPending.current.add(attemptKey)
+        if (verdict === 'failed') settlePending.current.add(attemptKey)
         return
       }
-      const settled = await settleHandoff(current, pending)
-      if (settled) {
-        appliedPending.current.add(attemptKey)
-      } else {
-        // Keep the rewrite and retry the settle on a later poll instead of
+      const verdict = await settleHandoff(current, pending)
+      if (verdict === 'failed') {
+        // Keep the rewrite and retry only the settle on a later poll instead of
         // re-posting a backend request that already succeeded.
         settlePending.current.add(attemptKey)
+      } else {
+        appliedPending.current.add(attemptKey)
       }
     }).catch(async (error: unknown) => {
       await settleHandoff(current, pending, error instanceof Error ? error.message : String(error))

@@ -2636,6 +2636,36 @@ await fire('session/created', s57)
 check('an in-place settle with nothing pending reports no settlement',
   engine57.handoff(s57.id, false) === false && engine57.handoff(s57.id, true) === false)
 
+console.log('scenario 58: a pre-step inspector derivation does not steal the request record')
+handlers.clear()
+const store58 = new SidecarStore()
+const engine58 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store58)
+engine58.start()
+const s58 = new FakeSession('session-inspect-58')
+sessions.set(s58.id, s58)
+await fire('session/created', s58)
+const seq58 = await runStep40(engine58, s58, '58')
+await settleFor(async () => (await store58.load(s58.id)).entries.length === 1)
+const entry58 = (await store58.load(s58.id)).entries[0]!
+// The pre-step arms the session and a *later* hook derives for inspection first.
+for (const fn of handlers.get('agent/pre-step') ?? []) {
+  await fn({ agent: { session: s58 } }, async () => ({ kind: 'enter', messages: [] }))
+}
+const inspected = s58.deriveMessages()
+check('the inspector derivation replaced the reasoning', JSON.stringify(inspected).includes('Distilled:'))
+// The surface moves before the real request derivation: the rewrite no longer applies.
+s58.nodes.splice(0, s58.nodes.length, ...s58.nodes.filter(seq => seq !== seq58))
+s58.deriveMessages()
+const response58 = s58.append('assistant/message', {
+  turn: 2, step: 1,
+  message: { id: 'resp-58', role: 'assistant', content: [{ type: 'reasoning', text: 'short' }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+}).seq
+await fire('session/event', s58, s58.eventAt(response58))
+const after58 = (await store58.load(s58.id)).entries.find(item => item.id === entry58.id)!
+check('the request that could not carry the rewrite is not credited', after58.liveSaved === 0,
+  String(after58.liveSaved))
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1
