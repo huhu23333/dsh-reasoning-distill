@@ -589,7 +589,12 @@ export class ReasoningDistillEngine {
       // a disposed one is already gone.
       return (this.generation.get(session.id) ?? 0) === generation
     } catch (error: unknown) {
-      const reason = error instanceof Error ? error.message : String(error)
+      // A request that failed after it was sent may still have created a branch:
+      // the backend's contract has no idempotency key, so the outcome is genuinely
+      // unknown and this plugin cannot name the session. Say exactly that instead
+      // of implying nothing happened.
+      const detail = error instanceof Error ? error.message : String(error)
+      const reason = `branch request did not complete (${detail}); a branch may exist that this plugin cannot name`
       await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       this.ctx.logger.warn('reasoning-distill: branch failed for %s (%s); carrying on in place', session.id, reason)

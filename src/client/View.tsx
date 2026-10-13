@@ -280,6 +280,10 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
         appliedPending.current.add(attemptKey)
       }
     }).catch(async (error: unknown) => {
+      // The request did not complete, so whether the backend applied the rewrite
+      // is unknown. An in-place rewrite is not idempotent, so this is recorded as
+      // a failure and the pending flag is cleared rather than retried: a duplicate
+      // mutation is worse than a rewrite that did not land.
       await settleHandoff(current, pending, error instanceof Error ? error.message : String(error))
     }).finally(() => {
       // Released once the attempt is over: whether to try again is decided by the
