@@ -1245,6 +1245,10 @@ export class ReasoningDistillEngine {
       && entry.savedTokensPerRequest > 0)
     if (counting.length === 0) return
     const counted = new Set(counting.map(entry => entry.id))
+    // Remembered only after the write succeeded: the record is rolled back when the
+    // sidecar rejects the update, and so must this marker, or the entry whose first
+    // replay never persisted would be charged the hit price on the next answer.
+    const newlyMissPriced: string[] = []
     await this.store.update(sessionId, (current) => {
       if (stale()) return
       for (const entry of current.entries) {
@@ -1258,13 +1262,14 @@ export class ReasoningDistillEngine {
         const missKey = `${sessionId}:${entry.id}`
         const first = entry.liveRequests === 0 && !this.missCharged.has(missKey)
         const missPriced = entry.repriceMiss === true || first
-        if (missPriced) this.missCharged.add(missKey)
+        if (first) newlyMissPriced.push(missKey)
         entry.liveSaved += entry.savedTokensPerRequest * (missPriced ? miss : hit)
         entry.liveRequests += 1
         if (entry.repriceMiss === true) delete entry.repriceMiss
       }
       current.countedThroughSeq = seq
     })
+    for (const key of newlyMissPriced) this.missCharged.add(key)
   }
 
   /** Close the live epoch when the host compacted the history. */
