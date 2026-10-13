@@ -815,7 +815,7 @@ export class ReasoningDistillEngine {
         if (entry === undefined) return
         // Defensive against future queue changes: an older outcome cannot replace
         // a newer durable report. Today store.update already serializes by enqueue order.
-        if (entry.handoff !== undefined && outcome.at <= entry.handoff.at) return
+        if (entry.handoff !== undefined && outcome.at < entry.handoff.at) return
         entry.handoff = outcome
         written = true
       })
@@ -849,7 +849,11 @@ export class ReasoningDistillEngine {
     const mine = entryId === undefined || pending === entryId
     if (!mine) {
       if (error === undefined || entryId === undefined) return { ok: false, recorded: false }
-      const retried = await this.recordHandoff(sessionId, entryId, { state: 'failed', error, at: Date.now() }, generation)
+      const outcome = { state: 'failed' as const, error, at: Date.now() }
+      const retried = await this.recordHandoff(sessionId, entryId, outcome, generation)
+      if (!retried && (generation === undefined || (this.generation.get(sessionId) ?? 0) === generation)) {
+        this.oweNote(sessionId, entryId, outcome)
+      }
       return { ok: false, recorded: retried }
     }
     this.pendingBranch.delete(sessionId)

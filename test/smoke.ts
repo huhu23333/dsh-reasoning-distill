@@ -3122,6 +3122,75 @@ check('the next pre-step durably reports the newer failure, not the old branch, 
   && internals62c.owedHandoffNotes.has(key62c) === false && noteWrites62c === 4,
   JSON.stringify({ recovered62c, noteWrites62c }))
 
+console.log('scenario 62d: same-millisecond callers retain the later failed hand-off')
+handlers.clear()
+const store62d = new SidecarStore()
+const engine62d = new ReasoningDistillEngine(ctx as never, cfg10 as never, store62d)
+engine62d.start()
+const s62d = new FakeSession('session-same-millisecond-62d')
+sessions.set(s62d.id, s62d)
+await fire('session/created', s62d)
+await runStep40(engine62d, s62d, '62d')
+await settleFor(async () => (await store62d.load(s62d.id)).entries.length === 1)
+const entry62d = (await store62d.load(s62d.id)).entries[0]!
+const gen62d = engine62d.snapshot(s62d.id).generation
+const now62d = Date.now
+const tick62d = now62d()
+let first62d: Promise<{ ok: boolean; recorded: boolean }>
+let later62d: Promise<{ ok: boolean; recorded: boolean }>
+try {
+  Date.now = () => tick62d
+  first62d = engine62d.handoff(s62d.id, false, 'first backend failure', entry62d.id, gen62d)
+  later62d = engine62d.handoff(s62d.id, false, 'later backend failure', entry62d.id, gen62d)
+} finally {
+  Date.now = now62d
+}
+const [firstResult62d, laterResult62d] = await Promise.all([first62d!, later62d!])
+const saved62d = (await store62d.load(s62d.id)).entries[0]?.handoff
+check('later same-millisecond failure is recorded in queue order without a refused result',
+  firstResult62d.ok && firstResult62d.recorded && !laterResult62d.ok && laterResult62d.recorded
+  && saved62d?.error === 'later backend failure' && engine62d.snapshot(s62d.id).pendingBranch === null,
+  JSON.stringify({ firstResult62d, laterResult62d, saved62d }))
+
+console.log('scenario 62e: a failed record-only write is owed for the next pre-step')
+handlers.clear()
+const store62e = new SidecarStore()
+const update62e = store62e.update.bind(store62e)
+const s62e = new FakeSession('session-record-only-note-62e')
+let noteWrites62e = 0
+store62e.update = async (id, mutate) => {
+  if (id === s62e.id && ++noteWrites62e === 3) throw new Error('record-only disk failure')
+  return update62e(id, mutate)
+}
+const engine62e = new ReasoningDistillEngine(ctx as never, cfg10 as never, store62e)
+engine62e.start()
+sessions.set(s62e.id, s62e)
+await fire('session/created', s62e)
+await runStep40(engine62e, s62e, '62e')
+await settleFor(async () => (await store62e.load(s62e.id)).entries.length === 1)
+const entry62e = (await store62e.load(s62e.id)).entries[0]!
+const gen62e = engine62e.snapshot(s62e.id).generation
+const now62e = Date.now
+const tick62e = now62e()
+let first62e: Promise<{ ok: boolean; recorded: boolean }>
+let later62e: Promise<{ ok: boolean; recorded: boolean }>
+try {
+  Date.now = () => tick62e
+  first62e = engine62e.handoff(s62e.id, false, 'first backend failure', entry62e.id, gen62e)
+  later62e = engine62e.handoff(s62e.id, false, 'later backend failure', entry62e.id, gen62e)
+} finally {
+  Date.now = now62e
+}
+const [firstResult62e, laterResult62e] = await Promise.all([first62e!, later62e!])
+await fire('agent/pre-step', { agent: { session: s62e } }, async () => ({ kind: 'enter' }))
+await settleFor(async () => (await store62e.load(s62e.id)).entries[0]?.handoff?.error === 'later backend failure')
+const saved62e = (await store62e.load(s62e.id)).entries[0]?.handoff
+check('record-only disk failure recovers on pre-step without resending the backend',
+  firstResult62e.recorded && !laterResult62e.ok && !laterResult62e.recorded
+  && saved62e?.error === 'later backend failure' && noteWrites62e === 4
+  && engine62e.snapshot(s62e.id).pendingBranch === null,
+  JSON.stringify({ firstResult62e, laterResult62e, saved62e, noteWrites62e }))
+
 console.log('scenario 63: completed stalled read permits the next pre-step to settle and hand off')
 handlers.clear()
 const realStore63 = new SidecarStore()
