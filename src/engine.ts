@@ -1472,6 +1472,7 @@ export class ReasoningDistillEngine {
     // behind other work for that session, and by the time it executes the wait
     // bound may already have expired. Deciding before queueing would let an
     // abandoned attempt adopt its rewrite after the next request had gone out.
+    let adopted = false
     await this.store.update(session.id, (record) => {
       if ((this.generation.get(session.id) ?? 0) !== generation) return
       if (abandonedNow()) {
@@ -1485,10 +1486,14 @@ export class ReasoningDistillEngine {
       }
       record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq)
       record.entries.push(entry)
+      adopted = true
     })
     // The rewrite is now durable and worth writing into the history itself: the
     // panel asks the selected backend to do that, then stops this turn.
-    if (!stale() && !abandonedNow() && this.config.enabled.get() && this.config.rewriteBackend.get() !== '') {
+    // Follow the decision the mutation actually made: the wait bound can expire
+    // while the queued write is in flight, and re-checking it here would adopt the
+    // rewrite yet refuse to hand it over.
+    if (adopted && !stale() && this.config.enabled.get() && this.config.rewriteBackend.get() !== '') {
       this.pendingBranch.set(session.id, entry.id)
     }
     this.ctx.logger.info(
