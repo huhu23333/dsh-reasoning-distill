@@ -282,6 +282,32 @@ npm run typecheck    # 宿主半的真实 tsc（0 错误）；typecheck:all 会�
 
 冒烟测试覆盖四件事：阈值触发与蒸馏调用、`deriveMessages()` 里确实看到蒸馏版而日志仍是原文、工具调用块不被破坏、逐步节省记账与 compaction 纪元重置。`test/stubs/` 只用于这次离线构建，**不会**进入 `node_modules`——放在那里的桩会遮蔽运行时真正的 `@deepseek-ai/dsh-llm`。
 
+### 前置插件的启动问题与补丁（重要）
+
+`dsh-message-edit@0.2.3` 的客户端产物 require 了 **`@deepseek-ai/dsh-client-runtime/client`**，而该说明符只存在于 DSH 的**测试支撑构建**里，运行时模块表解析不到 → **整个 web 启动失败**：
+
+```
+dsh-message-edit: import failed: client-modules: require("@deepseek-ai/dsh-client-runtime/client")
+missed the module table — not a platform seed word, not a materialized module, and no
+registered package factory (a build-time externals drift …)
+```
+
+它要的 `createSnapshotStore` 其实由**平台种子模块** `@deepseek-ai/dsh-client-store` 再导出（`packages/client/store/src/index.ts:103`），所以只是**引错了模块名**，改一行即可（语义完全等价）：
+
+```diff
+-require("@deepseek-ai/dsh-client-runtime/client")
++require("@deepseek-ai/dsh-client-store")
+```
+
+**安装方式（任选其一）**：
+
+1. **用打好补丁的包**：`vendor/dsh-message-edit-patched1.tgz`（已改名 `dsh-message-edit-patched`、版本 `0.2.3-patched1`）。
+   尝试：`dsh plugin --profile web add file:/home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill/vendor/dsh-message-edit-patched1.tgz`
+2. **装原版再打补丁**：`dsh plugin --profile web add dsh-message-edit`，
+   然后 `python3 scripts/patch-message-edit.py`（默认路径 `~/.dsh/profiles/web/node_modules/dsh-message-edit/client.js`，幂等，可重复运行）。
+
+之后重启 `dsh web`。**注意**：重装/升级该插件会覆盖补丁，需要重跑脚本（或改用它上游修复后的版本——上游只需把那一行 require 换成 `@deepseek-ai/dsh-client-store`）。
+
 ## 可选前置：`dsh-message-edit`（"以蒸馏版开分支"）
 
 插件页每条记录的展开区有一个 **「以蒸馏版开分支」** 按钮。它**不自己实现分支**，而是调用同源端点：
