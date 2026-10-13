@@ -2222,6 +2222,44 @@ check('late events from a disposed object neither block nor stage for the succes
 check('and nothing was recorded for the successor', (await store44.load(after44.id)).entries.length === 0,
   JSON.stringify((await store44.load(after44.id)).entries.length))
 
+console.log('scenario 45: accounting and compaction continuations cannot write into a reused id')
+handlers.clear()
+const realStore45 = new SidecarStore()
+// A store whose reads stall long enough for the session to be replaced underneath.
+const slowStore45 = {
+  load: async (id: string) => { await new Promise(resolve => setTimeout(resolve, 150)); return realStore45.load(id) },
+  update: (id: string, mutate: (record: never) => void) => realStore45.update(id, mutate as never),
+  peek: (id: string) => realStore45.peek(id),
+} as never
+const engine45 = new ReasoningDistillEngine(ctx as never, cfg10 as never, slowStore45)
+engine45.start()
+const a45 = new FakeSession('session-cont-45')
+sessions.set(a45.id, a45)
+await fire('session/created', a45)
+await runStep40(engine45, a45, '45')
+// Wait for the compression itself, so the record exists before the continuations start.
+await settleFor(async () => (await realStore45.load(a45.id)).entries.length === 1)
+// These two dispatches start asynchronous continuations with a stalled read.
+const accSeq45 = a45.append('assistant/message', {
+  turn: 2, step: 1,
+  message: { id: 'acc-45', role: 'assistant', content: [{ type: 'reasoning', text: 'short' }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+}).seq
+await fire('session/event', a45, a45.eventAt(accSeq45))
+const comp45 = a45.append('compaction/end', { compactionId: 'c-45', turn: 2 })
+await fire('session/event', a45, a45.eventAt(comp45.seq))
+// The id is released and immediately reused while both reads are still pending.
+await fire('session/disposed', a45)
+const b45 = new FakeSession('session-cont-45')
+sessions.set(b45.id, b45)
+await fire('session/created', b45)
+await new Promise(resolve => setTimeout(resolve, 500))
+const after45 = await realStore45.load(b45.id)
+check('a stalled accounting continuation does not advance the reused id',
+  after45.countedThroughSeq !== accSeq45, `${after45.countedThroughSeq} vs ${accSeq45}`)
+check('and a stalled compaction continuation does not bump its epoch',
+  after45.epoch === 0, String(after45.epoch))
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1

@@ -912,7 +912,13 @@ export class ReasoningDistillEngine {
    */
   private async account(session: Session, seq: number, time: number, model: string, surface: Surface): Promise<void> {
     const sessionId = session.id
+    // Accounting continues asynchronously: the session can be disposed and its id
+    // reused while the record loads, and this continuation must not then write
+    // into the replacement's record or advance its bookkeeping.
+    const generation = this.generation.get(sessionId) ?? 0
+    const stale = (): boolean => (this.generation.get(sessionId) ?? 0) !== generation
     const record = await this.store.load(sessionId)
+    if (stale()) return
     if (record.entries.length === 0) return
     // A replayed or restored assistant event must not be counted twice.
     if (seq <= record.countedThroughSeq) return
@@ -963,6 +969,7 @@ export class ReasoningDistillEngine {
     if (counting.length === 0) return
     const counted = new Set(counting.map(entry => entry.id))
     await this.store.update(sessionId, (current) => {
+      if (stale()) return
       for (const entry of current.entries) {
         if (!counted.has(entry.id)) continue
         // The first replay carries the rewrite as brand-new input, and so does the
@@ -980,11 +987,15 @@ export class ReasoningDistillEngine {
   /** Close the live epoch when the host compacted the history. */
   private async onCompaction(session: Session): Promise<void> {
     const sessionId = session.id
+    const generation = this.generation.get(sessionId) ?? 0
+    const stale = (): boolean => (this.generation.get(sessionId) ?? 0) !== generation
     await this.store.load(sessionId)
+    if (stale()) return
     // As with accounting, every mutation happens inside the store's callback so
     // the pre-write snapshot covers it and a failed write cannot leave an epoch
     // that was never persisted.
     await this.store.update(sessionId, (current) => {
+      if (stale()) return
       current.epoch += 1
       // Only entries whose target did not survive this compaction lose their
       // live savings. A failed compaction replaces nothing, and a partial one
