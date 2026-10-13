@@ -247,7 +247,11 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     const pending = current.pendingBranch
     if (pending == null) return
     const attemptKey = `${current.sessionId}:${pending}`
-    if (appliedPending.current.has(attemptKey) || applyingPending.current.has(attemptKey)) return
+    // In-flight first (dedupe), then an owed settle *before* the applied marker:
+    // an attempt can be both applied and awaiting its settle, and the settle must
+    // still be retried or the host's pending flag and the failure note would never
+    // clear.
+    if (applyingPending.current.has(attemptKey)) return
     if (settlePending.current.has(attemptKey)) {
       // The rewrite is already in the history; only the host's pending flag is left.
       applyingPending.current.add(attemptKey)
@@ -260,6 +264,7 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       })
       return
     }
+    if (appliedPending.current.has(attemptKey)) return
     const entry = current.entries.find(item => item.id === pending)
     if (entry === undefined) return
     // The engine caps the answer at maxOutputChars and replays that stored text;
