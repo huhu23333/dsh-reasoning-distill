@@ -260,6 +260,11 @@ check('an explicit ok:false is a refusal', !rewriteApplyOutcome(true, { ok: fals
 check('and it keeps the backend\'s own message', rewriteApplyOutcome(true, { ok: false, error: 'nope' }).error === 'nope')
 check('a non-2xx is a failure even without a body', !rewriteApplyOutcome(false, null).done)
 
+// The panel must hand the backend exactly the text the engine stores and replays,
+// never the raw untruncated answer.
+check('the rewrite request carries the stored distilled text',
+  rewriteRequest('msg-edit', 'session-1', { ...target, targetMessageId: 'm-12' }, 'capped').body['reasoning'] === 'capped')
+
 console.log('render: a report from an older host (version skew)')
 const legacy = modernReport()
 // Fields added by later host versions are absent, as they would be mid-upgrade.

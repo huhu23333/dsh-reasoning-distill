@@ -177,6 +177,9 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   // turn would have called the model, so all that is left here is to go there.
   const openedBranch = useRef(new Set<string>())
   const appliedPending = useRef(new Set<string>())
+  // Entries whose rewrite request is still open: the report polls every few
+  // seconds, and a slow backend must not be asked twice for the same entry.
+  const applyingPending = useRef(new Set<string>())
   useEffect(() => {
     const current = cache[sessionId]?.report
     if (current === undefined) return
@@ -189,10 +192,13 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       return
     }
     const pending = current.pendingBranch
-    if (pending == null || appliedPending.current.has(pending)) return
+    if (pending == null || appliedPending.current.has(pending) || applyingPending.current.has(pending)) return
     const entry = current.entries.find(item => item.id === pending)
     if (entry === undefined) return
-    const request = rewriteRequest(current.config.rewriteBackend, current.sessionId, entry, entry.distill.responseText)
+    // The engine caps the answer at maxOutputChars and replays that stored text;
+    // writing the raw response instead would put untruncated content into the
+    // history and diverge from both the replacement and the reported savings.
+    const request = rewriteRequest(current.config.rewriteBackend, current.sessionId, entry, entry.distilledText)
     if (request === undefined) return
     /** Tell the host how the hand-off went; in-place keeps the turn going. */
     const settle = (error?: string): Promise<void> => fetch(HANDOFF_ROUTE, {
@@ -200,6 +206,7 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ sessionId: current.sessionId, cancel: false, ...error === undefined ? {} : { error } }),
     }).then(() => undefined).catch(() => undefined)
+    applyingPending.current.add(pending)
     void fetch(request.path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -217,6 +224,10 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       await settle()
     }).catch(async (error: unknown) => {
       await settle(error instanceof Error ? error.message : String(error))
+    }).finally(() => {
+      // Released once the attempt is over: whether to try again is decided by the
+      // host's pending flag, not by this marker.
+      applyingPending.current.delete(pending)
     })
   }, [cache, sessionId, openSession])
   const current = cache[sessionId]

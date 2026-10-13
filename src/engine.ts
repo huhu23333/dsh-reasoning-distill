@@ -172,7 +172,7 @@ export class ReasoningDistillEngine {
     // A disposed compression session must be forgotten: otherwise the set grows
     // for the process lifetime, and a later user session that happens to reuse
     // the id would be treated as plugin-owned and never observed.
-    this.ctx.on('session/disposed', (session: Session) => { this.forgetSession(session.id) })
+    this.ctx.on('session/disposed', (session: Session) => { this.forgetSession(session) })
     this.ctx.on('agent/pre-step', async (payload, next) => {
       // `attach` preloads the sidecar fire-and-forget, so on a resumed session
       // the first request could otherwise be assembled from raw reasoning while
@@ -236,10 +236,22 @@ export class ReasoningDistillEngine {
    * Drop every per-session trace of a session that no longer exists.
    * @param sessionId - disposed session id.
    */
-  private forgetSession(sessionId: string): void {
-    this.ownSessions.delete(sessionId)
-    this.sessionKind.delete(sessionId)
-    this.releaseSession(sessionId)
+  private forgetSession(session: Session): void {
+    // A disposal can arrive late, after the same id was attached again. The event
+    // names the object it disposes, so a *different* object sitting on that id is
+    // a successor and must not be cleared. An id the engine never attached (our
+    // own audit sessions, for instance) is not tracked here and is released
+    // normally.
+    const attached = this.current.get(session.id)
+    if (attached !== undefined && attached !== session) return
+    this.current.delete(session.id)
+    // Disposal itself invalidates the generation: work already running for this id
+    // captured the old number, so its continuations (accounting, compaction,
+    // compression, hand-off) all stop writing even if the id is never reused.
+    this.generation.set(session.id, (this.generation.get(session.id) ?? 0) + 1)
+    this.ownSessions.delete(session.id)
+    this.sessionKind.delete(session.id)
+    this.releaseSession(session.id)
   }
 
   /**
@@ -506,7 +518,7 @@ export class ReasoningDistillEngine {
     const record = this.store.peek(session.id)
     const entry = record?.entries.find(item => item.id === entryId)
     if (entry === undefined || entry.distilledText === '') {
-      this.pendingBranch.delete(session.id)
+      if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       return false
     }
     const port = (this.ctx as unknown as { webServer?: { port?: number } }).webServer?.port
@@ -522,7 +534,7 @@ export class ReasoningDistillEngine {
       targetBlockIndex: entry.targetBlockIndex ?? -1,
     }, entry.distilledText)
     if (request === undefined) {
-      this.pendingBranch.delete(session.id)
+      if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       return false
     }
     try {
@@ -537,18 +549,20 @@ export class ReasoningDistillEngine {
       if (!response.ok || created === '') {
         const reason = typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`
         await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation)
-        this.pendingBranch.delete(session.id)
+        if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
         this.ctx.logger.warn('reasoning-distill: branch refused for %s (%s); carrying on in place', session.id, reason)
         return false
       }
       await this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, generation)
-      this.pendingBranch.delete(session.id)
+      if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       this.ctx.logger.info('reasoning-distill: handed %s over to branch %s', session.id, created)
-      return true
+      // Only the generation that asked for this hand-off may have its turn ended:
+      // a disposed one is already gone.
+      return (this.generation.get(session.id) ?? 0) === generation
     } catch (error: unknown) {
       const reason = error instanceof Error ? error.message : String(error)
-      await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() })
-      this.pendingBranch.delete(session.id)
+      await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation)
+      if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       this.ctx.logger.warn('reasoning-distill: branch failed for %s (%s); carrying on in place', session.id, reason)
       return false
     }
@@ -570,9 +584,11 @@ export class ReasoningDistillEngine {
     outcome: { state: 'created' | 'failed'; branchId?: string; error?: string; at: number },
     generation?: number,
   ): Promise<void> {
-    if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return
     try {
       await this.store.update(sessionId, (record) => {
+        // Checked inside the mutator: the write is queued, so the generation can
+        // change between the call and the moment this runs.
+        if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return
         const entry = record.entries.find(item => item.id === entryId)
         if (entry !== undefined) entry.handoff = outcome
       })
@@ -599,7 +615,10 @@ export class ReasoningDistillEngine {
       void this.recordHandoff(sessionId, pending, { state: 'failed', error, at: Date.now() })
     }
     const agents = (this.ctx as unknown as { agents?: { get(id: string): { cancel(cause: { kind: string }): void } | undefined } }).agents
-    if (!cancel) return false
+    // Only a hand-off this plugin is completing may stop a turn: without a pending
+    // rewrite of ours there is nothing to hand over, and cancelling would let any
+    // same-origin caller end an unrelated session's turn.
+    if (!cancel || pending === undefined) return false
     const agent = agents?.get(sessionId)
     if (agent === undefined) return false
     agent.cancel({ kind: 'user' })

@@ -58,6 +58,11 @@ export interface CompressionEntry {
   targetMessageId: string
   /** Branch hand-off outcome for this rewrite, when one was attempted. */
   handoff?: { state: 'created' | 'failed'; branchId?: string; error?: string; at: number }
+  /**
+   * The text the engine stored and replays: the answer capped at
+   * `maxOutputChars`. Backends must be given this one, not the raw answer.
+   */
+  distilledText: string
   /** Index of the reasoning block the rewrite replaces; -1 when unknown. */
   targetBlockIndex: number
   /** Model whose reasoning was rewritten. */

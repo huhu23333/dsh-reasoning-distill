@@ -56,6 +56,7 @@ export function buildReport(
     .sort((a, b) => a.appliedAt - b.appliedAt)
     .map(entry => ({
       id: entry.id,
+      distilledText: entry.distilledText,
       ...entry.failed === true ? { failed: true as const } : {},
       ...entry.skipped === true ? { skipped: true as const } : {},
       ...entry.sessionMissing === true ? { sessionMissing: true as const } : {},

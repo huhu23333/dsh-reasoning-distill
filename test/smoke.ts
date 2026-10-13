@@ -2260,6 +2260,72 @@ check('a stalled accounting continuation does not advance the reused id',
 check('and a stalled compaction continuation does not bump its epoch',
   after45.epoch === 0, String(after45.epoch))
 
+console.log('scenario 46: hand-off ownership, late disposal, and the successor pending flag')
+const { createServer: createServer46 } = await import('node:http')
+// A backend that answers after 150ms, so a hand-off is in flight across the reattach.
+const slowBackend46 = createServer46((request, response) => {
+  request.on('data', () => undefined)
+  request.on('end', () => {
+    setTimeout(() => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ sessionId: 'branch-46' }))
+    }, 150)
+  })
+})
+await new Promise<void>(resolve => slowBackend46.listen(0, '127.0.0.1', resolve))
+const slowPort46 = (slowBackend46.address() as { port: number }).port
+
+// (1) A pending hand-off of the old generation must not erase the successor's.
+handlers.clear()
+const store46 = new SidecarStore()
+const engine46 = new ReasoningDistillEngine({ ...ctx, webServer: { port: slowPort46 } } as never, cfg10 as never, store46)
+engine46.start()
+const old46 = new FakeSession('session-own-46')
+sessions.set(old46.id, old46)
+await fire('session/created', old46)
+await runStep40(engine46, old46, '46a')
+await settleFor(async () => (await store46.load(old46.id)).entries.length === 1)
+// The hand-off starts and waits on the slow backend.
+const handoff46 = (async () => {
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    await fn({ agent: { session: old46 } }, async () => ({ kind: 'enter', messages: [] }))
+  }
+})()
+await new Promise(resolve => setTimeout(resolve, 40))
+// The id is released and reused while that fetch is still open.
+await fire('session/disposed', old46)
+const new46 = new FakeSession('session-own-46')
+sessions.set(new46.id, new46)
+await fire('session/created', new46)
+await runStep40(engine46, new46, '46b')
+await settleFor(async () => (await store46.load(new46.id)).entries.length === 1)
+await handoff46
+await new Promise(resolve => setTimeout(resolve, 60))
+check('the successor keeps its own pending hand-off',
+  engine46.snapshot(new46.id).pendingBranch !== null, JSON.stringify(engine46.snapshot(new46.id)))
+
+// (2) A late disposal of the old object must not clear the successor's state.
+await fire('session/disposed', old46)
+check('a late disposal of the replaced object is ignored',
+  engine46.snapshot(new46.id).pendingBranch !== null && engine46.stock(new46.id).tokens > 0,
+  JSON.stringify({ pending: engine46.snapshot(new46.id).pendingBranch, stock: engine46.stock(new46.id) }))
+
+// (3) handoff() may only stop a turn when a hand-off of ours is pending there.
+const cancelled46: string[] = []
+const engine46b = new ReasoningDistillEngine({
+  ...ctx,
+  agents: { get: (id: string) => ({ cancel: () => { cancelled46.push(id) } }) },
+} as never, cfg10 as never, new SidecarStore())
+engine46b.start()
+const guard46 = new FakeSession('session-guard-46')
+sessions.set(guard46.id, guard46)
+await fire('session/created', guard46)
+check('an unrelated session is never cancelled', !engine46b.handoff('session-elsewhere', true))
+check('and nothing was asked to stop', cancelled46.length === 0, JSON.stringify(cancelled46))
+check('a hand-off we do owe may stop the turn',
+  engine46b.handoff(new46.id, true) === false && cancelled46.length === 0)
+await new Promise<void>(resolve => slowBackend46.close(() => { resolve() }))
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1
