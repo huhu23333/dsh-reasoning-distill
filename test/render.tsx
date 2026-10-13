@@ -12,7 +12,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionSessionsAction } from '../src/client/SessionsAction.tsx'
 import { CompressionActivity } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
-import { continuableDepthDisabled, isStaleResponse, oneShotDepthDisabled, planSave, ruleFieldsIdle, saveOperations, type SettingsValue } from '../src/client/ops.ts'
+import { continuableDepthDisabled, isStaleResponse, messageEditRequest, oneShotDepthDisabled, planSave, ruleFieldsIdle, saveOperations, type SettingsValue } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
@@ -152,6 +152,19 @@ check('the sign note explains the convention', modern.includes('view.signNote'))
 check('the expanded row names what the rewrite avoided', modern.includes('view.avoided'))
 check('and the collapsed row carries the ledger equation',
   /\+¥|−¥/.test(modern) && modern.includes('−') )
+
+console.log('client: the branch bridge speaks dsh-message-edit\'s contract')
+const bridge = messageEditRequest('session-1', { targetSeq: 12, targetBlockIndex: 1 }, 'short reasoning')
+check('the request matches the companion contract',
+  bridge?.['action'] === 'edit' && bridge['sessionId'] === 'session-1' && bridge['eventSeq'] === 12
+  && bridge['blockIndex'] === 1 && bridge['text'] === 'short reasoning' && bridge['cascade'] === 'truncate',
+  JSON.stringify(bridge))
+check('a preserve cascade can be requested',
+  messageEditRequest('s', { targetSeq: 1, targetBlockIndex: 0 }, 'x', 'preserve')?.['cascade'] === 'preserve')
+check('an unknown block index cannot be bridged',
+  messageEditRequest('s', { targetSeq: 1, targetBlockIndex: -1 }, 'x') === undefined)
+check('empty text cannot be bridged', messageEditRequest('s', { targetSeq: 1, targetBlockIndex: 0 }, '') === undefined)
+check('a session without an id cannot be bridged', messageEditRequest('', { targetSeq: 1, targetBlockIndex: 0 }, 'x') === undefined)
 
 console.log('render: a report from an older host (version skew)')
 const legacy = modernReport()

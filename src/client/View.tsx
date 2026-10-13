@@ -1,10 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { isStaleResponse } from './ops.ts'
+import { isStaleResponse, messageEditRequest } from './ops.ts'
 import { REPORT_ROUTE, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
+
+/** Same-origin endpoint owned by the optional `dsh-message-edit` companion. */
+const MESSAGE_EDIT_PATH = '/message-edit'
 
 type Props = PropsRuntime<'conversation.view'> & PropsLocale<typeof NS> & { openSession: (id: string) => void }
 type Translate = Props['t']
@@ -94,7 +97,38 @@ export function stockOfEntry(entry: CompressionEntry, live?: readonly string[]):
   return entry.savedTokensPerRequest
 }
 
-function Entry({ entry, t, liveStockIds }: { entry: CompressionEntry; t: Translate; liveStockIds?: readonly string[] }) {
+function Entry({ entry, t, liveStockIds, sessionId, openSession }: {
+  entry: CompressionEntry
+  t: Translate
+  liveStockIds?: readonly string[]
+  sessionId: string
+  openSession: (id: string) => void
+}) {
+  const [branch, setBranch] = useState<{ state: 'idle' | 'working' | 'failed' | 'missing'; detail?: string }>({ state: 'idle' })
+  /**
+   * Ask the companion plugin for a version whose reasoning block is the
+   * distilled text. That is the supported way to make a history carry it: the
+   * companion creates a new session, so this one is never rewritten.
+   */
+  const branchHere = (): void => {
+    const body = messageEditRequest(sessionId, entry, entry.distill.responseText)
+    if (body === undefined) return
+    setBranch({ state: 'working' })
+    void fetch(MESSAGE_EDIT_PATH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(async response => {
+      if (response.status === 404) { setBranch({ state: 'missing' }); return }
+      const payload = await response.json().catch(() => null) as { sessionId?: string; error?: string } | null
+      if (!response.ok) { setBranch({ state: 'failed', detail: payload?.error ?? `HTTP ${response.status}` }); return }
+      const created = payload?.sessionId
+      setBranch({ state: 'idle' })
+      if (typeof created === 'string' && created !== '') openSession(created)
+    }).catch((error: unknown) => { setBranch({ state: 'failed', detail: String(error) }) })
+  }
+  const canBranch = stockOfEntry(entry, liveStockIds) > 0 && entry.distill.responseText !== '' && entry.targetBlockIndex >= 0
+
   const run = entry.distill
   const estimated = run.estimated === true
   const notAdopted = entry.failed === true || entry.skipped === true
@@ -115,6 +149,13 @@ function Entry({ entry, t, liveStockIds }: { entry: CompressionEntry; t: Transla
         <div><span>{t('view.cost')}</span><strong>{money(run.cost)}{estimated ? ` (${t('view.estimated')})` : ''}</strong></div>
         <div><span>{t('view.period')}</span><strong>{t(run.period === 'peak' ? 'view.peak' : 'view.off')}</strong></div>
         <div><span>{t('view.avoided')}</span><strong>{signedMoney(-reducedOfEntry(entry))}</strong></div>
+        <div><span>{t('view.branch')}</span><strong>
+          {canBranch
+            ? <button type="button" className={css.secondary} disabled={branch.state === 'working'} onClick={branchHere}>{branch.state === 'working' ? t('view.branching') : t('view.branchCreate')}</button>
+            : <span className={css.muted}>{t('view.branchUnavailable')}</span>}
+          {branch.state === 'missing' && <span className={css.error}> · {t('view.branchNeedsPlugin')}</span>}
+          {branch.state === 'failed' && <span className={css.error}> · {t('view.branchFailed')}: {branch.detail ?? ''}</span>}
+        </strong></div>
         <div><span>{t('view.stock')}</span><strong>{count(stockOfEntry(entry, liveStockIds))} token</strong> · <strong>{signedCount(-entry.savedTokensPerRequest * entry.liveRequests)} {t('view.tokens')} {t('view.lifetime')}</strong></div>
       </div>
       <TextBlock label={t('view.request')} value={run.requestText} />
@@ -228,7 +269,7 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
           <span className={css.metric}>{Math.max(0, Math.round((now - item.startedAt) / 1000))}s</span>
         </div>)}
       </section>}
-      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}{report.entries.map(entry => <Entry key={entry.id} entry={entry} t={t} liveStockIds={report.stockIds} />)}</section>
+      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}{report.entries.map(entry => <Entry key={entry.id} entry={entry} t={t} liveStockIds={report.stockIds} sessionId={report.sessionId} openSession={openSession} />)}</section>
       <section className={css.section}><h3>{t('view.sessions')}</h3>{report.entries.map(entry => <SessionRow key={entry.id} entry={entry} t={t} openSession={openSession} />)}</section>
     </>}
   </div>

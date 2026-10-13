@@ -282,6 +282,24 @@ npm run typecheck    # 宿主半的真实 tsc（0 错误）；typecheck:all 会�
 
 冒烟测试覆盖四件事：阈值触发与蒸馏调用、`deriveMessages()` 里确实看到蒸馏版而日志仍是原文、工具调用块不被破坏、逐步节省记账与 compaction 纪元重置。`test/stubs/` 只用于这次离线构建，**不会**进入 `node_modules`——放在那里的桩会遮蔽运行时真正的 `@deepseek-ai/dsh-llm`。
 
+## 可选前置：`dsh-message-edit`（"以蒸馏版开分支"）
+
+插件页每条记录的展开区有一个 **「以蒸馏版开分支」** 按钮。它**不自己实现分支**，而是调用同源端点：
+
+```
+POST /message-edit
+{ "action": "edit", "sessionId": "<会话>", "eventSeq": <该条 targetSeq>,
+  "blockIndex": <reasoning 块下标>, "text": "<蒸馏文本>", "cascade": "truncate" }
+→ 200 { "sessionId": "<新分支会话 id>", ... }
+```
+
+该端点由 **`dsh-message-edit`**（`Moeblack/dsh-message-edit`，npm 包 `dsh-message-edit`）提供；它的语义是"**不改写历史事件、从目标回合之前创建一个新会话版本**"，因此：
+
+- 新分支的**对话/轨迹/上下文页**以及**宿主的压缩计量**看到的都是**压缩后**的历史 ✓（这正是"就地改日志"做不到的事）；
+- **原会话分毫不动**，随时可切回；创建成功后插件会用 `openSession` 直接打开新分支。
+
+**降级行为**：未安装该前置时端点返回 404，插件会显示"需要安装 dsh-message-edit 才能创建分支"，其余功能不受影响；`blockIndex < 0`（找不到 reasoning 块）、蒸馏文本为空、或该条已不在当前上下文中时，按钮显示为不可用而不是失败。
+
 ## 设计边界：为什么原生页面显示原文（已核实，勿重复踩）
 
 **结论**：对话 / 轨迹 / 上下文页显示的是**原始推理**；只有**发给模型的请求**使用蒸馏后的文本。这是宿主的设计，不是本插件的能力缺口。

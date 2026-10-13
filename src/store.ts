@@ -23,6 +23,8 @@ export interface StoredEntry {
   /** Surface sequence of the rewritten assistant message. */
   targetSeq: number
   targetMessageId: string
+  /** Index of the reasoning block inside the target message; -1 when unknown. */
+  targetBlockIndex?: number
   turn: number
   step: number
   /** Route that produced the original reasoning. */

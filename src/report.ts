@@ -65,6 +65,7 @@ export function buildReport(
       step: entry.step,
       targetSeq: entry.targetSeq,
       targetMessageId: entry.targetMessageId,
+      targetBlockIndex: entry.targetBlockIndex ?? -1,
       provider: entry.provider,
       model: entry.model,
       originalChars: entry.originalChars,

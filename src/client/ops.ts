@@ -86,6 +86,29 @@ export function isStaleResponse(request: number, applied: number): boolean {
   return request <= applied
 }
 
+/**
+ * Build the request `dsh-message-edit` accepts for editing one message block.
+ *
+ * That plugin (an optional companion) turns an edit into a NEW session version,
+ * leaving the original untouched — which is the only supported way to make a
+ * history carry the distilled reasoning. Returns undefined when this rewrite
+ * cannot be expressed as a block edit.
+ * @param sessionId - the session that owns the rewrite.
+ * @param entry - the recorded compression.
+ * @param text - replacement text for the reasoning block.
+ * @param cascade - what the companion should do with later turns.
+ * @returns the JSON body, or undefined when there is nothing to edit.
+ */
+export function messageEditRequest(
+  sessionId: string,
+  entry: { targetSeq: number; targetBlockIndex: number },
+  text: string,
+  cascade: 'truncate' | 'preserve' = 'truncate',
+): Record<string, unknown> | undefined {
+  if (sessionId === '' || entry.targetBlockIndex < 0 || text === '') return undefined
+  return { action: 'edit', sessionId, eventSeq: entry.targetSeq, blockIndex: entry.targetBlockIndex, text, cascade }
+}
+
 /** The settings document the panel edits. */
 export type SettingsValue = {
   enabled: boolean

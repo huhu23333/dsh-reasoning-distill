@@ -66,6 +66,8 @@ interface PendingTarget {
   rule: ModelRule
   /** Estimated-size source for the live UI. */
   reasoningChars: number
+  /** Index of the reasoning block inside the message, for the message-edit bridge. */
+  reasoningBlockIndex: number
 }
 
 /** Result of one distillation attempt. */
@@ -536,6 +538,7 @@ export class ReasoningDistillEngine {
       sessionId: session.id,
       seq: event.seq,
       reasoningChars: reasoning.length,
+      reasoningBlockIndex: reasoningBlockIndexOf(message.content),
       turn: data.turn ?? 0,
       step: data.step ?? 0,
       messageId: message.id ?? '',
@@ -760,6 +763,7 @@ export class ReasoningDistillEngine {
           id: `${target.seq}-${startedAt}-failed`,
           targetSeq: target.seq,
           targetMessageId: target.messageId,
+          targetBlockIndex: target.reasoningBlockIndex,
           turn: target.turn,
           step: target.step,
           provider: target.provider,
@@ -804,6 +808,7 @@ export class ReasoningDistillEngine {
           id: `${target.seq}-${startedAt}-skipped`,
           targetSeq: target.seq,
           targetMessageId: target.messageId,
+          targetBlockIndex: target.reasoningBlockIndex,
           turn: target.turn,
           step: target.step,
           provider: target.provider,
@@ -847,6 +852,7 @@ export class ReasoningDistillEngine {
       id: `${target.seq}-${startedAt}`,
       targetSeq: target.seq,
       targetMessageId: target.messageId,
+      targetBlockIndex: target.reasoningBlockIndex,
       turn: target.turn,
       step: target.step,
       provider: target.provider,
@@ -1125,6 +1131,12 @@ function blockingReason(session: Session): BlockingReason {
  * @param maxDepth - the configured cap.
  * @returns true when distillation may apply.
  */
+/** Index of the message's reasoning block, or -1 when it carries none. */
+function reasoningBlockIndexOf(content: readonly ContentBlock[] | undefined): number {
+  if (content === undefined) return -1
+  return content.findIndex(block => block.type === 'reasoning' && typeof (block as { text?: string }).text === 'string')
+}
+
 function withinDepth(depth: number, maxDepth: number): boolean {
   if (!(maxDepth > 0)) return true
   // An unidentified child still counts as a direct one rather than depth 0, so

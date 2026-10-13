@@ -56,6 +56,8 @@ export interface CompressionEntry {
   /** Surface sequence of the rewritten assistant message. */
   targetSeq: number
   targetMessageId: string
+  /** Index of the reasoning block the rewrite replaces; -1 when unknown. */
+  targetBlockIndex: number
   /** Model whose reasoning was rewritten. */
   provider: string
   model: string

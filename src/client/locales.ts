@@ -1,6 +1,7 @@
 export const NS = 'reasoningDistill'
 
 export const zh = {
+  'view.branch': '以蒸馏版开分支', 'view.branchCreate': '创建分支', 'view.branching': '创建中…', 'view.branchUnavailable': '（该条已不在上下文中，无法分支）', 'view.branchNeedsPlugin': '需要安装 dsh-message-edit 才能创建分支', 'view.branchFailed': '创建分支失败',
   'view.avoided': '已避免的开销',
   'view.entryLedger': '增加开销 − 已避免开销', 'view.signNote': '符号约定统一为“一本账”：正数=多花的开销，负数=省下的开销；token 同约定。',
   'settings.catalogFailure': '模型目录加载失败：暂时无法选择蒸馏模型，稍后重试或直接填 provider/模型名。',
@@ -72,6 +73,7 @@ export const zh = {
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
+  'view.branch': 'Branch with the distilled text', 'view.branchCreate': 'Create branch', 'view.branching': 'Creating…', 'view.branchUnavailable': '(not in the current context — nothing to branch)', 'view.branchNeedsPlugin': 'install dsh-message-edit to create branches', 'view.branchFailed': 'Branching failed',
   'view.avoided': 'Spending avoided so far',
   'view.entryLedger': 'Increase − already avoided', 'view.signNote': 'Signs read as one ledger: positive means extra spending, negative means spending avoided. Same convention for tokens.',
   'settings.catalogFailure': 'Could not load the model catalog: the distiller cannot be picked right now — retry later or type the provider/model directly.',
