@@ -2324,10 +2324,10 @@ engine46b.start()
 const guard46 = new FakeSession('session-guard-46')
 sessions.set(guard46.id, guard46)
 await fire('session/created', guard46)
-check('an unrelated session is never cancelled', !engine46b.handoff('session-elsewhere', true))
+check('an unrelated session is never cancelled', !(await engine46b.handoff('session-elsewhere', true)).ok)
 check('and nothing was asked to stop', cancelled46.length === 0, JSON.stringify(cancelled46))
 check('a hand-off we do owe may stop the turn',
-  engine46b.handoff(new46.id, true) === false && cancelled46.length === 0)
+  (await engine46b.handoff(new46.id, true)).ok === false && cancelled46.length === 0)
 await new Promise<void>(resolve => slowBackend46.close(() => { resolve() }))
 
 console.log('scenario 47: an audit session whose durable writer refused is reported as missing')
@@ -2512,18 +2512,18 @@ const second53 = (await store53.load(s53.id)).entries.find(entry => entry.id !==
 const before53 = engine53.snapshot(s53.id).pendingBranch
 check('the newer attempt owns the pending hand-off', before53 === second53.id, JSON.stringify({ before: before53, second: second53.id }))
 // The panel's reply for the *older* attempt arrives now.
-const stale53 = engine53.handoff(s53.id, false, undefined, firstId, engine53.snapshot(s53.id).generation)
+const stale53 = (await engine53.handoff(s53.id, false, undefined, firstId, engine53.snapshot(s53.id).generation)).ok
 check('a settle for the older attempt is refused', stale53 === false)
 check('and the newer attempt still owes its hand-off',
   engine53.snapshot(s53.id).pendingBranch === second53.id, JSON.stringify(engine53.snapshot(s53.id).pendingBranch))
 // A settle from another generation is refused too.
 check('a settle from a different generation is refused',
-  engine53.handoff(s53.id, true, 'x', second53.id, engine53.snapshot(s53.id).generation + 1) === false
+  (await engine53.handoff(s53.id, true, 'x', second53.id, engine53.snapshot(s53.id).generation + 1)).ok === false
   && engine53.snapshot(s53.id).pendingBranch === second53.id)
 check('and the attempt that does own it can settle',
   // An in-place settle reports that it took effect (true) even though it never
   // stops the turn, which is what the route's `ok` now means.
-  engine53.handoff(s53.id, false, undefined, second53.id, engine53.snapshot(s53.id).generation) === true
+  (await engine53.handoff(s53.id, false, undefined, second53.id, engine53.snapshot(s53.id).generation)).ok === true
   && engine53.snapshot(s53.id).pendingBranch === null)
 
 console.log('scenario 54: a branch that cannot be recorded must not stop the original turn')
@@ -2582,9 +2582,9 @@ await settleFor(async () => (await store55.load(s55.id)).entries.length === 1)
 const entry55 = (await store55.load(s55.id)).entries[0]!
 const gen55 = engine55.snapshot(s55.id).generation
 check('an in-place settle reports success even though no turn was stopped',
-  engine55.handoff(s55.id, false, undefined, entry55.id, gen55) === true && engine55.snapshot(s55.id).pendingBranch === null)
+  (await engine55.handoff(s55.id, false, undefined, entry55.id, gen55)).ok === true && engine55.snapshot(s55.id).pendingBranch === null)
 check('a settle with no pending rewrite reports that nothing was settled',
-  engine55.handoff(s55.id, false, undefined, entry55.id, gen55) === false)
+  (await engine55.handoff(s55.id, false, undefined, entry55.id, gen55)).ok === false)
 
 console.log('scenario 56: a raced-away generation cannot look like a recorded branch')
 handlers.clear()
@@ -2635,7 +2635,7 @@ const s57 = new FakeSession('session-empty-settle-57')
 sessions.set(s57.id, s57)
 await fire('session/created', s57)
 check('an in-place settle with nothing pending reports no settlement',
-  engine57.handoff(s57.id, false) === false && engine57.handoff(s57.id, true) === false)
+  (await engine57.handoff(s57.id, false)).ok === false && (await engine57.handoff(s57.id, true)).ok === false)
 
 console.log('scenario 58: a pre-step inspector derivation does not steal the request record')
 handlers.clear()
