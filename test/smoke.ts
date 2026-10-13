@@ -157,6 +157,9 @@ function makeConfig(overrides: Record<string, unknown> = {}): never {
     models: { get: () => ({}) },
     prices: { get: () => ({}) },
     peakSource: { get: () => 'builtin' },
+    // A selected backend is required for compression; scenarios override it to
+    // exercise the no-backend refusal (scenario 36).
+    rewriteBackend: { get: () => 'message-edit' },
     holidays: { get: () => [] },
     prompt: { get: () => '' },
     maxInputChars: { get: () => 100000 },
@@ -1767,6 +1770,34 @@ const after35 = await store35.load(s35.id)
 check('and no token savings are credited for a rewrite that was not applied',
   after35.entries[0]!.liveSaved + after35.entries[0]!.frozenSaved === 0,
   JSON.stringify({ live: after35.entries[0]!.liveSaved, frozen: after35.entries[0]!.frozenSaved }))
+
+console.log('scenario 36: with no rewrite backend selected, nothing is distilled')
+handlers.clear()
+const store36 = new SidecarStore()
+const llm36 = { calls: 0, stream(): AsyncIterable<unknown> {
+  this.calls += 1
+  return (async function* gen() { yield { type: 'text-delta', index: 0, text: 'x' }; yield { type: 'finish', reason: { kind: 'stop' } } })()
+} }
+const cfg36 = makeConfig({ rewriteBackend: { get: () => '' } })
+const engine36 = new ReasoningDistillEngine({ ...ctx, llm: llm36 } as never, cfg36 as never, store36)
+engine36.start()
+const s36 = new FakeSession('session-no-backend')
+sessions.set(s36.id, s36)
+await fire('session/created', s36)
+s36.append('user/message', { id: 'u36', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const seq36 = s36.append('assistant/message', {
+  turn: 1, step: 1,
+  message: { id: 'a36', role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+}).seq
+s36.append('step/end', { turn: 1, step: 1 })
+await fire('session/event', s36, s36.eventAt(seq36))
+await fire('session/event', s36, s36.eventAt(s36.log.length - 1))
+await fire('agent/pre-step', { agent: { session: s36 } }, async () => undefined)
+check('no backend means no paid distiller call', llm36.calls === 0, String(llm36.calls))
+check('no rewrite is recorded either', (await store36.load(s36.id)).entries.length === 0)
+check('and the reasoning is replayed untouched',
+  s36.deriveMessages().some(message => JSON.stringify(message).includes('hmm, let me think.')))
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

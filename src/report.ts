@@ -137,7 +137,10 @@ export function buildReport(
     epoch: record.epoch,
     entries,
     config: {
-      enabled: config.enabled.get(),
+      // The master switch only means something with a backend to apply the result,
+      // which is the same rule the engine and the settings panel enforce.
+      enabled: config.enabled.get() && config.rewriteBackend.get() !== '',
+      rewriteBackend: config.rewriteBackend.get(),
       defaultThresholdTokens: defaultRule.thresholdTokens,
       defaultDistiller: `${defaultRule.distiller.provider}/${defaultRule.distiller.model}`,
       peak: peakInfo(config),

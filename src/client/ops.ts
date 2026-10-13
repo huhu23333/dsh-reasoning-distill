@@ -66,6 +66,7 @@ export function normalizeSettings(value: SettingsValue, legacyOneShot?: boolean)
     defaultRule: mergeRule(FALLBACK_RULE, withKindDefaults(value.defaultRule ?? {}, legacyOneShot), undefined),
     models,
     peakSource: value.peakSource ?? 'builtin',
+    rewriteBackend: value.rewriteBackend ?? '',
     holidays: [...(value.holidays ?? [])],
     prices: structuredClone(value.prices ?? {}),
     prompt: value.prompt ?? '',
@@ -109,6 +110,78 @@ export function messageEditRequest(
   return { action: 'edit', sessionId, eventSeq: entry.targetSeq, blockIndex: entry.targetBlockIndex, text, cascade }
 }
 
+/**
+ * One companion that can write a distilled rewrite into the session's history.
+ *
+ * Backends differ in *how* they do it — a branch session, or an in-place rewrite
+ * of the model-visible surface — so the panel lets the user pick, and the apply
+ * action follows the pick.
+ */
+export interface RewriteBackend {
+  /** Stored id; empty string is the "none selected" state. */
+  id: string
+  /** Endpoint probed for availability. */
+  probe: { method: 'POST'; path: string; body: Record<string, unknown> }
+  /** Where the rewrite lands. */
+  kind: 'branch' | 'in-place'
+}
+
+/** Backends this plugin knows how to drive, in panel order. */
+export const REWRITE_BACKENDS: readonly RewriteBackend[] = [
+  {
+    id: 'message-edit',
+    kind: 'branch',
+    probe: { method: 'POST', path: '/message-edit', body: { action: 'edit', sessionId: '', eventSeq: 0, blockIndex: 0, text: 'probe' } },
+  },
+  {
+    id: 'msg-edit',
+    kind: 'in-place',
+    probe: { method: 'POST', path: '/api/msg-edit/get-message', body: { sessionId: '', messageId: '' } },
+  },
+]
+
+/** The backend with this id, or undefined for an unknown or empty id. */
+export function backendById(id: string): RewriteBackend | undefined {
+  return REWRITE_BACKENDS.find(item => item.id === id)
+}
+
+/**
+ * Whether the master switch may be on: it needs a backend to apply the result.
+ * @param backend - the stored backend id.
+ * @param enabled - the stored master switch.
+ * @returns the switch the panel should show and save.
+ */
+export function masterSwitchState(backend: string, enabled: boolean): { checked: boolean; locked: boolean } {
+  const locked = backendById(backend) === undefined
+  return { checked: locked ? false : enabled, locked }
+}
+
+/**
+ * Build the request that asks the selected backend to write `text` into the
+ * history, replacing the reasoning of the recorded target.
+ * @param backendId - stored backend id.
+ * @param sessionId - session that owns the rewrite.
+ * @param entry - the recorded compression (seq, message id and block index).
+ * @param text - the distilled reasoning.
+ * @returns the path and JSON body, or undefined when this backend cannot apply it.
+ */
+export function rewriteRequest(
+  backendId: string,
+  sessionId: string,
+  entry: { targetSeq: number; targetMessageId: string; targetBlockIndex: number },
+  text: string,
+): { path: string; body: Record<string, unknown> } | undefined {
+  if (sessionId === '' || text === '') return undefined
+  const backend = backendById(backendId)
+  if (backend === undefined) return undefined
+  if (backend.id === 'message-edit') {
+    const body = messageEditRequest(sessionId, entry, text)
+    return body === undefined ? undefined : { path: '/message-edit', body }
+  }
+  if (entry.targetMessageId === '') return undefined
+  return { path: '/api/msg-edit/rewrite-message', body: { sessionId, messageId: entry.targetMessageId, reasoning: text } }
+}
+
 /** The settings document the panel edits. */
 export type SettingsValue = {
   enabled: boolean
@@ -117,6 +190,7 @@ export type SettingsValue = {
   peakSource: string
   holidays: string[]
   prices: Record<string, Partial<ModelPrices>>
+  rewriteBackend: string
   prompt: string
   maxInputChars: number
   maxOutputChars: number
@@ -128,7 +202,7 @@ export type Operation = { op: 'set'; path: (string | number)[]; value: unknown }
 
 /** Scalar fields the panel writes as a whole. */
 const SCALAR_FIELDS = [
-  'enabled', 'defaultRule', 'prompt', 'peakSource', 'holidays',
+  'enabled', 'defaultRule', 'prompt', 'peakSource', 'holidays', 'rewriteBackend',
 ] as const satisfies readonly (keyof SettingsValue)[]
 
 /** Fields keyed by model id, diffed per entry and per field. */

@@ -131,6 +131,8 @@ export interface SessionReport {
     enabled: boolean
     defaultThresholdTokens: number
     defaultDistiller: string
+    /** Selected assistant-rewrite backend id; empty when none is chosen. */
+    rewriteBackend: string
     /** Whether the second price column is in use, and which source decides it. */
     peak: PeakInfo
   }

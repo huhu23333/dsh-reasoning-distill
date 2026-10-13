@@ -1,13 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { isStaleResponse, messageEditRequest } from './ops.ts'
+import { backendById, isStaleResponse, rewriteRequest } from './ops.ts'
 import { REPORT_ROUTE, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
-
-/** Same-origin endpoint owned by the optional `dsh-message-edit` companion. */
-const MESSAGE_EDIT_PATH = '/message-edit'
 
 type Props = PropsRuntime<'conversation.view'> & PropsLocale<typeof NS> & { openSession: (id: string) => void }
 type Translate = Props['t']
@@ -97,11 +94,12 @@ export function stockOfEntry(entry: CompressionEntry, live?: readonly string[]):
   return entry.savedTokensPerRequest
 }
 
-function Entry({ entry, t, liveStockIds, sessionId, openSession }: {
+function Entry({ entry, t, liveStockIds, sessionId, backendId, openSession }: {
   entry: CompressionEntry
   t: Translate
   liveStockIds?: readonly string[]
   sessionId: string
+  backendId: string
   openSession: (id: string) => void
 }) {
   const [branch, setBranch] = useState<{ state: 'idle' | 'working' | 'failed' | 'missing'; detail?: string }>({ state: 'idle' })
@@ -111,13 +109,13 @@ function Entry({ entry, t, liveStockIds, sessionId, openSession }: {
    * companion creates a new session, so this one is never rewritten.
    */
   const branchHere = (): void => {
-    const body = messageEditRequest(sessionId, entry, entry.distill.responseText)
-    if (body === undefined) return
+    const request = rewriteRequest(backendId, sessionId, entry, entry.distill.responseText)
+    if (request === undefined) return
     setBranch({ state: 'working' })
-    void fetch(MESSAGE_EDIT_PATH, {
+    void fetch(request.path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      body: JSON.stringify(request.body),
     }).then(async response => {
       if (response.status === 404) { setBranch({ state: 'missing' }); return }
       const payload = await response.json().catch(() => null) as { sessionId?: string; error?: string } | null
@@ -127,7 +125,8 @@ function Entry({ entry, t, liveStockIds, sessionId, openSession }: {
       if (typeof created === 'string' && created !== '') openSession(created)
     }).catch((error: unknown) => { setBranch({ state: 'failed', detail: String(error) }) })
   }
-  const canBranch = stockOfEntry(entry, liveStockIds) > 0 && entry.distill.responseText !== '' && entry.targetBlockIndex >= 0
+  const canBranch = stockOfEntry(entry, liveStockIds) > 0 && entry.distill.responseText !== ''
+    && rewriteRequest(backendId, sessionId, entry, entry.distill.responseText) !== undefined
 
   const run = entry.distill
   const estimated = run.estimated === true
@@ -151,8 +150,10 @@ function Entry({ entry, t, liveStockIds, sessionId, openSession }: {
         <div><span>{t('view.avoided')}</span><strong>{signedMoney(-reducedOfEntry(entry))}</strong></div>
         <div><span>{t('view.branch')}</span><strong>
           {canBranch
-            ? <button type="button" className={css.secondary} disabled={branch.state === 'working'} onClick={branchHere}>{branch.state === 'working' ? t('view.branching') : t('view.branchCreate')}</button>
-            : <span className={css.muted}>{t('view.branchUnavailable')}</span>}
+            ? <button type="button" className={css.secondary} disabled={branch.state === 'working'} onClick={branchHere}>{branch.state === 'working'
+              ? t('view.branching')
+              : backendById(backendId)?.kind === 'branch' ? t('view.branchCreate') : t('view.applyRewrite')}</button>
+            : <span className={css.muted}>{backendById(backendId) === undefined ? t('view.backendUnset') : t('view.branchUnavailable')}</span>}
           {branch.state === 'missing' && <span className={css.error}> · {t('view.branchNeedsPlugin')}</span>}
           {branch.state === 'failed' && <span className={css.error}> · {t('view.branchFailed')}: {branch.detail ?? ''}</span>}
         </strong></div>
@@ -269,7 +270,7 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
           <span className={css.metric}>{Math.max(0, Math.round((now - item.startedAt) / 1000))}s</span>
         </div>)}
       </section>}
-      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}{report.entries.map(entry => <Entry key={entry.id} entry={entry} t={t} liveStockIds={report.stockIds} sessionId={report.sessionId} openSession={openSession} />)}</section>
+      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}{report.entries.map(entry => <Entry key={entry.id} entry={entry} t={t} liveStockIds={report.stockIds} sessionId={report.sessionId} backendId={report.config.rewriteBackend} openSession={openSession} />)}</section>
       <section className={css.section}><h3>{t('view.sessions')}</h3>{report.entries.map(entry => <SessionRow key={entry.id} entry={entry} t={t} openSession={openSession} />)}</section>
     </>}
   </div>

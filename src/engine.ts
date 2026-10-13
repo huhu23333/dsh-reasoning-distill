@@ -517,6 +517,10 @@ export class ReasoningDistillEngine {
     const provider = message.source?.provider ?? ''
     if (model === '') return ''
     if (!this.config.enabled.get()) return model
+    // A distillation is only useful when some companion can write the result into
+    // the session's own history. With no backend selected the panel forces the
+    // master switch off; this is the belt-and-braces half of the same rule.
+    if (this.config.rewriteBackend.get() === '') return model
     // A canceled step is not an answer: the host still appends `step/end` after
     // an abort (agent-loop), so staging here would spend a distillation on
     // partial reasoning and hold the next request until it finished. Accounting

@@ -12,7 +12,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionSessionsAction } from '../src/client/SessionsAction.tsx'
 import { CompressionActivity } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
-import { continuableDepthDisabled, isStaleResponse, messageEditRequest, oneShotDepthDisabled, planSave, ruleFieldsIdle, saveOperations, type SettingsValue } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, oneShotDepthDisabled, planSave, rewriteRequest, ruleFieldsIdle, saveOperations, type SettingsValue } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
@@ -165,6 +165,37 @@ check('an unknown block index cannot be bridged',
   messageEditRequest('s', { targetSeq: 1, targetBlockIndex: -1 }, 'x') === undefined)
 check('empty text cannot be bridged', messageEditRequest('s', { targetSeq: 1, targetBlockIndex: 0 }, '') === undefined)
 check('a session without an id cannot be bridged', messageEditRequest('', { targetSeq: 1, targetBlockIndex: 0 }, 'x') === undefined)
+
+console.log('client: the rewrite backend registry drives the panel')
+check('two backends are offered, one branching and one in place',
+  REWRITE_BACKENDS.length === 2
+  && backendById('message-edit')?.kind === 'branch'
+  && backendById('msg-edit')?.kind === 'in-place')
+check('an empty or unknown id resolves to no backend',
+  backendById('') === undefined && backendById('nope') === undefined)
+// Master switch: locked off with no backend, the user's choice otherwise.
+check('no backend locks the master switch off', masterSwitchState('', true).locked && masterSwitchState('', true).checked === false)
+check('a selected backend unlocks it and keeps the user value',
+  !masterSwitchState('message-edit', true).locked && masterSwitchState('message-edit', true).checked === true)
+check('and an uninstalled/unknown id does not unlock it', masterSwitchState('nope', true).locked)
+// Requests: branch backend needs seq + block index, in-place backend needs the message id.
+const target = { targetSeq: 12, targetMessageId: 'm-12', targetBlockIndex: 2 }
+const branchCall = rewriteRequest('message-edit', 'session-1', target, 'short')
+check('the branch backend is asked to edit the reasoning block',
+  branchCall?.path === '/message-edit' && branchCall.body['eventSeq'] === 12 && branchCall.body['blockIndex'] === 2
+  && branchCall.body['text'] === 'short' && branchCall.body['action'] === 'edit',
+  JSON.stringify(branchCall))
+const inPlaceCall = rewriteRequest('msg-edit', 'session-1', target, 'short')
+check('the in-place backend is asked to rewrite the message reasoning',
+  inPlaceCall?.path === '/api/msg-edit/rewrite-message' && inPlaceCall.body['messageId'] === 'm-12'
+  && inPlaceCall.body['reasoning'] === 'short' && inPlaceCall.body['sessionId'] === 'session-1',
+  JSON.stringify(inPlaceCall))
+check('a missing block index cannot be sent to the branch backend',
+  rewriteRequest('message-edit', 'session-1', { ...target, targetBlockIndex: -1 }, 'short') === undefined)
+check('a missing message id cannot be sent to the in-place backend',
+  rewriteRequest('msg-edit', 'session-1', { ...target, targetMessageId: '' }, 'short') === undefined)
+check('no backend means no request at all', rewriteRequest('', 'session-1', target, 'short') === undefined)
+check('empty text is never sent', rewriteRequest('msg-edit', 'session-1', target, '') === undefined)
 
 console.log('render: a report from an older host (version skew)')
 const legacy = modernReport()

@@ -101,6 +101,12 @@ export interface Config {
   holidays: Volatile<string[]>
   /** Per-model prices keyed by model id; missing entries fall back to built-ins. */
   prices: Volatile<Record<string, Partial<ModelPrices>>>
+  /**
+   * Which installed companion applies a rewrite to the session's own history.
+   * Empty means none: nothing can carry the distilled text into the transcript,
+   * so compression is refused and the master switch is forced off in the panel.
+   */
+  rewriteBackend: Volatile<string>
   /** Distillation instruction; empty selects the built-in prompt. */
   prompt: Volatile<string>
   /**
@@ -207,6 +213,7 @@ export const Config = z.object({
     off: PriceBucketSchema,
     peakPricing: z.boolean(),
   })).default(DEFAULT_PRICE_ENTRIES).volatile(),
+  rewriteBackend: z.string().default('').volatile(),
   prompt: z.string().default('').volatile(),
   maxInputChars: z.number().default(120000).volatile(),
   maxOutputChars: z.number().default(0).volatile(),

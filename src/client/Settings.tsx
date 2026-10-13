@@ -6,7 +6,7 @@ import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  continuableDepthDisabled, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
+  REWRITE_BACKENDS, backendById, continuableDepthDisabled, masterSwitchState, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
 import { FALLBACK_RULE, mergeRule, sparseOverride } from '../rule.ts'
@@ -53,6 +53,57 @@ function normalize(value: SettingsValue): Draft {
 
 function numberValue(raw: string): number {
   return raw === '' ? 0 : Number(raw)
+}
+
+/**
+ * Single-select list of the installed companions that can write a rewrite into
+ * the session's history.
+ *
+ * Availability is probed once per mount: a backend whose endpoint answers
+ * anything other than 404 is installed and may be chosen. Choosing the selected
+ * row again clears the choice; with no choice the master switch is locked off.
+ * @param props - current id, selection callback, and translator.
+ * @returns the chooser.
+ */
+function BackendChooser({ value, onSelect, t }: {
+  value: string
+  onSelect: (id: string) => void
+  t: Translate
+}) {
+  const [available, setAvailable] = useState<Record<string, boolean>>({})
+  useEffect(() => {
+    let alive = true
+    for (const backend of REWRITE_BACKENDS) {
+      void fetch(backend.probe.path, {
+        method: backend.probe.method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(backend.probe.body),
+      }).then(response => {
+        if (alive) setAvailable(current => ({ ...current, [backend.id]: response.status !== 404 }))
+      }).catch(() => {
+        if (alive) setAvailable(current => ({ ...current, [backend.id]: false }))
+      })
+    }
+    return () => { alive = false }
+  }, [])
+  return <div className={css.checks}>
+    {REWRITE_BACKENDS.map(backend => {
+      const installed = available[backend.id] === true
+      const selected = value === backend.id
+      return <label key={backend.id} className={css.inline}>
+        <input
+          type="radio"
+          name="reasoning-distill-backend"
+          checked={selected}
+          disabled={!installed}
+          onChange={() => onSelect(selected ? '' : backend.id)}
+        />
+        <span>{backend.id} · {backend.kind === 'branch' ? t('settings.backendBranch') : t('settings.backendInPlace')}</span>
+        <span className={css.muted}>{installed ? t('settings.backendInstalled') : t('settings.backendMissing')}</span>
+      </label>
+    })}
+    <span className={css.note}>{t('settings.backendHint')}</span>
+  </div>
 }
 
 function Toggle({ label, checked, onChange, disabled = false }: {
@@ -251,6 +302,7 @@ export function ReasoningDistillSettings({ form, t }: Props) {
   const priceIds = Object.keys(draft.prices)
   const resolveModel = (id: string): CatalogModel =>
     (catalog?.models ?? []).find(model => model.id === id) ?? { provider: '', id, name: id, reasoningEfforts: [] }
+  const master = masterSwitchState(draft.rewriteBackend, draft.enabled)
   const ruleModels = ruleIds.map(resolveModel)
   const priceModels = priceIds.map(resolveModel)
   // Exactly what the engine will resolve, so the panel cannot show a rule the
@@ -265,7 +317,19 @@ export function ReasoningDistillSettings({ form, t }: Props) {
     </div></header>
     {!writable && <p role="alert" className={css.error}>{t('settings.unavailable')}</p>}
     <section className={css.section}>
-      <Toggle label={t('settings.master')} checked={draft.enabled} onChange={enabled => update(current => ({ ...current, enabled }))} />
+      <Toggle label={t('settings.master')} checked={master.checked} disabled={master.locked}
+        onChange={enabled => { if (!master.locked) update(current => ({ ...current, enabled })) }} />
+      {master.locked && <p className={css.note}>{t('settings.masterLocked')}</p>}
+    </section>
+    <section className={css.section}>
+      <h3>{t('settings.backend')}</h3>
+      <BackendChooser value={draft.rewriteBackend} t={t} onSelect={id => update(current => ({
+        ...current,
+        rewriteBackend: id,
+        // Losing the last backend means nothing could apply a rewrite, so the
+        // master switch closes with it; picking one leaves the choice to the user.
+        ...(id === '' ? { enabled: false } : {}),
+      }))} />
     </section>
     <section className={css.section}><h3>{t('settings.default')}</h3><RuleFields rule={draft.defaultRule} catalog={catalog} t={t} onChange={defaultRule => update(current => ({ ...current, defaultRule }))} /></section>
     <section className={css.section}><div className={css.sectionHeading}><h3>{t('settings.models')}</h3>{catalogError && <button type="button" className={css.iconButton} title={t('settings.retry')} aria-label={t('settings.retry')} onClick={() => setCatalogAttempt(n => n + 1)}><IconRefreshOutlineRegular /></button>}</div>
