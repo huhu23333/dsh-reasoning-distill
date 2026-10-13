@@ -290,10 +290,13 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       }
     }).catch(async (error: unknown) => {
       // The request did not complete, so whether the backend applied the rewrite
-      // is unknown. An in-place rewrite is not idempotent, so this is recorded as
-      // a failure and the pending flag is cleared rather than retried: a duplicate
-      // mutation is worse than a rewrite that did not land.
-      await settleHandoff(current, pending, error instanceof Error ? error.message : String(error))
+      // is unknown. An in-place rewrite is not idempotent, so this attempt is
+      // terminal for the backend whatever the settle says: a duplicate mutation is
+      // worse than a rewrite that did not land. Only an unfinished *settle* is
+      // retried, so the host's pending flag cannot linger and trigger a re-post.
+      const verdict = await settleHandoff(current, pending, error instanceof Error ? error.message : String(error))
+      appliedPending.current.add(attemptKey)
+      if (verdict === 'failed') settlePending.current.add(attemptKey)
     }).finally(() => {
       // Released once the attempt is over: whether to try again is decided by the
       // host's pending flag, not by this marker.
