@@ -1105,7 +1105,7 @@ export class ReasoningDistillEngine {
           liveRequests: 0,
           frozenSaved: 0,
           failed: true,
-          ...sessionId === '' ? { sessionMissing: true as const } : {},
+          ...sessionId === '' || !opened.durable ? { sessionMissing: true as const } : {},
         })
       })
       return
@@ -1152,7 +1152,7 @@ export class ReasoningDistillEngine {
           liveRequests: 0,
           frozenSaved: 0,
           skipped: true,
-          ...sessionId === '' ? { sessionMissing: true as const } : {},
+          ...sessionId === '' || !opened.durable ? { sessionMissing: true as const } : {},
         })
       })
       return
@@ -1195,7 +1195,7 @@ export class ReasoningDistillEngine {
       liveSaved: 0,
       liveRequests: 0,
       frozenSaved: 0,
-      ...sessionId === '' ? { sessionMissing: true as const } : {},
+      ...sessionId === '' || !opened.durable ? { sessionMissing: true as const } : {},
     }
     await this.store.update(session.id, (record) => {
       if (stale()) return
@@ -1343,8 +1343,9 @@ export class ReasoningDistillEngine {
     parent: Session,
     prompt: string,
     userText: string,
-  ): Promise<{ id: string; ok: boolean }> {
+  ): Promise<{ id: string; ok: boolean; durable: boolean }> {
     let id = ''
+    let durable = false
     try {
       const created = this.ctx.sessions.create(undefined, {
         meta: {
@@ -1360,12 +1361,21 @@ export class ReasoningDistillEngine {
       // Claim the durable log writer BEFORE the first append: the backend routes
       // a published session's events to its writer by id, so events appended
       // earlier would never reach disk.
+      // A session whose durable writer did not attach is not an audit log: its
+      // events live only in memory and vanish on restart, so the entry must say
+      // so (`sessionMissing`) instead of promising a readable record. The
+      // compression itself still proceeds — the full text always lives on the
+      // entry, which is the real record.
       if (this.attachWriter !== undefined) {
         try {
           await this.attachWriter(created)
+          durable = true
         } catch (error: unknown) {
           this.ctx.logger.warn('reasoning-distill: audit session %s stays in-memory only: %o', id, error)
+          durable = false
         }
+      } else {
+        durable = false
       }
       created.append('turn/start', { turn: 1 })
       created.append('step/start', { turn: 1, step: 1 })
@@ -1373,10 +1383,10 @@ export class ReasoningDistillEngine {
         content: [{ type: 'text', text: `${prompt}\n\n---\n\n${userText}` }],
         source: { kind: 'user' },
       }), { surfaceOp: 'append' })
-      return { id, ok: true }
+      return { id, ok: true, durable }
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not open a compression session: %o', error)
-      return { id, ok: false }
+      return { id, ok: false, durable: false }
     }
   }
 

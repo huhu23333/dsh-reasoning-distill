@@ -896,7 +896,10 @@ await fire('session/event', s15b, s15b.eventAt(s15b.log.length - 1))
 await fire('agent/pre-step', { agent: { session: s15b } }, async () => undefined)
 const entry15b = (await store15b.load(s15b.id)).entries[0]!
 check('a writer that cannot be claimed leaves the audit session in memory only',
-  entry15b !== undefined && entry15b.sessionMissing !== true && entry15b.distill.sessionId !== '')
+  // The compression still lands, but the entry must not promise a durable audit
+  // record: `sessionMissing` tells the panel the full text only lives on the entry.
+  entry15b.distilledText !== '' && entry15b.sessionMissing === true,
+  JSON.stringify({ missing: entry15b.sessionMissing }))
 check('and the rewrite still ships',
   s15b.deriveMessages().some(message => JSON.stringify((message as { content?: unknown }).content ?? '').includes('Distilled: ask for Paris weather')))
 
@@ -2325,6 +2328,22 @@ check('and nothing was asked to stop', cancelled46.length === 0, JSON.stringify(
 check('a hand-off we do owe may stop the turn',
   engine46b.handoff(new46.id, true) === false && cancelled46.length === 0)
 await new Promise<void>(resolve => slowBackend46.close(() => { resolve() }))
+
+console.log('scenario 47: an audit session whose durable writer refused is reported as missing')
+handlers.clear()
+const store47 = new SidecarStore()
+const engine47 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store47)
+engine47.usePersistence(async () => { throw new Error('disk full') })
+engine47.start()
+const s47 = new FakeSession('session-durability-47')
+sessions.set(s47.id, s47)
+await fire('session/created', s47)
+await runStep40(engine47, s47, '47')
+await settleFor(async () => (await store47.load(s47.id)).entries.length === 1)
+const entry47 = (await store47.load(s47.id)).entries[0]!
+check('the compression still lands', entry47.distilledText !== '')
+check('but the entry says its audit session is not durable', entry47.sessionMissing === true,
+  JSON.stringify({ missing: entry47.sessionMissing, sessionId: entry47.distill.sessionId }))
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
