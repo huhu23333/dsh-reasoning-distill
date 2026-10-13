@@ -3274,6 +3274,54 @@ check('an old in-flight disk failure cannot overwrite a newer committed hand-off
   && backendCalls.length === backendBeforeReplay62h && writes62h === 3,
   JSON.stringify({ oldResult62h, newResult62h, owedBeforeReplay62h, saved62h, owedAfterReplay62h: owed62h.size, writes62h, backendBeforeReplay62h, backendAfterReplay62h: backendCalls.length }))
 
+console.log('scenario 62i: two reversed failed writes owe only the newer hand-off')
+handlers.clear()
+const store62i = new SidecarStore()
+const update62i = store62i.update.bind(store62i)
+const s62i = new FakeSession('session-reversed-failed-notes-62i')
+let writes62i = 0
+let releaseOld62i: (() => void) | undefined
+let oldStarted62i: (() => void) | undefined
+const oldStartedPromise62i = new Promise<void>(resolve => { oldStarted62i = resolve })
+const oldGate62i = new Promise<void>(resolve => { releaseOld62i = resolve })
+store62i.update = async (id, mutate) => {
+  if (id === s62i.id) {
+    writes62i++
+    if (writes62i === 2) {
+      oldStarted62i?.()
+      await oldGate62i
+      throw new Error('old in-flight hand-off disk failure')
+    }
+    if (writes62i === 3) throw new Error('new in-flight hand-off disk failure')
+  }
+  return update62i(id, mutate)
+}
+const engine62i = new ReasoningDistillEngine(ctx as never, cfg10 as never, store62i)
+engine62i.start()
+sessions.set(s62i.id, s62i)
+await fire('session/created', s62i)
+await runStep40(engine62i, s62i, '62i')
+await settleFor(async () => (await store62i.load(s62i.id)).entries.length === 1)
+const entry62i = (await store62i.load(s62i.id)).entries[0]!
+const gen62i = engine62i.snapshot(s62i.id).generation
+const first62i = engine62i.handoff(s62i.id, false, 'old failed', entry62i.id, gen62i)
+await oldStartedPromise62i
+const newResult62i = await engine62i.handoff(s62i.id, false, 'new failed', entry62i.id, gen62i)
+releaseOld62i?.()
+const oldResult62i = await first62i
+const owed62i = (engine62i as unknown as { owedHandoffNotes: Map<string, { outcome: { error?: string }; order: number }> }).owedHandoffNotes
+const owedBeforeReplay62i = owed62i.get(`${s62i.id}:${entry62i.id}`)
+const backendBeforeReplay62i = backendCalls.length
+await fire('agent/pre-step', { agent: { session: s62i } }, async () => ({ kind: 'enter' }))
+await settleFor(async () => owed62i.size === 0)
+const saved62i = (await store62i.load(s62i.id)).entries[0]?.handoff
+check('reversed failed writes replay only the newer owed hand-off without backend resend',
+  !oldResult62i.recorded && !newResult62i.recorded
+  && owedBeforeReplay62i?.outcome.error === 'new failed' && owedBeforeReplay62i.order === 2
+  && saved62i?.state === 'failed' && saved62i.error === 'new failed' && owed62i.size === 0
+  && backendCalls.length === backendBeforeReplay62i && writes62i === 4,
+  JSON.stringify({ oldResult62i, newResult62i, owedBeforeReplay62i, saved62i, owedAfterReplay62i: owed62i.size, writes62i, backendBeforeReplay62i, backendAfterReplay62i: backendCalls.length }))
+
 console.log('scenario 62e: a failed record-only write is owed for the next pre-step')
 handlers.clear()
 const store62e = new SidecarStore()

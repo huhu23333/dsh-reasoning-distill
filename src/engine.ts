@@ -763,6 +763,8 @@ export class ReasoningDistillEngine {
   /** Remember a hand-off note that could not be written, so the next pre-step retries it. */
   private oweNote(sessionId: string, entryId: string, outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number }, order: number): void {
     const key = `${sessionId}:${entryId}`
+    const existing = this.owedHandoffNotes.get(key)
+    if (existing !== undefined && existing.order >= order) return
     this.owedHandoffNotes.set(key, { entryId, outcome, order })
     this.ctx.logger.warn('reasoning-distill: hand-off note for %s could not be written yet; it will be retried', entryId)
   }
