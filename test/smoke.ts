@@ -1990,7 +1990,7 @@ for (const mode of ['absent service', 'throwing getter'] as const) {
   session.append('step/end', { turn: 1, step: 1 })
   await fire('session/event', session, session.eventAt(seq))
   await fire('session/event', session, session.eventAt(session.log.length - 1))
-  await settleFor(async () => (await store38d.load(session.id)).entries.length === 1)
+  await settleFor(async () => (await store38d.load(session.id)).entries.length === 1 && engine38d.snapshot(session.id).pendingBranch !== null)
   const entry = (await store38d.load(session.id)).entries[0]!
   check(`${mode}: a rewrite is pending before default-cancel settle`, engine38d.snapshot(session.id).pendingBranch === entry.id)
   const warningStart = info.length
@@ -2864,9 +2864,9 @@ const s60 = new FakeSession('session-read-stalled-60')
 sessions.set(s60.id, s60)
 await fire('session/created', s60)
 let continued60 = 0
-;(engine60 as unknown as { loadStarted: Map<string, number> }).loadStarted.set(s60.id, Date.now() - 30_020)
 const waiting60 = Promise.all((handlers.get('agent/pre-step') ?? []).map(fn => fn({ agent: { session: s60 } }, async () => { continued60++; return { kind: 'enter' } })))
-await new Promise(resolve => setTimeout(resolve, 35))
+;(engine60 as unknown as { loadStarted: Map<string, { at: number }> }).loadStarted.get(s60.id)!.at = Date.now() - 30_020
+await fire('agent/pre-step', { agent: { session: s60 } }, async () => { continued60++; return { kind: 'enter' } })
 check('finite timeout releases a stalled read without a host abort', continued60 === 1, String(continued60))
 finishRead60?.()
 await waiting60
@@ -2909,6 +2909,97 @@ await settleFor(async () => (await store61.load(s61.id)).entries[0]?.handoff?.st
 check('late durable adoption is published with explicit skipped hand-off, never pending branch',
   engine61.snapshot(s61.id).pendingBranch === null && (await store61.load(s61.id)).entries[0]?.handoff?.state === 'skipped',
   JSON.stringify((await store61.load(s61.id)).entries[0]?.handoff))
+
+console.log('scenario 62: an unwritable skipped hand-off note is owed until disk recovery')
+handlers.clear()
+const realStore62 = new SidecarStore()
+const update62 = realStore62.update.bind(realStore62)
+let releaseWrite62: (() => void) | undefined
+let mutation62: (() => void) | undefined
+let delayed62 = false
+let failNote62 = true
+let noteAttempt62: (() => void) | undefined
+const attempted62 = new Promise<void>(resolve => { noteAttempt62 = resolve })
+realStore62.update = async (id, mutate) => {
+  if (id === 'session-late-note-62' && !delayed62) {
+    delayed62 = true
+    return update62(id, record => { mutate(record); mutation62?.() }).then(async result => {
+      await new Promise<void>(resolve => { releaseWrite62 = resolve })
+      return result
+    })
+  }
+  if (id === 'session-late-note-62' && failNote62) {
+    failNote62 = false
+    noteAttempt62?.()
+    throw new Error('disk full')
+  }
+  return update62(id, mutate)
+}
+const engine62 = new ReasoningDistillEngine(ctx as never, cfg10 as never, realStore62)
+engine62.start()
+const s62 = new FakeSession('session-late-note-62')
+sessions.set(s62.id, s62)
+await fire('session/created', s62)
+const mutated62 = new Promise<void>(resolve => { mutation62 = resolve })
+await runStep40(engine62, s62, '62')
+await mutated62
+const internals62 = engine62 as unknown as { waitBound: Map<string, { timeoutMs: number; launchedAt: number }>; settle: (s: FakeSession) => Promise<boolean> }
+for (const bound of internals62.waitBound.values()) bound.launchedAt = Date.now() - bound.timeoutMs - 30_001
+await internals62.settle(s62)
+await settleFor(async () => releaseWrite62 !== undefined)
+releaseWrite62?.()
+await attempted62
+await settleFor(async () => (await realStore62.load(s62.id)).entries.length === 1)
+check('the failed note does not report completed hand-off',
+  engine62.snapshot(s62.id).pendingBranch === null && (await realStore62.load(s62.id)).entries[0]?.handoff === undefined)
+await fire('agent/pre-step', { agent: { session: s62 } }, async () => ({ kind: 'enter' }))
+await settleFor(async () => (await realStore62.load(s62.id)).entries[0]?.handoff?.state === 'skipped')
+check('the next pre-step retries only the skipped note after disk recovery',
+  (await realStore62.load(s62.id)).entries[0]?.handoff?.state === 'skipped'
+  && engine62.snapshot(s62.id).pendingBranch === null)
+
+console.log('scenario 63: completed stalled read permits the next pre-step to settle and hand off')
+handlers.clear()
+const realStore63 = new SidecarStore()
+const load63 = realStore63.load.bind(realStore63)
+let releaseRead63: (() => void) | undefined
+let readStarted63: (() => void) | undefined
+let delayRead63 = true
+realStore63.load = async id => {
+  if (id === 'session-read-resumed-63' && delayRead63) {
+    delayRead63 = false
+    readStarted63?.()
+    await new Promise<void>(resolve => { releaseRead63 = resolve })
+  }
+  return load63(id)
+}
+const engine63 = new ReasoningDistillEngine(ctx as never, cfg10 as never, realStore63)
+engine63.start()
+const s63 = new FakeSession('session-read-resumed-63')
+sessions.set(s63.id, s63)
+const reading63 = new Promise<void>(resolve => { readStarted63 = resolve })
+await fire('session/created', s63)
+await reading63
+await runStep40(engine63, s63, '63')
+const internal63 = engine63 as unknown as { loadStarted: Map<string, { at: number }> }
+let continued63 = 0
+const waiting63 = fire('agent/pre-step', { agent: { session: s63 } }, async () => { continued63++; return { kind: 'enter' } })
+internal63.loadStarted.get(s63.id)!.at = Date.now() - 30_020
+await fire('agent/pre-step', { agent: { session: s63 } }, async () => { continued63++; return { kind: 'enter' } })
+await waiting63
+check('the stalled read releases both waiting pre-steps', continued63 === 2)
+releaseRead63?.()
+// The read has completed; a fresh step must now trigger normal compression.
+await settleFor(async () => !internal63.loadStarted.has(s63.id))
+await runStep40(engine63, s63, '63-recovered')
+let resumed63: unknown
+for (const fn of handlers.get('agent/pre-step') ?? []) {
+  resumed63 = await fn({ agent: { session: s63 } }, async () => { continued63++; return { kind: 'enter' } })
+}
+check('the next pre-step settles the recovered compression and branch hand-off',
+  continued63 === 3 && (await realStore63.load(s63.id)).entries[0]?.handoff?.state === 'failed'
+  && engine63.snapshot(s63.id).pendingBranch === null,
+  JSON.stringify({ decision: resumed63, entry: (await realStore63.load(s63.id)).entries[0] }))
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

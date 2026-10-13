@@ -120,8 +120,8 @@ export class ReasoningDistillEngine {
   private readonly pendingBranch = new Map<string, string>()
   /** One derivation per agent/request boundary may own request accounting. */
   private readonly expectRequest = new Set<string>()
-  /** First pre-step read's deadline, reused across retries of the same stalled load. */
-  private readonly loadStarted = new Map<string, number>()
+  /** Deadline belongs to the current pending read, not the session's lifetime. */
+  private readonly loadStarted = new Map<string, { at: number; work: Promise<void> }>()
   /** Per-compression wait bound: its rule's distillation timeout, 0 = unbounded. */
   private readonly waitBound = new Map<string, { timeoutMs: number; launchedAt: number }>()
   /** Entries already charged the miss price, keyed `sessionId:entryId`. */
@@ -136,7 +136,7 @@ export class ReasoningDistillEngine {
    * Only the *note* is retried: re-posting the backend request would create a
    * second branch, so the pending marker is not kept for this.
    */
-  private readonly owedHandoffNotes = new Map<string, { entryId: string; error: string }>()
+  private readonly owedHandoffNotes = new Map<string, { entryId: string; outcome: { state: 'failed' | 'skipped'; error: string; at: number } }>()
   /** Audit links known to be non-durable, keyed `sessionId:entryId`. */
   private readonly auditBroken = new Set<string>()
   /** Bumped whenever a session id is attached again; stale work checks it. */
@@ -223,11 +223,19 @@ export class ReasoningDistillEngine {
           const signal = (payload as { signal?: AbortSignal }).signal
           // A stalled sidecar read must not outlive a stop either: the host only looks
           // at its signal once this handler returns.
-          const loadStart = this.loadStarted.get(session.id) ?? Date.now()
-          this.loadStarted.set(session.id, loadStart)
+          let load = this.loadStarted.get(session.id)
+          if (load === undefined) {
+            const work = this.ensureLoaded(session)
+            load = { at: Date.now(), work }
+            this.loadStarted.set(session.id, load)
+            const currentLoad = load
+            void work.then(() => {
+              if (this.loadStarted.get(session.id) === currentLoad) this.loadStarted.delete(session.id)
+            })
+          }
           const backstop = this.ruleBackstopMs()
-          const loaded = await this.waitUntil(this.ensureLoaded(session), signal,
-            backstop > 0 ? loadStart + backstop + 30_000 : undefined)
+          const loaded = await this.waitUntil(load.work, signal,
+            backstop > 0 ? load.at + backstop + 30_000 : undefined)
           if (!loaded) {
             if (signal?.aborted || this.replaced(session)) return true
             // A stalled step/end gate must not launch after the raw request escapes.
@@ -235,8 +243,6 @@ export class ReasoningDistillEngine {
               if (key.startsWith(`${session.id}:`)) this.abandoned.add(key)
             }
             return true
-          } else {
-            this.loadStarted.delete(session.id)
           }
           // The read is awaited: the id can be replaced underneath it, and then this
           // obsolete pre-step must not settle, hand off or arm anything.
@@ -754,8 +760,8 @@ export class ReasoningDistillEngine {
   }
 
   /** Remember a hand-off note that could not be written, so the next pre-step retries it. */
-  private oweNote(sessionId: string, entryId: string, error: string): void {
-    this.owedHandoffNotes.set(`${sessionId}:${entryId}`, { entryId, error })
+  private oweNote(sessionId: string, entryId: string, error: string, state: 'failed' | 'skipped' = 'failed'): void {
+    this.owedHandoffNotes.set(`${sessionId}:${entryId}`, { entryId, outcome: { state, error, at: Date.now() } })
     this.ctx.logger.warn('reasoning-distill: hand-off note for %s could not be written yet; it will be retried', entryId)
   }
 
@@ -765,7 +771,7 @@ export class ReasoningDistillEngine {
     for (const [key, note] of [...this.owedHandoffNotes]) {
       if (!key.startsWith(prefix)) continue
       const written = await this.untilSettled(
-        this.recordHandoff(session.id, note.entryId, { state: 'failed', error: note.error, at: Date.now() }),
+        this.recordHandoff(session.id, note.entryId, note.outcome),
         signal,
       )
       if (written === true) this.owedHandoffNotes.delete(key)
@@ -1127,7 +1133,7 @@ export class ReasoningDistillEngine {
       const backstop = this.ruleBackstopMs()
       const waits = mine.map(async ([key, promise]) => {
         const recorded = this.waitBound.get(key)
-        const bound = recorded ?? (backstop > 0 ? { timeoutMs: backstop, launchedAt: this.loadStarted.get(sessionId) ?? startedAt } : undefined)
+        const bound = recorded ?? (backstop > 0 ? { timeoutMs: backstop, launchedAt: this.loadStarted.get(sessionId)?.at ?? startedAt } : undefined)
         if (bound === undefined || bound.timeoutMs === 0) {
           await promise
           return
@@ -1630,8 +1636,10 @@ export class ReasoningDistillEngine {
       if (abandonedNow()) {
         // The committed entry remains visible and any real savings remain payable;
         // only the branch hand-off is skipped after the original turn was released.
-        await this.recordHandoff(session.id, entry.id,
-          { state: 'skipped', error: 'branch hand-off skipped after the wait deadline', at: Date.now() }, generation)
+        const reason = 'branch hand-off skipped after the wait deadline'
+        const noted = await this.recordHandoff(session.id, entry.id,
+          { state: 'skipped', error: reason, at: Date.now() }, generation)
+        if (!noted && !stale()) this.oweNote(session.id, entry.id, reason, 'skipped')
       } else this.pendingBranch.set(session.id, entry.id)
     }
     this.ctx.logger.info(
