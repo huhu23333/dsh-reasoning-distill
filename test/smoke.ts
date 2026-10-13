@@ -2802,7 +2802,8 @@ await fire('session/created', s58)
 const seq58 = await runStep40(engine58, s58, '58')
 await settleFor(async () => (await store58.load(s58.id)).entries.length === 1)
 const entry58 = (await store58.load(s58.id)).entries[0]!
-// The pre-step arms the session and a *later* hook derives for inspection first.
+// A pre-step inspector derives before the agent/request boundary; it cannot
+// claim the subsequent request's attribution.
 for (const fn of handlers.get('agent/pre-step') ?? []) {
   await fn({ agent: { session: s58 } }, async () => ({ kind: 'enter', messages: [] }))
 }
@@ -2810,6 +2811,7 @@ const inspected = s58.deriveMessages()
 check('the inspector derivation replaced the reasoning', JSON.stringify(inspected).includes('Distilled:'))
 // The surface moves before the real request derivation: the rewrite no longer applies.
 s58.nodes.splice(0, s58.nodes.length, ...s58.nodes.filter(seq => seq !== seq58))
+for (const fn of handlers.get('agent/request') ?? []) await fn({ agent: { session: s58 } }, async () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }))
 s58.deriveMessages()
 const response58 = s58.append('assistant/message', {
   turn: 2, step: 1,
@@ -2820,6 +2822,93 @@ await fire('session/event', s58, s58.eventAt(response58))
 const after58 = (await store58.load(s58.id)).entries.find(item => item.id === entry58.id)!
 check('the request that could not carry the rewrite is not credited', after58.liveSaved === 0,
   String(after58.liveSaved))
+
+console.log('scenario 59: request boundary ownership survives a post-send text-only derivation')
+handlers.clear()
+const store59 = new SidecarStore()
+const engine59 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store59)
+engine59.start()
+const s59 = new FakeSession('session-boundary-59')
+sessions.set(s59.id, s59)
+await fire('session/created', s59)
+await runStep40(engine59, s59, '59')
+await settleFor(async () => (await store59.load(s59.id)).entries.length === 1)
+const entry59 = (await store59.load(s59.id)).entries[0]!
+for (const fn of handlers.get('agent/pre-step') ?? []) await fn({ agent: { session: s59 } }, async () => ({ kind: 'enter' }))
+for (const fn of handlers.get('agent/request') ?? []) await fn({ agent: { session: s59 } }, async () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }))
+const sent59 = s59.deriveMessages()
+const nodes59 = [...s59.nodes]
+s59.nodes.splice(0, s59.nodes.length, ...nodes59.filter(seq => seq !== entry59.targetSeq))
+s59.deriveMessages()
+s59.nodes.splice(0, s59.nodes.length, ...nodes59)
+const response59 = s59.append('assistant/message', {
+  turn: 2, step: 1,
+  message: { id: 'response-59', role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } }, stream: [],
+}).seq
+await fire('session/event', s59, s59.eventAt(response59))
+await settleFor(async () => (await store59.load(s59.id)).entries[0]!.liveRequests > 0)
+check('sent rewritten reasoning stays credited after an unrelated derivation', JSON.stringify(sent59).includes('Distilled:')
+  && (await store59.load(s59.id)).entries[0]!.liveRequests === 1,
+  JSON.stringify({ sent: sent59, entry: (await store59.load(s59.id)).entries[0] }))
+
+console.log('scenario 60: stalled sidecar read respects a finite pre-step deadline')
+handlers.clear()
+const cfg60 = makeConfig({ defaultRule: { get: () => ({ ...cfg10.defaultRule.get(), timeoutMs: 10 }) } })
+let finishRead60: (() => void) | undefined
+const store60 = new SidecarStore()
+const load60 = store60.load.bind(store60)
+store60.load = async (id: string) => { await new Promise<void>(resolve => { finishRead60 = resolve }); return load60(id) }
+const engine60 = new ReasoningDistillEngine(ctx as never, cfg60 as never, store60)
+engine60.start()
+const s60 = new FakeSession('session-read-stalled-60')
+sessions.set(s60.id, s60)
+await fire('session/created', s60)
+let continued60 = 0
+;(engine60 as unknown as { loadStarted: Map<string, number> }).loadStarted.set(s60.id, Date.now() - 30_020)
+const waiting60 = Promise.all((handlers.get('agent/pre-step') ?? []).map(fn => fn({ agent: { session: s60 } }, async () => { continued60++; return { kind: 'enter' } })))
+await new Promise(resolve => setTimeout(resolve, 35))
+check('finite timeout releases a stalled read without a host abort', continued60 === 1, String(continued60))
+finishRead60?.()
+await waiting60
+
+console.log('scenario 61: committed adoption after wait expiry records skipped hand-off')
+handlers.clear()
+const store61 = new SidecarStore()
+const update61 = store61.update.bind(store61)
+let releaseWrite61: (() => void) | undefined
+let mutation61: (() => void) | undefined
+let delayed61 = false
+store61.update = async (id, mutate) => {
+  if (id === 'session-late-write-61' && !delayed61) {
+    delayed61 = true
+    return update61(id, record => {
+      mutate(record)
+      mutation61?.()
+    }).then(async result => {
+      await new Promise<void>(resolve => { releaseWrite61 = resolve })
+      return result
+    })
+  }
+  return update61(id, mutate)
+}
+const engine61 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store61)
+engine61.start()
+const s61 = new FakeSession('session-late-write-61')
+sessions.set(s61.id, s61)
+await fire('session/created', s61)
+const mutated61 = new Promise<void>(resolve => { mutation61 = resolve })
+await runStep40(engine61, s61, '61')
+await mutated61
+const internals61 = engine61 as unknown as { waitBound: Map<string, { timeoutMs: number; launchedAt: number }>; settle: (s: FakeSession) => Promise<boolean> }
+for (const bound of internals61.waitBound.values()) bound.launchedAt = Date.now() - bound.timeoutMs - 30_001
+const proceed61 = await internals61.settle(s61)
+check('expired wait releases original request before disk completion', proceed61 && engine61.snapshot(s61.id).pendingBranch === null)
+await settleFor(async () => releaseWrite61 !== undefined)
+releaseWrite61?.()
+await settleFor(async () => (await store61.load(s61.id)).entries[0]?.handoff?.state === 'skipped')
+check('late durable adoption is published with explicit skipped hand-off, never pending branch',
+  engine61.snapshot(s61.id).pendingBranch === null && (await store61.load(s61.id)).entries[0]?.handoff?.state === 'skipped',
+  JSON.stringify((await store61.load(s61.id)).entries[0]?.handoff))
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

@@ -118,8 +118,10 @@ export class ReasoningDistillEngine {
    * backend, then stops the original turn through {@link ReasoningDistillEngine.handoff}.
    */
   private readonly pendingBranch = new Map<string, string>()
-  /** Sessions whose next derivation is the model request; see the wrapper. */
+  /** One derivation per agent/request boundary may own request accounting. */
   private readonly expectRequest = new Set<string>()
+  /** First pre-step read's deadline, reused across retries of the same stalled load. */
+  private readonly loadStarted = new Map<string, number>()
   /** Per-compression wait bound: its rule's distillation timeout, 0 = unbounded. */
   private readonly waitBound = new Map<string, { timeoutMs: number; launchedAt: number }>()
   /** Entries already charged the miss price, keyed `sessionId:entryId`. */
@@ -221,7 +223,21 @@ export class ReasoningDistillEngine {
           const signal = (payload as { signal?: AbortSignal }).signal
           // A stalled sidecar read must not outlive a stop either: the host only looks
           // at its signal once this handler returns.
-          await this.untilAborted(this.ensureLoaded(session), signal)
+          const loadStart = this.loadStarted.get(session.id) ?? Date.now()
+          this.loadStarted.set(session.id, loadStart)
+          const backstop = this.ruleBackstopMs()
+          const loaded = await this.waitUntil(this.ensureLoaded(session), signal,
+            backstop > 0 ? loadStart + backstop + 30_000 : undefined)
+          if (!loaded) {
+            if (signal?.aborted || this.replaced(session)) return true
+            // A stalled step/end gate must not launch after the raw request escapes.
+            for (const key of this.inFlight.keys()) {
+              if (key.startsWith(`${session.id}:`)) this.abandoned.add(key)
+            }
+            return true
+          } else {
+            this.loadStarted.delete(session.id)
+          }
           // The read is awaited: the id can be replaced underneath it, and then this
           // obsolete pre-step must not settle, hand off or arm anything.
           if (signal?.aborted || this.replaced(session)) return true
@@ -237,10 +253,6 @@ export class ReasoningDistillEngine {
           // The hand-off can wait for a backend: the id can be replaced underneath it
           // too, and then this obsolete pre-step must not arm the successor.
           if (this.replaced(session)) return true
-          // The loop assembles the request right after this returns; arming the
-          // session here is what lets the wrapper tell that derivation apart from a
-          // viewer's.
-          this.expectRequest.add(session.id)
           return true
         })()
         if (!continueOriginal) return { kind: 'reject' }
@@ -248,6 +260,12 @@ export class ReasoningDistillEngine {
         this.ctx.logger.warn('reasoning-distill: pre-step failed; continuing original turn: %o', error)
       }
       return next()
+    })
+    this.ctx.on('agent/request', async (payload, next) => {
+      const session = payload.agent.session
+      const proposed = await next()
+      if (this.active && !this.replaced(session)) this.expectRequest.add(session.id)
+      return proposed
     })
   }
 
@@ -332,6 +350,7 @@ export class ReasoningDistillEngine {
     }
     this.pendingBranch.delete(sessionId)
     this.expectRequest.delete(sessionId)
+    this.loadStarted.delete(sessionId)
     this.blocked.delete(sessionId)
     this.applied.delete(sessionId)
     this.rawDerive.delete(sessionId)
@@ -454,15 +473,18 @@ export class ReasoningDistillEngine {
         const result = engine.applyRewrites(this, messages)
         // Remember exactly what this request carried: accounting settles against
         // it rather than re-deriving an answer from a later surface.
-        // Only derivations inside the window the pre-step opened may record what a
-        // request carried, so a viewer or another plugin deriving an already
-        // in-flight request cannot rewrite its accounting. The marker is *not*
-        // consumed: another pre-step hook may derive the same messages for
-        // inspection first, and the request's own derivation must still record.
+        // Only the first derivation after the agent/request waterfall completes
+        // owns this request's accounting. A later viewer cannot overwrite it;
+        // an interposed derivation before buildRequest remains indistinguishable
+        // without a host freeze callback.
         // The object must still be the one attached for that id: a replaced session
         // keeps its wrapper, and its stale surface must not be recorded as the
         // successor's request.
         if (engine.expectRequest.has(this.id) && !engine.replaced(this)) {
+          // agent/request has completed; consume its one boundary derivation so a
+          // later viewer cannot replace the frozen request's accounting record.
+          // An intervening plugin deriving before buildRequest remains indistinguishable.
+          engine.expectRequest.delete(this.id)
           const nodes = this.surface.nodes
           const history = engine.applied.get(this.id) ?? []
           history.push({
@@ -763,7 +785,7 @@ export class ReasoningDistillEngine {
   private async recordHandoff(
     sessionId: string,
     entryId: string,
-    outcome: { state: 'created' | 'failed'; branchId?: string; error?: string; at: number },
+    outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number },
     generation?: number,
   ): Promise<boolean> {
     let written = false
@@ -928,7 +950,7 @@ export class ReasoningDistillEngine {
           // reused while it was running, in which case this gate belongs to nobody
           // and must neither launch nor touch the successor's state.
           if ((this.generation.get(session.id) ?? 0) !== atStep) return
-          if (this.storageBroken.has(session.id)) {
+          if (this.abandoned.has(key) || this.storageBroken.has(session.id)) {
             this.pending.delete(key)
             if (this.inFlight.get(key) === gate) this.inFlight.delete(key)
             return
@@ -1105,7 +1127,7 @@ export class ReasoningDistillEngine {
       const backstop = this.ruleBackstopMs()
       const waits = mine.map(async ([key, promise]) => {
         const recorded = this.waitBound.get(key)
-        const bound = recorded ?? (backstop > 0 ? { timeoutMs: backstop, launchedAt: Date.now() } : undefined)
+        const bound = recorded ?? (backstop > 0 ? { timeoutMs: backstop, launchedAt: this.loadStarted.get(sessionId) ?? startedAt } : undefined)
         if (bound === undefined || bound.timeoutMs === 0) {
           await promise
           return
@@ -1133,9 +1155,12 @@ export class ReasoningDistillEngine {
         } finally {
           if (timer !== undefined) clearTimeout(timer)
         }
-        if (timedOut) this.abandoned.add(key)
+        if (timedOut || Date.now() >= bound.launchedAt + bound.timeoutMs + 30_000) this.abandoned.add(key)
       })
       await this.untilAborted(Promise.all(waits), signal)
+      if (signal?.aborted) {
+        for (const [key] of mine) this.abandoned.add(key)
+      }
       return signal === undefined || !signal.aborted
     } finally {
       // Only clear the indicator this wait published: a successor generation may
@@ -1183,15 +1208,34 @@ export class ReasoningDistillEngine {
     })
   }
 
-  /**
-   * Await pending work unless the caller's signal aborts first.
-   *
-   * The host checks its signal only after the `agent/pre-step` waterfall returns,
-   * so a plugin that waits here without watching it would make Stop hang for as
-   * long as the wait lasts — unbounded with `timeoutMs: 0`.
-   * @param work - the wait to observe.
-   * @param signal - the turn's abort signal, when the host supplied one.
-   */
+  /** Await a sidecar read only until its first pre-step deadline or host stop. */
+  private async waitUntil(work: Promise<unknown>, signal?: AbortSignal, deadline?: number): Promise<boolean> {
+    if (signal?.aborted || (deadline !== undefined && Date.now() >= deadline)) {
+      void work.catch(() => undefined)
+      return false
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const expiry = deadline === undefined ? new Promise<false>(() => undefined) : new Promise<false>(resolve => {
+      timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now()))
+      timer.unref?.()
+    })
+    let removeAbort: (() => void) | undefined
+    const stop = signal === undefined ? new Promise<false>(() => undefined) : new Promise<false>(resolve => {
+      const abort = (): void => { signal.removeEventListener('abort', abort); resolve(false) }
+      removeAbort = (): void => signal.removeEventListener('abort', abort)
+      signal.addEventListener('abort', abort, { once: true })
+    })
+    try {
+      const completed = await Promise.race([work.then(() => true), expiry, stop])
+      return completed && !signal?.aborted && (deadline === undefined || Date.now() < deadline)
+    } finally {
+      if (timer !== undefined) clearTimeout(timer)
+      removeAbort?.()
+      void work.catch(() => undefined)
+    }
+  }
+
+  /** Observe a pending compression until completion or host stop. */
   private async untilAborted(work: Promise<unknown>, signal?: AbortSignal): Promise<void> {
     if (signal === undefined) {
       await work
@@ -1376,7 +1420,11 @@ export class ReasoningDistillEngine {
     // Captured before any replacement: a later in-place edit must retire this entry.
     const originalHash = hashText(reasoning)
     const attemptKey = this.pendingKey(session.id, target.turn, target.step)
-    const abandonedNow = (): boolean => this.abandoned.has(attemptKey)
+    const abandonedNow = (): boolean => {
+      const bound = this.waitBound.get(attemptKey)
+      return this.abandoned.has(attemptKey)
+        || (bound !== undefined && bound.timeoutMs > 0 && Date.now() >= bound.launchedAt + bound.timeoutMs + 30_000)
+    }
     const maxInput = target.rule.maxInputChars
     // The reasoning is the *subject* of the rewrite, not context: silently sending
     // only its prefix would let the distiller drop decisions it never saw while
@@ -1579,7 +1627,12 @@ export class ReasoningDistillEngine {
     // while the queued write is in flight, and re-checking it here would adopt the
     // rewrite yet refuse to hand it over.
     if (adopted && !stale() && this.config.enabled.get() && backendById(this.config.rewriteBackend.get()) !== undefined) {
-      this.pendingBranch.set(session.id, entry.id)
+      if (abandonedNow()) {
+        // The committed entry remains visible and any real savings remain payable;
+        // only the branch hand-off is skipped after the original turn was released.
+        await this.recordHandoff(session.id, entry.id,
+          { state: 'skipped', error: 'branch hand-off skipped after the wait deadline', at: Date.now() }, generation)
+      } else this.pendingBranch.set(session.id, entry.id)
     }
     this.ctx.logger.info(
       'reasoning-distill: %s %s reasoning %d -> %d tokens, saved %.1f 元 per later request',
