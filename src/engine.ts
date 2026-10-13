@@ -109,10 +109,6 @@ export class ReasoningDistillEngine {
    * backend, then stops the original turn through {@link ReasoningDistillEngine.handoff}.
    */
   private readonly pendingBranch = new Map<string, string>()
-  /** Branch created for a session by the host-side hand-off, awaiting the panel. */
-  private readonly branch = new Map<string, { sessionId: string; entryId: string }>()
-  /** Why the last hand-off fell back to the original conversation. */
-  private readonly branchError = new Map<string, string>()
   /** Cached derived-index maps keyed by session id. */
   /** Session ids whose accessor this engine already wrapped. */
   private readonly wrapped = new WeakSet<object>()
@@ -225,8 +221,6 @@ export class ReasoningDistillEngine {
     this.sessionKind.delete(sessionId)
     this.storageBroken.delete(sessionId)
     this.pendingBranch.delete(sessionId)
-    this.branch.delete(sessionId)
-    this.branchError.delete(sessionId)
     this.blocked.delete(sessionId)
     for (const key of [...this.pending.keys()]) {
       if (key.startsWith(`${sessionId}:`)) this.pending.delete(key)
@@ -468,24 +462,52 @@ export class ReasoningDistillEngine {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request.body),
-        signal: AbortSignal.timeout(15_000),
+        ...branchSignal(this.config.branchTimeoutMs.get()),
       })
       const payload = await response.json().catch(() => null) as { sessionId?: unknown; error?: unknown } | null
       const created = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       if (!response.ok || created === '') {
-        this.branchError.set(session.id, typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`)
+        const reason = typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`
+        await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() })
         this.pendingBranch.delete(session.id)
+        this.ctx.logger.warn('reasoning-distill: branch refused for %s (%s); carrying on in place', session.id, reason)
         return false
       }
-      this.branch.set(session.id, { sessionId: created, entryId })
-      this.branchError.delete(session.id)
+      await this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() })
       this.pendingBranch.delete(session.id)
       this.ctx.logger.info('reasoning-distill: handed %s over to branch %s', session.id, created)
       return true
     } catch (error: unknown) {
-      this.branchError.set(session.id, error instanceof Error ? error.message : String(error))
+      const reason = error instanceof Error ? error.message : String(error)
+      await this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() })
       this.pendingBranch.delete(session.id)
+      this.ctx.logger.warn('reasoning-distill: branch failed for %s (%s); carrying on in place', session.id, reason)
       return false
+    }
+  }
+
+  /**
+   * Record what a branch hand-off did, on the entry that was handed over.
+   *
+   * The choice is deliberate: nothing else about the turn changes on failure, so
+   * the conversation carries on exactly as if no backend had been selected and
+   * the only trace is this durable note in the reasoning-distill page.
+   * @param sessionId - session that owns the entry.
+   * @param entryId - entry the hand-off concerned.
+   * @param outcome - what happened.
+   */
+  private async recordHandoff(
+    sessionId: string,
+    entryId: string,
+    outcome: { state: 'created' | 'failed'; branchId?: string; error?: string; at: number },
+  ): Promise<void> {
+    try {
+      await this.store.update(sessionId, (record) => {
+        const entry = record.entries.find(item => item.id === entryId)
+        if (entry !== undefined) entry.handoff = outcome
+      })
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: could not record the hand-off: %o', error)
     }
   }
 
@@ -718,7 +740,7 @@ export class ReasoningDistillEngine {
    * @param sessionId - session being reported.
    * @returns running compressions and whether a step is currently blocked.
    */
-  snapshot(sessionId: string): { active: ActiveCompression[]; blockingSince: number | null; blockingReason: BlockingReason | null; pendingBranch: string | null; branch: { sessionId: string; entryId: string } | null; branchError: string | null } {
+  snapshot(sessionId: string): { active: ActiveCompression[]; blockingSince: number | null; blockingReason: BlockingReason | null; pendingBranch: string | null } {
     const active: ActiveCompression[] = []
     for (const entry of this.running.values()) {
       if (entry.sessionId !== sessionId) continue
@@ -731,8 +753,6 @@ export class ReasoningDistillEngine {
       blockingSince: blocked?.since ?? null,
       blockingReason: blocked?.reason ?? null,
       pendingBranch: this.pendingBranch.get(sessionId) ?? null,
-      branch: this.branch.get(sessionId) ?? null,
-      branchError: this.branchError.get(sessionId) ?? null,
     }
   }
 
@@ -1249,6 +1269,18 @@ function blockingReason(session: Session): BlockingReason {
  * @param maxDepth - the configured cap.
  * @returns true when distillation may apply.
  */
+/**
+ * The abort signal for a branch hand-off.
+ *
+ * A configured `0` means the wait is unbounded: no signal is passed, so the
+ * request runs until the backend answers.
+ * @param timeoutMs - configured timeout in milliseconds.
+ * @returns fetch options carrying a signal, or nothing when unbounded.
+ */
+function branchSignal(timeoutMs: number): { signal?: AbortSignal } {
+  return timeoutMs > 0 ? { signal: AbortSignal.timeout(timeoutMs) } : {}
+}
+
 /** Index of the message's reasoning block, or -1 when it carries none. */
 function reasoningBlockIndexOf(content: readonly ContentBlock[] | undefined): number {
   if (content === undefined) return -1

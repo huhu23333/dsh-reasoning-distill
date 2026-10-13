@@ -67,6 +67,7 @@ export function normalizeSettings(value: SettingsValue, legacyOneShot?: boolean)
     models,
     peakSource: value.peakSource ?? 'builtin',
     rewriteBackend: value.rewriteBackend ?? '',
+    branchTimeoutMs: value.branchTimeoutMs ?? 0,
     holidays: [...(value.holidays ?? [])],
     prices: structuredClone(value.prices ?? {}),
     prompt: value.prompt ?? '',
@@ -124,6 +125,7 @@ export type SettingsValue = {
   holidays: string[]
   prices: Record<string, Partial<ModelPrices>>
   rewriteBackend: string
+  branchTimeoutMs: number
   prompt: string
   maxInputChars: number
   maxOutputChars: number
@@ -135,7 +137,7 @@ export type Operation = { op: 'set'; path: (string | number)[]; value: unknown }
 
 /** Scalar fields the panel writes as a whole. */
 const SCALAR_FIELDS = [
-  'enabled', 'defaultRule', 'prompt', 'peakSource', 'holidays', 'rewriteBackend',
+  'enabled', 'defaultRule', 'prompt', 'peakSource', 'holidays', 'rewriteBackend', 'branchTimeoutMs',
 ] as const satisfies readonly (keyof SettingsValue)[]
 
 /** Fields keyed by model id, diffed per entry and per field. */

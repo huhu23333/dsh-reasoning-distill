@@ -119,6 +119,8 @@ function Entry({ entry, t, liveStockIds }: {
         <div><span>{t('view.cost')}</span><strong>{money(run.cost)}{estimated ? ` (${t('view.estimated')})` : ''}</strong></div>
         <div><span>{t('view.period')}</span><strong>{t(run.period === 'peak' ? 'view.peak' : 'view.off')}</strong></div>
         <div><span>{t('view.avoided')}</span><strong>{signedMoney(-reducedOfEntry(entry))}</strong></div>
+        {entry.handoff?.state === 'failed' && <div><span>{t('view.branchFailed')}</span><strong className={css.error}>{entry.handoff.error ?? ''} · {t('view.branchKept')}</strong></div>}
+        {entry.handoff?.state === 'created' && <div><span>{t('view.branchCreated')}</span><strong>{entry.handoff.branchId ?? ''}</strong></div>}
         <div><span>{t('view.stock')}</span><strong>{count(stockOfEntry(entry, liveStockIds))} token</strong> · <strong>{signedCount(-entry.savedTokensPerRequest * entry.liveRequests)} {t('view.tokens')} {t('view.lifetime')}</strong></div>
       </div>
       <TextBlock label={t('view.request')} value={run.requestText} />
@@ -178,10 +180,12 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   useEffect(() => {
     const current = cache[sessionId]?.report
     if (current === undefined) return
-    const branch = current.branch
-    if (branch != null && !openedBranch.current.has(branch.sessionId)) {
-      openedBranch.current.add(branch.sessionId)
-      openSession(branch.sessionId)
+    // The hand-off outcome lives on the entry, so the panel reads it there.
+    const created = current.entries.find(item => item.handoff?.state === 'created' && item.handoff.branchId !== undefined)
+    const branchId = created?.handoff?.branchId
+    if (branchId !== undefined && !openedBranch.current.has(branchId)) {
+      openedBranch.current.add(branchId)
+      openSession(branchId)
       return
     }
     const pending = current.pendingBranch
@@ -254,7 +258,7 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
       <p className={css.note}>{t('view.resetNote')}</p>
       <p className={css.note}>{t('view.stockNote')}</p>
       <p className={css.note}>{t('view.signNote')}</p>
-      {report?.branchError != null && <p className={css.note}>{t('view.branchFailed')}: {report.branchError}</p>}
+
       {activity && <section className={css.section}><h3>{t('view.active')}</h3><p className={css.note}>{t('view.activeHint')}</p>
         {report?.blockingSince != null && <p role="status" className={css.blockedBanner}><span className={css.activityDotBlocked} aria-hidden /><strong>{t('activity.blocked')}</strong> · {t(`activity.reason.${report.blockingReason ?? 'other'}` as 'activity.reason.tool')} · {Math.max(0, Math.round((now - report.blockingSince) / 1000))}s</p>}
         {(report?.active ?? []).map(item => <div key={`${item.startedAt}-${item.turn}-${item.step}`} className={css.activeRow}>

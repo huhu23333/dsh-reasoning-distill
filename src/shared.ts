@@ -56,6 +56,8 @@ export interface CompressionEntry {
   /** Surface sequence of the rewritten assistant message. */
   targetSeq: number
   targetMessageId: string
+  /** Branch hand-off outcome for this rewrite, when one was attempted. */
+  handoff?: { state: 'created' | 'failed'; branchId?: string; error?: string; at: number }
   /** Index of the reasoning block the rewrite replaces; -1 when unknown. */
   targetBlockIndex: number
   /** Model whose reasoning was rewritten. */
@@ -115,10 +117,6 @@ export interface SessionReport {
    * backend, or null. The panel applies it and then calls the hand-off route.
    */
   pendingBranch?: string | null
-  /** Branch the host created for the last successful compression, if any. */
-  branch?: { sessionId: string; entryId: string } | null
-  /** Why that hand-off fell back to continuing on the original conversation. */
-  branchError?: string | null
   /** savedTotal − distillCost − cacheBreakCost. */
   net: number
   triggers: number

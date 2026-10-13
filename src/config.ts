@@ -107,6 +107,11 @@ export interface Config {
    * so compression is refused and the master switch is forced off in the panel.
    */
   rewriteBackend: Volatile<string>
+  /**
+   * How long the host waits for a branch-type backend before giving up and
+   * carrying on in the original conversation. `0` waits forever.
+   */
+  branchTimeoutMs: Volatile<number>
   /** Distillation instruction; empty selects the built-in prompt. */
   prompt: Volatile<string>
   /**
@@ -214,6 +219,7 @@ export const Config = z.object({
     peakPricing: z.boolean(),
   })).default(DEFAULT_PRICE_ENTRIES).volatile(),
   rewriteBackend: z.string().default('').volatile(),
+  branchTimeoutMs: z.number().default(0).volatile(),
   prompt: z.string().default('').volatile(),
   maxInputChars: z.number().default(120000).volatile(),
   maxOutputChars: z.number().default(0).volatile(),

@@ -1,6 +1,7 @@
 export const NS = 'reasoningDistill'
 
 export const zh = {
+  'settings.branchTimeout': '分支超时（毫秒）', 'settings.branchTimeoutHint': '宿主等待分支型后端建好分支的时限；超时就按“无事发生”继续原会话。仅分支型后端使用，0 = 永不超时。', 'view.branchCreated': '已创建分支', 'view.branchKept': '已按原会话继续',
   'settings.backend': '助手消息改写后端（单选）', 'settings.backendHint': '只列出已安装的后端；未选的置灰。再次点击已选中的后端可取消选择。没有选择后端时无法把改写写回会话历史，因此「启用思考压缩」会强制关闭并锁定。', 'settings.backendBranch': '另开分支会话', 'settings.backendInPlace': '就地改写模型可见历史', 'settings.backendInstalled': '已安装', 'settings.backendMissing': '未安装', 'settings.masterLocked': '未选择改写后端：总开关已锁定为关闭。', 'view.branchFailed': '创建分支失败',
   'view.avoided': '已避免的开销',
   'view.entryLedger': '增加开销 − 已避免开销', 'view.signNote': '符号约定统一为“一本账”：正数=多花的开销，负数=省下的开销；token 同约定。',
@@ -73,6 +74,7 @@ export const zh = {
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
+  'settings.branchTimeout': 'Branch timeout (ms)', 'settings.branchTimeoutHint': 'How long the host waits for a branch backend before carrying on in the original conversation; only used by branch-type backends. 0 waits forever.', 'view.branchCreated': 'Branch created', 'view.branchKept': 'the original conversation carried on',
   'settings.backend': 'Assistant-rewrite backend (one)', 'settings.backendHint': 'Only installed backends are listed; the rest are greyed out. Clicking the selected one again clears the choice. With no backend nothing can write a rewrite back into the history, so the master switch is forced off and locked.', 'settings.backendBranch': 'opens a branch session', 'settings.backendInPlace': 'rewrites the model-visible history in place', 'settings.backendInstalled': 'installed', 'settings.backendMissing': 'not installed', 'settings.masterLocked': 'No rewrite backend selected: the master switch is locked off.', 'view.branchFailed': 'Branching failed',
   'view.avoided': 'Spending avoided so far',
   'view.entryLedger': 'Increase − already avoided', 'view.signNote': 'Signs read as one ledger: positive means extra spending, negative means spending avoided. Same convention for tokens.',

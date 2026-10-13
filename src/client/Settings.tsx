@@ -323,6 +323,10 @@ export function ReasoningDistillSettings({ form, t }: Props) {
     </section>
     <section className={css.section}>
       <h3>{t('settings.backend')}</h3>
+      <Count label={t('settings.branchTimeout')} value={draft.branchTimeoutMs}
+        disabled={backendById(draft.rewriteBackend)?.kind !== 'branch'}
+        onChange={branchTimeoutMs => update(current => ({ ...current, branchTimeoutMs }))} />
+      <p className={css.note}>{t('settings.branchTimeoutHint')}</p>
       <BackendChooser value={draft.rewriteBackend} t={t} onSelect={id => update(current => ({
         ...current,
         rewriteBackend: id,

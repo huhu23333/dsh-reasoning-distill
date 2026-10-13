@@ -45,8 +45,6 @@ export function registerRoutes(
       blockingSince: number | null
       blockingReason: BlockingReason | null
       pendingBranch: string | null
-      branch: { sessionId: string; entryId: string } | null
-      branchError: string | null
     }
     stock(sessionId: string): { tokens: number; saved: number; ids: string[] } | undefined
     handoff(sessionId: string, cancel?: boolean): boolean

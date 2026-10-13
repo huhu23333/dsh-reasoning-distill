@@ -49,10 +49,6 @@ export function buildReport(
     now?: number
     /** Entry awaiting a backend hand-off, when one is owed. */
     pendingBranch?: string | null
-    /** Branch the host already created for this turn, for the panel to open. */
-    branch?: { sessionId: string; entryId: string } | null
-    /** Why the last hand-off fell back to the original conversation. */
-    branchError?: string | null
   } = { active: [], blockingSince: null, blockingReason: null },
 ): SessionReport {
   const entries: CompressionEntry[] = record.entries
@@ -72,6 +68,7 @@ export function buildReport(
       targetSeq: entry.targetSeq,
       targetMessageId: entry.targetMessageId,
       targetBlockIndex: entry.targetBlockIndex ?? -1,
+      ...entry.handoff === undefined ? {} : { handoff: entry.handoff },
       provider: entry.provider,
       model: entry.model,
       originalChars: entry.originalChars,
@@ -152,8 +149,6 @@ export function buildReport(
       peak: peakInfo(config),
     },
     pendingBranch: live.pendingBranch ?? null,
-    branch: live.branch ?? null,
-    branchError: live.branchError ?? null,
     active: live.active,
     blockingSince: live.blockingSince,
     blockingReason: live.blockingReason,

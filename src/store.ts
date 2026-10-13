@@ -57,6 +57,11 @@ export interface StoredEntry {
    * substitution simply never happened.
    */
   skipped?: true
+  /**
+   * What happened when this rewrite was handed to a branch backend. Absent means
+   * no backend was selected when it was recorded.
+   */
+  handoff?: { state: 'created' | 'failed'; branchId?: string; error?: string; at: number }
   /** A compaction removed this entry's target; its live savings are frozen. */
   inactive?: true
   /**

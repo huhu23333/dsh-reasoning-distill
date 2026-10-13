@@ -160,6 +160,7 @@ function makeConfig(overrides: Record<string, unknown> = {}): never {
     // A selected backend is required for compression; scenarios override it to
     // exercise the no-backend refusal (scenario 36).
     rewriteBackend: { get: () => 'message-edit' },
+    branchTimeoutMs: { get: () => 15_000 },
     holidays: { get: () => [] },
     prompt: { get: () => '' },
     maxInputChars: { get: () => 100000 },
@@ -1852,9 +1853,10 @@ check('the backend is asked to edit exactly that reasoning block',
   JSON.stringify(backendCalls[0]?.body))
 check('the original turn is rejected before any request goes out',
   (decision37 as { kind?: string }).kind === 'reject' && !nextCalled37, JSON.stringify(decision37))
-const snap37 = engine37.snapshot(s37.id)
-check('and the branch is published for the panel to open',
-  snap37.branch?.sessionId === 'session-branch-1' && snap37.pendingBranch === null, JSON.stringify(snap37.branch))
+const entry37 = (await store37.load(s37.id)).entries[0]!
+check('and the branch is recorded on the entry for the panel to open',
+  entry37.handoff?.state === 'created' && entry37.handoff.branchId === 'session-branch-1'
+  && engine37.snapshot(s37.id).pendingBranch === null, JSON.stringify(entry37.handoff))
 
 console.log('scenario 38: a backend that refuses leaves the conversation where it was')
 backendStatus = 500
@@ -1878,10 +1880,63 @@ await settleFor(async () => (await store38.load(s38.id)).entries.length === 1)
 let nextCalled38 = false
 const decision38 = await decide('agent/pre-step', { agent: { session: s38 } }, async () => { nextCalled38 = true; return { kind: 'enter', messages: [] } })
 check('the turn continues on the original conversation', nextCalled38 && (decision38 as { kind?: string }).kind === 'enter', JSON.stringify(decision38))
-check('and the failure is reported instead of silently retrying',
-  engine38.snapshot(s38.id).branchError === 'backend said no', String(engine38.snapshot(s38.id).branchError))
-check('no branch is published', engine38.snapshot(s38.id).branch === null)
+const entry38 = (await store38.load(s38.id)).entries[0]!
+check('nothing else changed: no branch exists at all', entry38.handoff?.state === 'failed')
+check('and the only trace is the record on the entry',
+  entry38.handoff?.error === 'backend said no' && entry38.distilledText !== '', JSON.stringify(entry38.handoff))
 await new Promise<void>(resolve => backend.close(() => { resolve() }))
+
+console.log('scenario 39: the branch timeout is honoured, and 0 never gives up')
+const { createServer: createServer39 } = await import('node:http')
+/** A backend that answers correctly, but only after 200ms. */
+const slowBackend = createServer39((request, response) => {
+  request.on('data', () => undefined)
+  request.on('end', () => {
+    setTimeout(() => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ sessionId: 'session-slow-branch' }))
+    }, 200)
+  })
+})
+await new Promise<void>(resolve => slowBackend.listen(0, '127.0.0.1', resolve))
+const slowPort = (slowBackend.address() as { port: number }).port
+const runHandoff39 = async (sessionId: string, timeoutMs: number): Promise<{ rejected: boolean; handoff: unknown }> => {
+  handlers.clear()
+  const store = new SidecarStore()
+  const cfg = makeConfig({ branchTimeoutMs: { get: () => timeoutMs } })
+  const engine = new ReasoningDistillEngine({ ...ctx, webServer: { port: slowPort } } as never, cfg as never, store)
+  engine.start()
+  const session = new FakeSession(sessionId)
+  sessions.set(session.id, session)
+  await fire('session/created', session)
+  session.append('user/message', { id: `u-${sessionId}`, role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+  const seq = session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: { id: `a-${sessionId}`, role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+    stream: [],
+  }).seq
+  session.append('step/end', { turn: 1, step: 1 })
+  await fire('session/event', session, session.eventAt(seq))
+  await fire('session/event', session, session.eventAt(session.log.length - 1))
+  await settleFor(async () => (await store.load(session.id)).entries.length === 1)
+  let rejected = false
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    const decision = await fn({ agent: { session } }, async () => ({ kind: 'enter', messages: [] })) as { kind?: string }
+    if (decision.kind === 'reject') rejected = true
+  }
+  return { rejected, handoff: (await store.load(session.id)).entries[0]!.handoff }
+}
+const timed39 = await runHandoff39('session-timeout', 40)
+check('a timeout leaves the turn running', !timed39.rejected, JSON.stringify(timed39))
+check('and records a failure rather than a branch',
+  (timed39.handoff as { state?: string; error?: string } | undefined)?.state === 'failed'
+  && /timeout|abort/i.test((timed39.handoff as { error?: string }).error ?? ''), JSON.stringify(timed39.handoff))
+const never39 = await runHandoff39('session-no-timeout', 0)
+check('0 never gives up: the slow backend still lands its branch', never39.rejected, JSON.stringify(never39))
+check('and that shows as a created branch',
+  (never39.handoff as { state?: string; branchId?: string } | undefined)?.state === 'created'
+  && (never39.handoff as { branchId?: string }).branchId === 'session-slow-branch', JSON.stringify(never39.handoff))
+await new Promise<void>(resolve => slowBackend.close(() => { resolve() }))
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
