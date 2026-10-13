@@ -1344,22 +1344,21 @@ export class ReasoningDistillEngine {
       originalHash,
       ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, adoptedId) ? { sessionMissing: true as const } : {},
     }
-    if (abandonedNow()) {
-      // The wait bound expired while this attempt was still finishing. It must not
-      // adopt its rewrite, but the spend is real: record it as an abandoned attempt
-      // so the report shows why nothing was substituted.
-      await this.store.update(session.id, (record) => {
-        if ((this.generation.get(session.id) ?? 0) !== generation) return
-        record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq || (item.failed !== true && item.skipped !== true))
-        // Same id as the adopted entry would have had: the audit settlement and
-        // its auditBroken marker both refer to that id, so a late flush failure
-        // must still find this row and mark it.
-        record.entries.push({ ...entry, failed: true, distill: { ...entry.distill, error: 'abandoned before the wait bound expired' } })
-      })
-      return
-    }
+    // One mutation decides the outcome *at the moment it runs*: the write can sit
+    // behind other work for that session, and by the time it executes the wait
+    // bound may already have expired. Deciding before queueing would let an
+    // abandoned attempt adopt its rewrite after the next request had gone out.
     await this.store.update(session.id, (record) => {
-      if (stale()) return
+      if ((this.generation.get(session.id) ?? 0) !== generation) return
+      if (abandonedNow()) {
+        // The wait bound expired while this attempt was still finishing. It must
+        // not adopt its rewrite, but the spend is real: record it as an abandoned
+        // attempt (same id as the adopted entry, so the audit settlement and its
+        // auditBroken marker still find this row) and say why.
+        record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq || (item.failed !== true && item.skipped !== true))
+        record.entries.push({ ...entry, failed: true, distill: { ...entry.distill, error: 'abandoned before the wait bound expired' } })
+        return
+      }
       record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq)
       record.entries.push(entry)
     })
