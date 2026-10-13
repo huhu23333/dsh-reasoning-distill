@@ -2014,6 +2014,54 @@ await preStep
 check('and the pre-step finishes once the distillation does', preStepSettled
   && (await slowStore40.load(s40b.id)).entries.length === 1)
 
+console.log('scenario 41: accounting follows the request that was actually assembled')
+// The harness has no agent loop, so the request derivation is simulated the way
+// the loop does it: pre-step, then deriveMessages(). That is exactly the sequence
+// the arming exists for, and it is the path production always takes.
+const runArmed = async (sessionId: string, mutate?: (session: FakeSession) => void): Promise<{ liveSaved: number; stock: number }> => {
+  handlers.clear()
+  const store = new SidecarStore()
+  const engine = new ReasoningDistillEngine(ctx as never, cfg10 as never, store)
+  engine.start()
+  const session = new FakeSession(sessionId)
+  sessions.set(session.id, session)
+  await fire('session/created', session)
+  session.append('user/message', { id: `u-${sessionId}`, role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+  const seq = session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: { id: `a-${sessionId}`, role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+    stream: [],
+  }).seq
+  session.append('step/end', { turn: 1, step: 1 })
+  await fire('session/event', session, session.eventAt(seq))
+  await fire('session/event', session, session.eventAt(session.log.length - 1))
+  await settleFor(async () => (await store.load(session.id)).entries.length === 1)
+  // The pre-step is what arms the session and waits for the compression.
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    await fn({ agent: { session } }, async () => ({ kind: 'enter', messages: [] }))
+  }
+  const derived = session.deriveMessages()
+  if (derived.length > 0 && !JSON.stringify(derived).includes('Distilled:')) {
+    throw new Error('the simulated request did not carry the rewrite')
+  }
+  mutate?.(session)
+  const responseSeq = session.append('assistant/message', {
+    turn: 2, step: 1,
+    message: { id: `b-${sessionId}`, role: 'assistant', content: [{ type: 'reasoning', text: 'short' }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+    stream: [],
+  }).seq
+  await fire('session/event', session, session.eventAt(responseSeq))
+  const entry = (await store.load(session.id)).entries[0]!
+  return { liveSaved: entry.liveSaved, stock: engine.stock(session.id).tokens }
+}
+const armed = await runArmed('session-armed-41')
+check('a request that shipped the rewrite is credited', armed.liveSaved > 0, JSON.stringify(armed))
+const mutated = await runArmed('session-armed-41b', session => {
+  // The history moves after the request but before its answer.
+  session.append('user/message', { id: 'late-user', role: 'user', content: [{ type: 'text', text: 'late' }], source: { kind: 'user' } })
+})
+check('a surface that moved after the request credits nothing', mutated.liveSaved === 0, JSON.stringify(mutated))
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1

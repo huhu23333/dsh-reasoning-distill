@@ -853,12 +853,19 @@ export class ReasoningDistillEngine {
     // Bind the credit to the request that carried these rewrites: pick the newest
     // derivation that happened at or before this response's seq.
     const nodes = surface?.nodes ?? session.surface.nodes
-    const signature = surfaceSignature(nodes)
-    const carried = (this.applied.get(sessionId) ?? [])
-      .filter(at => at.afterSeq <= seq && at.signature === signature)
-      .pop()?.ids
+    // The event being answered has already been appended, so its own node is part
+    // of this surface while the request that produced it predates that append.
+    // Comparing the two is only meaningful over the nodes that existed then.
+    const atRequest = [...nodes].filter(node => node < seq)
+    const signature = surfaceSignature(atRequest)
+    const history = this.applied.get(sessionId) ?? []
+    const carried = history.filter(at => at.afterSeq <= seq && at.signature === signature).pop()?.ids
+    // A record that exists but describes another surface (the history moved after
+    // the request) may not credit anything: the request demonstrably predates that
+    // move, so this answer is not evidence that the rewrite shipped. Only a
+    // session with no recorded request at all falls back to the surface itself.
     const counting = record.entries.filter(entry =>
-      (carried === undefined ? this.survives(session, entry, surface) : carried.has(entry.id))
+      (carried === undefined ? (history.length === 0 ? this.survives(session, entry, surface) : false) : carried.has(entry.id))
       && entry.targetSeq < seq
       && entry.appliedAt <= time
       && entry.savedTokensPerRequest > 0)
