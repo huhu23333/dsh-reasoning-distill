@@ -2585,6 +2585,57 @@ check('an in-place settle reports success even though no turn was stopped',
 check('a settle with no pending rewrite reports that nothing was settled',
   engine55.handoff(s55.id, false, undefined, entry55.id, gen55) === false)
 
+console.log('scenario 56: a raced-away generation cannot look like a recorded branch')
+handlers.clear()
+const { createServer: createServer56 } = await import('node:http')
+const slowBranch56 = createServer56((request, response) => {
+  request.on('data', () => undefined)
+  request.on('end', () => {
+    setTimeout(() => {
+      response.writeHead(200, { 'content-type': 'application/json' })
+      response.end(JSON.stringify({ sessionId: 'branch-56' }))
+    }, 120)
+  })
+})
+await new Promise<void>(resolve => slowBranch56.listen(0, '127.0.0.1', resolve))
+const port56 = (slowBranch56.address() as { port: number }).port
+const store56 = new SidecarStore()
+const engine56 = new ReasoningDistillEngine({ ...ctx, webServer: { port: port56 } } as never, cfg10 as never, store56)
+engine56.start()
+const old56 = new FakeSession('session-branch-56')
+sessions.set(old56.id, old56)
+await fire('session/created', old56)
+await runStep40(engine56, old56, '56')
+await settleFor(async () => (await store56.load(old56.id)).entries.length === 1)
+// The branch fetch is in flight when the id is released and reused.
+let nextCalled56 = false
+const pre56 = (async () => {
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    await fn({ agent: { session: old56 } }, async () => { nextCalled56 = true; return { kind: 'enter', messages: [] } })
+  }
+})()
+await new Promise(resolve => setTimeout(resolve, 40))
+await fire('session/disposed', old56)
+const new56 = new FakeSession('session-branch-56')
+sessions.set(new56.id, new56)
+await fire('session/created', new56)
+await pre56
+check('a branch that raced into another generation does not end the old turn', nextCalled56)
+check('and no hand-off was recorded for the reused id',
+  (await store56.load(new56.id)).entries.every(entry => entry.handoff === undefined))
+await new Promise<void>(resolve => slowBranch56.close(() => { resolve() }))
+
+console.log('scenario 57: settling without a pending rewrite reports that nothing was settled')
+handlers.clear()
+const store57 = new SidecarStore()
+const engine57 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store57)
+engine57.start()
+const s57 = new FakeSession('session-empty-settle-57')
+sessions.set(s57.id, s57)
+await fire('session/created', s57)
+check('an in-place settle with nothing pending reports no settlement',
+  engine57.handoff(s57.id, false) === false && engine57.handoff(s57.id, true) === false)
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1

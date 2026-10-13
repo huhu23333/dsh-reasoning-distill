@@ -656,15 +656,20 @@ export class ReasoningDistillEngine {
     outcome: { state: 'created' | 'failed'; branchId?: string; error?: string; at: number },
     generation?: number,
   ): Promise<boolean> {
+    let written = false
     try {
       await this.store.update(sessionId, (record) => {
         // Checked inside the mutator: the write is queued, so the generation can
-        // change between the call and the moment this runs.
+        // change between the call and the moment this runs. A skipped or
+        // not-found mutation is *not* a recorded hand-off, so the caller must not
+        // treat it as one.
         if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return
         const entry = record.entries.find(item => item.id === entryId)
-        if (entry !== undefined) entry.handoff = outcome
+        if (entry === undefined) return
+        entry.handoff = outcome
+        written = true
       })
-      return true
+      return written
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not record the hand-off: %o', error)
       return false
@@ -696,8 +701,9 @@ export class ReasoningDistillEngine {
     // The returned value means "this settle took effect" (the pending rewrite of
     // that entry is gone). Ending a turn is a side effect, not the outcome: an
     // in-place settle never stops the turn yet has still settled successfully.
-    if (!cancel) return true
+    // Nothing pending means nothing settled, whatever the caller asked for.
     if (pending === undefined) return false
+    if (!cancel) return true
     const agents = (this.ctx as unknown as { agents?: { get(id: string): { cancel(cause: { kind: string }): void } | undefined } }).agents
     // Only a hand-off this plugin is completing may stop a turn: without a pending
     // rewrite of ours there is nothing to hand over, and cancelling would let any
