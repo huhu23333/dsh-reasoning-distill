@@ -783,7 +783,7 @@ export class ReasoningDistillEngine {
         this.recordHandoff(session.id, note.entryId, note.outcome),
         signal,
       )
-      if (written === true) this.owedHandoffNotes.delete(key)
+      if (written === true && this.owedHandoffNotes.get(key) === note) this.owedHandoffNotes.delete(key)
     }
   }
 
@@ -813,6 +813,9 @@ export class ReasoningDistillEngine {
         if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return
         const entry = record.entries.find(item => item.id === entryId)
         if (entry === undefined) return
+        // Defensive against future queue changes: an older outcome cannot replace
+        // a newer durable report. Today store.update already serializes by enqueue order.
+        if (entry.handoff !== undefined && outcome.at <= entry.handoff.at) return
         entry.handoff = outcome
         written = true
       })

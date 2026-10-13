@@ -3065,6 +3065,63 @@ check('the late failed note is retried without another backend request',
   continued62b === 2 && attempted62b >= 3 && (await store62b.load(s62b.id)).entries[0]?.handoff?.state === 'failed',
   JSON.stringify({ attempted62b, handoff: (await store62b.load(s62b.id)).entries[0]?.handoff }))
 
+console.log('scenario 62c: completing an old note flush must retain a newer failed note for the same entry')
+handlers.clear()
+const store62c = new SidecarStore()
+const update62c = store62c.update.bind(store62c)
+const s62c = new FakeSession('session-note-race-62c')
+let releaseOld62c: (() => void) | undefined
+let oldStarted62c: (() => void) | undefined
+const oldStartedPromise62c = new Promise<void>(resolve => { oldStarted62c = resolve })
+const oldGate62c = new Promise<void>(resolve => { releaseOld62c = resolve })
+let noteWrites62c = 0
+store62c.update = async (id, mutate) => {
+  if (id === s62c.id) {
+    noteWrites62c++
+    if (noteWrites62c === 2) {
+      // The old queued write has landed; its completion callback is held while
+      // the newer panel failure enters the queue and itself fails on disk.
+      const result = await update62c(id, mutate)
+      oldStarted62c?.()
+      await oldGate62c
+      return result
+    }
+    if (noteWrites62c === 3) throw new Error('disk full for newer outcome')
+  }
+  return update62c(id, mutate)
+}
+const engine62c = new ReasoningDistillEngine(ctx as never, cfg10 as never, store62c)
+engine62c.start()
+sessions.set(s62c.id, s62c)
+await fire('session/created', s62c)
+await runStep40(engine62c, s62c, '62c')
+await settleFor(async () => (await store62c.load(s62c.id)).entries.length === 1)
+const entry62c = (await store62c.load(s62c.id)).entries[0]!
+const internals62c = engine62c as unknown as {
+  owedHandoffNotes: Map<string, { entryId: string; outcome: { state: string; at: number; branchId?: string; error?: string } }>
+  pendingBranch: Map<string, string>
+}
+const key62c = `${s62c.id}:${entry62c.id}`
+internals62c.owedHandoffNotes.set(key62c, { entryId: entry62c.id, outcome: { state: 'created', branchId: 'old-branch-62c', at: Date.now() - 1_000 } })
+internals62c.pendingBranch.delete(s62c.id) // Keep the first pre-step record-only; the panel will settle below.
+const pre62c = fire('agent/pre-step', { agent: { session: s62c } }, async () => ({ kind: 'enter' }))
+await oldStartedPromise62c
+internals62c.pendingBranch.set(s62c.id, entry62c.id)
+const failed62c = await engine62c.handoff(s62c.id, false, 'new backend failure', entry62c.id, engine62c.snapshot(s62c.id).generation)
+check('the new hand-off failure is owed while the old flush completion is held',
+  failed62c.recorded === false && internals62c.owedHandoffNotes.get(key62c)?.outcome.state === 'failed')
+releaseOld62c?.()
+await pre62c
+await new Promise<void>(resolve => setTimeout(resolve, 0)) // Let the fire-and-forget flush completion run.
+check('a successful old flush leaves the newer failed note owed', internals62c.owedHandoffNotes.get(key62c)?.outcome.state === 'failed')
+await fire('agent/pre-step', { agent: { session: s62c } }, async () => ({ kind: 'enter' }))
+await settleFor(async () => (await store62c.load(s62c.id)).entries[0]?.handoff?.state === 'failed')
+const recovered62c = (await store62c.load(s62c.id)).entries[0]?.handoff
+check('the next pre-step durably reports the newer failure, not the old branch, without resending the backend',
+  recovered62c?.state === 'failed' && recovered62c.error === 'new backend failure'
+  && internals62c.owedHandoffNotes.has(key62c) === false && noteWrites62c === 4,
+  JSON.stringify({ recovered62c, noteWrites62c }))
+
 console.log('scenario 63: completed stalled read permits the next pre-step to settle and hand off')
 handlers.clear()
 const realStore63 = new SidecarStore()
