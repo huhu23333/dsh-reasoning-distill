@@ -111,6 +111,8 @@ const ctx = {
     },
   },
   llm: fakeLlm,
+  // Mirror Cordis's optional service lookup without requiring an injection.
+  get(name: string): unknown { return name === 'webServer' ? Reflect.get(this, name) : undefined },
   on: (name: string, fn: Function) => {
     const list = handlers.get(name) ?? []
     list.push(fn)
@@ -1922,6 +1924,73 @@ check('nothing else changed: no branch exists at all', entry38.handoff?.state ==
 check('and the only trace is the record on the entry',
   entry38.handoff?.error === 'backend said no' && entry38.distilledText !== '', JSON.stringify(entry38.handoff))
 await new Promise<void>(resolve => backend.close(() => { resolve() }))
+
+console.log('scenario 38b: unavailable web service cannot trap a branch hand-off')
+for (const mode of ['throwing getter', 'absent service'] as const) {
+  handlers.clear()
+  const ctx38b = mode === 'throwing getter'
+    ? Object.defineProperty({ ...ctx }, 'webServer', { get: () => { throw new Error('cannot get property "webServer" without inject') } })
+    : { ...ctx }
+  const store38b = new SidecarStore()
+  const engine38b = new ReasoningDistillEngine(ctx38b as never, cfg10 as never, store38b)
+  engine38b.start()
+  const session = new FakeSession(`session-no-web-${mode.replace(' ', '-')}`)
+  sessions.set(session.id, session)
+  await fire('session/created', session)
+  session.append('user/message', { id: 'u38b', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+  const seq = session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: { id: 'a38b', role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+    stream: [],
+  }).seq
+  session.append('step/end', { turn: 1, step: 1 })
+  await fire('session/event', session, session.eventAt(seq))
+  await fire('session/event', session, session.eventAt(session.log.length - 1))
+  await settleFor(async () => (await store38b.load(session.id)).entries.length === 1)
+  let continued = 0
+  const next = async () => { continued++; return { kind: 'enter', messages: [] } }
+  let first: unknown
+  let firstError: unknown
+  try { first = await decide('agent/pre-step', { agent: { session } }, next) } catch (error: unknown) { firstError = error }
+  const entry = (await store38b.load(session.id)).entries[0]!
+  check(`${mode}: pre-step does not throw or reject and continues original turn`,
+    firstError === undefined && (first as { kind?: string } | undefined)?.kind === 'enter' && continued === 1,
+    String(firstError ?? JSON.stringify(first)))
+  check(`${mode}: failed hand-off is visible on the entry and marker clears`,
+    entry.handoff?.state === 'failed' && /no reachable web server port/.test(entry.handoff.error ?? '')
+    && engine38b.snapshot(session.id).pendingBranch === null, JSON.stringify(entry.handoff))
+  let secondError: unknown
+  let second: unknown
+  try { second = await decide('agent/pre-step', { agent: { session } }, next) } catch (error: unknown) { secondError = error }
+  check(`${mode}: next pre-step continues without repeating failed hand-off`,
+    secondError === undefined && (second as { kind?: string } | undefined)?.kind === 'enter'
+    && continued === 2 && (await store38b.load(session.id)).entries[0]!.handoff?.at === entry.handoff?.at,
+    String(secondError ?? JSON.stringify(second)))
+}
+
+console.log('scenario 38c: unexpected plugin handler errors stay inside the plugin')
+handlers.clear()
+const engine38c = new ReasoningDistillEngine(ctx as never, cfg10 as never, new SidecarStore())
+engine38c.start()
+const broken38c = engine38c as unknown as { settle: () => Promise<boolean>; attach: () => void; forgetSession: () => void }
+broken38c.settle = async () => { throw new Error('unexpected plugin settle failure') }
+broken38c.attach = () => { throw new Error('unexpected plugin attachment failure') }
+broken38c.forgetSession = () => { throw new Error('unexpected plugin disposal failure') }
+const s38c = new FakeSession('session-handler-guard')
+let guardError38c: unknown
+let guardNext38c = 0
+let guardDecision38c: unknown
+try {
+  await fire('session/created', s38c)
+  await fire('session/disposed', s38c)
+  guardDecision38c = await decide('agent/pre-step', { agent: { session: s38c } }, async () => { guardNext38c++; return { kind: 'enter' } })
+} catch (error: unknown) { guardError38c = error }
+check('unexpected listener errors are logged and do not propagate',
+  guardError38c === undefined && info.some(line => line.includes('session attachment failed'))
+  && info.some(line => line.includes('session disposal failed')), String(guardError38c))
+check('unexpected pre-step error logs and calls next exactly once without rejecting',
+  guardError38c === undefined && guardNext38c === 1 && (guardDecision38c as { kind?: string } | undefined)?.kind === 'enter'
+  && info.some(line => line.includes('pre-step failed; continuing original turn')), String(guardError38c ?? JSON.stringify(guardDecision38c)))
 
 console.log('scenario 39: the branch timeout is honoured, and 0 never gives up')
 const { createServer: createServer39 } = await import('node:http')

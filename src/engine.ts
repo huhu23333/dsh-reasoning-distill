@@ -173,7 +173,11 @@ export class ReasoningDistillEngine {
   /** Attach every observer, hook, and existing-session wrap. */
   start(): void {
     for (const session of this.ctx.sessions.list()) this.attach(session)
-    this.ctx.on('session/created', (session: Session) => { this.attach(session) })
+    this.ctx.on('session/created', (session: Session) => {
+      try { this.attach(session) } catch (error: unknown) {
+        this.ctx.logger.warn('reasoning-distill: session attachment failed: %o', error)
+      }
+    })
     this.ctx.on('session/event', (session: Session, event: { type: string; seq: number; time: number; data: unknown }) => {
       try {
         this.observe(session, event)
@@ -187,41 +191,53 @@ export class ReasoningDistillEngine {
     // A disposed compression session must be forgotten: otherwise the set grows
     // for the process lifetime, and a later user session that happens to reuse
     // the id would be treated as plugin-owned and never observed.
-    this.ctx.on('session/disposed', (session: Session) => { this.forgetSession(session) })
+    this.ctx.on('session/disposed', (session: Session) => {
+      try { this.forgetSession(session) } catch (error: unknown) {
+        this.ctx.logger.warn('reasoning-distill: session disposal failed: %o', error)
+      }
+    })
     this.ctx.on('agent/pre-step', async (payload, next) => {
-      // `attach` preloads the sidecar fire-and-forget, so on a resumed session
-      // the first request could otherwise be assembled from raw reasoning while
-      // the read is still in flight. Single-flight makes this join that read.
-      // The host passes the turn's signal, but its event declaration does not
-      // always carry it, so read it defensively rather than trusting the type.
-      const session = payload.agent.session
-      // A queued pre-step from a session object that a successor has replaced must
-      // not act for the new one. Only a *different* known object counts: an id the
-      // engine never attached (resumed before this plugin loaded) is left alone.
-      if (this.replaced(session)) return next()
-      const signal = (payload as { signal?: AbortSignal }).signal
-      // A stalled sidecar read must not outlive a stop either: the host only looks
-      // at its signal once this handler returns.
-      await this.untilAborted(this.ensureLoaded(session), signal)
-      // The read is awaited: the id can be replaced underneath it, and then this
-      // obsolete pre-step must not settle, hand off or arm anything.
-      if (signal?.aborted || this.replaced(session)) return next()
-      // A stop must end the wait, not queue behind it: the host only looks at its
-      // signal once this handler returns.
-      void this.flushOwedNotes(session, signal)
-      if (!await this.settle(session, signal)) return next()
-      // The wait is even longer than the read: check again before acting for it.
-      if (this.replaced(session)) return next()
-      // A successful compression with a branch backend ends this turn *before* any
-      // request goes out: the conversation continues on the branch instead.
-      if (!signal?.aborted && await this.handOffToBranch(session, signal)) return { kind: 'reject' }
-      // The hand-off can wait for a backend: the id can be replaced underneath it
-      // too, and then this obsolete pre-step must not arm the successor.
-      if (this.replaced(session)) return next()
-      // The loop assembles the request right after this returns; arming the
-      // session here is what lets the wrapper tell that derivation apart from a
-      // viewer's.
-      this.expectRequest.add(session.id)
+      try {
+        const continueOriginal = await (async (): Promise<boolean> => {
+          // `attach` preloads the sidecar fire-and-forget, so on a resumed session
+          // the first request could otherwise be assembled from raw reasoning while
+          // the read is still in flight. Single-flight makes this join that read.
+          // The host passes the turn's signal, but its event declaration does not
+          // always carry it, so read it defensively rather than trusting the type.
+          const session = payload.agent.session
+          // A queued pre-step from a session object that a successor has replaced must
+          // not act for the new one. Only a *different* known object counts: an id the
+          // engine never attached (resumed before this plugin loaded) is left alone.
+          if (this.replaced(session)) return true
+          const signal = (payload as { signal?: AbortSignal }).signal
+          // A stalled sidecar read must not outlive a stop either: the host only looks
+          // at its signal once this handler returns.
+          await this.untilAborted(this.ensureLoaded(session), signal)
+          // The read is awaited: the id can be replaced underneath it, and then this
+          // obsolete pre-step must not settle, hand off or arm anything.
+          if (signal?.aborted || this.replaced(session)) return true
+          // A stop must end the wait, not queue behind it: the host only looks at its
+          // signal once this handler returns.
+          void this.flushOwedNotes(session, signal)
+          if (!await this.settle(session, signal)) return true
+          // The wait is even longer than the read: check again before acting for it.
+          if (this.replaced(session)) return true
+          // A successful compression with a branch backend ends this turn *before* any
+          // request goes out: the conversation continues on the branch instead.
+          if (!signal?.aborted && await this.handOffToBranch(session, signal)) return false
+          // The hand-off can wait for a backend: the id can be replaced underneath it
+          // too, and then this obsolete pre-step must not arm the successor.
+          if (this.replaced(session)) return true
+          // The loop assembles the request right after this returns; arming the
+          // session here is what lets the wrapper tell that derivation apart from a
+          // viewer's.
+          this.expectRequest.add(session.id)
+          return true
+        })()
+        if (!continueOriginal) return { kind: 'reject' }
+      } catch (error: unknown) {
+        this.ctx.logger.warn('reasoning-distill: pre-step failed; continuing original turn: %o', error)
+      }
       return next()
     })
   }
@@ -593,7 +609,13 @@ export class ReasoningDistillEngine {
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       return false
     }
-    const port = (this.ctx as unknown as { webServer?: { port?: number } }).webServer?.port
+    let port: number | undefined
+    try {
+      port = (this.ctx.get('webServer') as { port?: number } | undefined)?.port
+    } catch (error: unknown) {
+      // Optional services can be missing or guarded by a throwing host getter.
+      // Both cases must take the same no-port path below.
+    }
     if (typeof port !== 'number') {
       // The panel can drive an in-place backend itself, but a *branch* backend must
       // be driven from here: the panel's in-place path would create a branch and
