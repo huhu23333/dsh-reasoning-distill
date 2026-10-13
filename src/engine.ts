@@ -767,12 +767,20 @@ export class ReasoningDistillEngine {
    * @returns whether a running agent was found and asked to stop.
    */
   async handoff(sessionId: string, cancel = true, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }> {
+    if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return { ok: false, recorded: false }
     // The panel tells us which attempt it is settling: a later compression can
     // install its own pending rewrite while an earlier request is still open, and
-    // that successor must not be cleared or blamed for this attempt's failure.
-    if (entryId !== undefined && this.pendingBranch.get(sessionId) !== entryId) return { ok: false, recorded: false }
-    if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return { ok: false, recorded: false }
+    // that successor must not be cleared or blamed. Not ours means we neither
+    // clear it nor cancel a turn — but a *record-only* retry for our own entry is
+    // still honoured, or a note that failed to be written once could never be
+    // written at all.
     const pending = this.pendingBranch.get(sessionId)
+    const mine = entryId === undefined || pending === entryId
+    if (!mine) {
+      if (error === undefined || entryId === undefined) return { ok: false, recorded: false }
+      const retried = await this.recordHandoff(sessionId, entryId, { state: 'failed', error, at: Date.now() }, generation)
+      return { ok: false, recorded: retried }
+    }
     this.pendingBranch.delete(sessionId)
     // The failure note is part of the contract, not a nicety: say whether it landed
     // so the panel can ask again for the record (never for the backend request). A
