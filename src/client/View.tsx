@@ -193,6 +193,9 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   // The moment this view started showing a session: a hand-off that lands after
   // that belongs to the user's current visit, however long the first report took.
   const viewOpenedAt = useRef<{ sessionId: string; at: number }>({ sessionId: '', at: 0 })
+  // The session this view is showing right now: an async backend continuation must
+  // not drag the user to another session's branch after they navigated away.
+  const showingSession = useRef(sessionId)
 
   /**
    * Settle one hand-off and say how it went.
@@ -227,6 +230,7 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   // opened look like history.
   useEffect(() => {
     viewOpenedAt.current = { sessionId, at: Date.now() }
+    showingSession.current = sessionId
   }, [sessionId])
   useEffect(() => {
     const current = cache[sessionId]?.report
@@ -303,9 +307,11 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
         appliedPending.current.add(attemptKey)
         if (!openedBranch.current.has(createdBranch)) {
           openedBranch.current.add(createdBranch)
-          // Clear our pending marker (the branch exists either way) and go there.
+          // Clear our pending marker (the branch exists either way).
           void settleHandoff(current, pending)
-          openSession(createdBranch)
+          // Only follow it while this view is still showing that session: the user
+          // may have navigated elsewhere while the request was in flight.
+          if (showingSession.current === current.sessionId) openSession(createdBranch)
         }
         return
       }
