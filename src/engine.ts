@@ -412,7 +412,10 @@ export class ReasoningDistillEngine {
         // in-flight request cannot rewrite its accounting. The marker is *not*
         // consumed: another pre-step hook may derive the same messages for
         // inspection first, and the request's own derivation must still record.
-        if (engine.expectRequest.has(this.id)) {
+        // The object must still be the one attached for that id: a replaced session
+        // keeps its wrapper, and its stale surface must not be recorded as the
+        // successor's request.
+        if (engine.expectRequest.has(this.id) && !engine.replaced(this)) {
           const nodes = this.surface.nodes
           const history = engine.applied.get(this.id) ?? []
           history.push({
@@ -1215,6 +1218,14 @@ export class ReasoningDistillEngine {
     const prompt = this.config.prompt.get() || DEFAULT_PROMPT
     const startedAt = Date.now()
     const opened = await this.createCompressionSession(session, prompt, userText)
+    // Attaching the audit writer is awaited: if that (or anything before it) took
+    // longer than the wait bound, the request has already gone out with raw
+    // reasoning and this result can never be adopted. Paying for it anyway would
+    // buy nothing.
+    if (abandonedNow()) {
+      this.ctx.logger.warn('reasoning-distill: not starting a distillation for %s: the wait bound already expired', target.model)
+      return
+    }
     // The three shapes an attempt can be recorded in; the audit-link marker needs
     // the same ids, and it can arrive before the entry exists.
     const failedId = `${target.seq}-${startedAt}-failed`
