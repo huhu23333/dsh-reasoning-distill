@@ -113,6 +113,8 @@ export class ReasoningDistillEngine {
   private readonly expectRequest = new Set<string>()
   /** Per-compression wait bound: its rule's distillation timeout, 0 = unbounded. */
   private readonly waitBound = new Map<string, { timeoutMs: number; launchedAt: number }>()
+  /** Entries already charged the miss price, keyed `sessionId:entryId`. */
+  private readonly missCharged = new Set<string>()
   /** Attempts whose wait bound expired: their adopted result must not land late. */
   private readonly abandoned = new Set<string>()
   /** Timers that would mark an attempt abandoned; cleared once it settles. */
@@ -308,6 +310,9 @@ export class ReasoningDistillEngine {
     this.blocked.delete(sessionId)
     this.applied.delete(sessionId)
     this.rawDerive.delete(sessionId)
+    for (const key of [...this.missCharged]) {
+      if (key.startsWith(prefix)) this.missCharged.delete(key)
+    }
     for (const key of [...this.abandoned]) {
       if (key.startsWith(prefix)) this.abandoned.delete(key)
     }
@@ -790,6 +795,9 @@ export class ReasoningDistillEngine {
     const target = pending ?? entryId
     if (error !== undefined && target !== undefined) {
       recorded = await this.recordHandoff(sessionId, target, { state: 'failed', error, at: Date.now() }, generation)
+      // The panel's own retry dies with its tab: keep the note host-side too, so
+      // closing the panel cannot make a failed backend operation invisible.
+      if (!recorded) this.oweNote(sessionId, target, error)
     }
     // `ok` means "this settle took effect": with nothing pending there was nothing
     // of ours to settle. Ending a turn is a side effect, not the outcome — an
@@ -1239,9 +1247,15 @@ export class ReasoningDistillEngine {
         if (!counted.has(entry.id)) continue
         // The first replay carries the rewrite as brand-new input, and so does the
         // first replay after a compaction changed the prefix: both come out of the
-        // miss bucket. Every other request has that tail cached already.
-        const first = entry.liveRequests === 0 || entry.repriceMiss === true
-        entry.liveSaved += entry.savedTokensPerRequest * (first ? miss : hit)
+        // miss bucket. Every other request has that tail cached already. A request
+        // that carried the rewrite but was aborted *without* an answer also warmed
+        // that cache, so the miss price may only be charged once per entry until a
+        // compaction makes the prefix new again.
+        const missKey = `${sessionId}:${entry.id}`
+        const first = entry.liveRequests === 0 && !this.missCharged.has(missKey)
+        const missPriced = entry.repriceMiss === true || first
+        if (missPriced) this.missCharged.add(missKey)
+        entry.liveSaved += entry.savedTokensPerRequest * (missPriced ? miss : hit)
         entry.liveRequests += 1
         if (entry.repriceMiss === true) delete entry.repriceMiss
       }
