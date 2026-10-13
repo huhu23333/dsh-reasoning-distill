@@ -238,44 +238,39 @@ export class SidecarStore {
   /**
    * Mutate and persist one session's record behind its own write queue.
    * @param sessionId - owning session id.
-   * @param mutate - synchronous mutation of the cached record.
+   * @param mutate - synchronous mutation of a private record copy.
    */
   update(sessionId: string, mutate: (record: SessionRecord) => void): Promise<void> {
     const run = async (): Promise<void> => {
-      const record = await this.load(sessionId)
-      // Snapshot first: a failed write must not leave the cache ahead of what is
-      // actually on disk, or a later unrelated update would persist it.
-      const before = structuredClone(record)
+      // Each queued write starts from the last committed version. Mutators cannot
+      // expose their candidate through load/peek before the rename succeeds.
+      const record = structuredClone(await this.load(sessionId))
       mutate(record)
-      try {
-        const dir = rootDir()
-        // Private by construction: these files hold original reasoning, distiller
-        // prompts/responses and tool output, so neither the directory nor the
-        // record may be readable by other users on the host.
-        await mkdir(dir, { recursive: true, mode: 0o700 })
-        // `mkdir` does not tighten a directory that already exists, and this one
-        // names sessions by id: an installation that created it 0755 would expose
-        // the file names to other local users even though each file is 0600.
-        const info = await stat(dir).catch(() => undefined)
-        if (info === undefined || !info.isDirectory()) {
-          throw new Error(`reasoning-distill: ${dir} is not a directory`)
-        }
-        await chmod(dir, 0o700).catch(() => undefined)
-        const tightened = await stat(dir).catch(() => undefined)
-        if (tightened === undefined || (tightened.mode & 0o077) !== 0) {
-          throw new Error(`reasoning-distill: ${dir} is not private (mode ${(tightened?.mode ?? 0).toString(8)}); refusing to store reasoning in it`)
-        }
-        const target = fileFor(sessionId)
-        // Unique per write: two stores (a reload, a second instance in tests) can
-        // otherwise pick the same name in the same millisecond and one rename then
-        // loses its source file.
-        const tmp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
-        await writeFile(tmp, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 })
-        await rename(tmp, target)
-      } catch (error: unknown) {
-        Object.assign(record, before)
-        throw error
+      const dir = rootDir()
+      // Private by construction: these files hold original reasoning, distiller
+      // prompts/responses and tool output, so neither the directory nor the
+      // record may be readable by other users on the host.
+      await mkdir(dir, { recursive: true, mode: 0o700 })
+      // `mkdir` does not tighten a directory that already exists, and this one
+      // names sessions by id: an installation that created it 0755 would expose
+      // the file names to other local users even though each file is 0600.
+      const info = await stat(dir).catch(() => undefined)
+      if (info === undefined || !info.isDirectory()) {
+        throw new Error(`reasoning-distill: ${dir} is not a directory`)
       }
+      await chmod(dir, 0o700).catch(() => undefined)
+      const tightened = await stat(dir).catch(() => undefined)
+      if (tightened === undefined || (tightened.mode & 0o077) !== 0) {
+        throw new Error(`reasoning-distill: ${dir} is not private (mode ${(tightened?.mode ?? 0).toString(8)}); refusing to store reasoning in it`)
+      }
+      const target = fileFor(sessionId)
+      // Unique per write: two stores (a reload, a second instance in tests) can
+      // otherwise pick the same name in the same millisecond and one rename then
+      // loses its source file.
+      const tmp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
+      await writeFile(tmp, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 })
+      await rename(tmp, target)
+      this.cache.set(sessionId, record)
     }
     const previous = this.queues.get(sessionId) ?? Promise.resolve()
     const next = previous.then(run, run)

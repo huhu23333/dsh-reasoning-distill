@@ -241,6 +241,7 @@ main.append('assistant/message', {
   stream: [],
 })
 await fire('session/event', main, main.eventAt(main.log.length - 1))
+await settleFor(async () => (await store.load(main.id)).entries[0]?.liveRequests === 1)
 let after = await store.load(main.id)
 const expected = saved * 0.00000004 * 2 // 2 later requests? one answered request so far
 check('live saving accumulated', after.entries[0]!.liveSaved > 0, String(after.entries[0]!.liveSaved))
@@ -783,10 +784,29 @@ writeFileSync(join(rollbackHome, 'reasoning-distill'), 'not a directory')
 let writeFailed = false
 await store12b.update('session-rollback', record => { record.entries.push({ id: 'ghost' } as never) }).catch(() => { writeFailed = true })
 const cached12b = store12b.peek('session-rollback')
-check('a failed write is rolled back in memory',
+check('a failed write never publishes the candidate in memory',
   writeFailed && cached12b !== undefined && cached12b.entries.length === 1 && cached12b.entries[0]!.id === 'durable')
 if (previousHome === undefined) delete process.env['DSH_HOME']
 else process.env['DSH_HOME'] = previousHome
+
+console.log('scenario 12b: only renamed sidecar versions become visible')
+const store12c = new SidecarStore()
+const id12c = 'session-commit-visibility'
+await store12c.update(id12c, record => { record.epoch = 1 })
+const committed12c = await store12c.load(id12c)
+let mutated12c: (() => void) | undefined
+const reached12c = new Promise<void>(resolve => { mutated12c = resolve })
+const stage12c = store12c.update(id12c, record => { record.epoch = 2; mutated12c?.() })
+await reached12c
+check('an unfinished sidecar write is invisible through peek and load',
+  committed12c.epoch === 1 && store12c.peek(id12c)?.epoch === 1 && (await store12c.load(id12c)).epoch === 1)
+const queuedWhilePending12c = store12c.update(id12c, record => { record.epoch += 1 })
+await stage12c
+await queuedWhilePending12c
+check('the renamed sidecar publishes the new version',
+  store12c.peek(id12c)?.epoch === 3 && JSON.parse(readFileSync(sidecarPath(id12c), 'utf8')).epoch === 3)
+check('a queued mutation starts from the previous committed version',
+  committed12c.epoch === 1 && (await store12c.load(id12c)).epoch === 3)
 
 console.log('scenario 13: a disposed compression session is forgotten')
 handlers.clear()
@@ -2131,6 +2151,7 @@ const holder = s40.eventAt(seq40) as { data: { message: { id: string } } }
 holder.data.message.id = 'projected-replacement'
 s40.append('compaction/end', { compactionId: 'c-40', turn: 1 })
 await fire('session/event', s40, s40.eventAt(s40.log.length - 1))
+await settleFor(async () => (await store40.load(s40.id)).entries.some(item => item.id === entry40.id && item.inactive === true))
 const after40 = (await store40.load(s40.id)).entries.find(item => item.id === entry40.id)!
 check('a same-seq projection freezes the entry instead of keeping it active',
   after40.inactive === true && after40.liveSaved === 0 && after40.liveRequests === 0,
@@ -2208,6 +2229,7 @@ const runArmed = async (sessionId: string, mutate?: (session: FakeSession) => vo
     stream: [],
   }).seq
   await fire('session/event', session, session.eventAt(responseSeq))
+  await settleFor(async () => (await store.load(session.id)).entries[0]?.liveRequests === 1)
   const entry = (await store.load(session.id)).entries[0]!
   return { liveSaved: entry.liveSaved, stock: engine.stock(session.id).tokens }
 }
@@ -2851,13 +2873,44 @@ check('sent rewritten reasoning stays credited after an unrelated derivation', J
   && (await store59.load(s59.id)).entries[0]!.liveRequests === 1,
   JSON.stringify({ sent: sent59, entry: (await store59.load(s59.id)).entries[0] }))
 
+console.log('scenario 59b: sparse rules inherit the finite built-in read backstop')
+handlers.clear()
+const cfg59b = makeConfig({ defaultRule: { get: () => ({}) }, models: { get: () => ({}) } })
+const store59b = new SidecarStore()
+let releaseRead59b: (() => void) | undefined
+const stalled59b = new Promise<void>(resolve => { releaseRead59b = resolve })
+const load59b = store59b.load.bind(store59b)
+store59b.load = async id => { await stalled59b; return load59b(id) }
+const engine59b = new ReasoningDistillEngine(ctx as never, cfg59b as never, store59b)
+engine59b.start()
+const s59b = new FakeSession('session-sparse-rule-59b')
+sessions.set(s59b.id, s59b)
+await fire('session/created', s59b)
+const stopped59b = new AbortController()
+const first59b = fire('agent/pre-step', { agent: { session: s59b }, signal: stopped59b.signal }, async () => ({ kind: 'enter' }))
+const readStart59b = (engine59b as unknown as { loadStarted: Map<string, { at: number }> }).loadStarted.get(s59b.id)!
+readStart59b.at = Date.now() - 90_100
+const raced59b = new AbortController()
+let continued59b = false
+const second59b = fire('agent/pre-step', { agent: { session: s59b }, signal: raced59b.signal }, async () => { continued59b = true; return { kind: 'enter' } })
+await new Promise<void>(resolve => setTimeout(resolve, 15))
+check('missing timeout inherits the 60s rule and expires after its 30s grace', continued59b)
+stopped59b.abort()
+raced59b.abort()
+releaseRead59b?.()
+await Promise.all([first59b, second59b])
+check('an explicit zero timeout remains unbounded',
+  (new ReasoningDistillEngine(ctx as never, makeConfig({ defaultRule: { get: () => ({ timeoutMs: 0 }) } }) as never, new SidecarStore()) as unknown as { ruleBackstopMs: () => number }).ruleBackstopMs() === 0)
+
 console.log('scenario 60: stalled sidecar read respects a finite pre-step deadline')
 handlers.clear()
 const cfg60 = makeConfig({ defaultRule: { get: () => ({ ...cfg10.defaultRule.get(), timeoutMs: 10 }) } })
 let finishRead60: (() => void) | undefined
+const pendingRead60 = new Promise<void>(resolve => { finishRead60 = resolve })
 const store60 = new SidecarStore()
 const load60 = store60.load.bind(store60)
-store60.load = async (id: string) => { await new Promise<void>(resolve => { finishRead60 = resolve }); return load60(id) }
+let flight60: Promise<Awaited<ReturnType<typeof load60>>> | undefined
+store60.load = (id: string) => flight60 ??= pendingRead60.then(() => load60(id))
 const engine60 = new ReasoningDistillEngine(ctx as never, cfg60 as never, store60)
 engine60.start()
 const s60 = new FakeSession('session-read-stalled-60')
@@ -2958,20 +3011,65 @@ check('the next pre-step retries only the skipped note after disk recovery',
   (await realStore62.load(s62.id)).entries[0]?.handoff?.state === 'skipped'
   && engine62.snapshot(s62.id).pendingBranch === null)
 
+console.log('scenario 62b: a canceled wait still tracks a late failed hand-off write')
+handlers.clear()
+const store62b = new SidecarStore()
+const update62b = store62b.update.bind(store62b)
+let failLate62b: (() => void) | undefined
+const late62b = new Promise<void>(resolve => { failLate62b = resolve })
+let noteStarted62b: (() => void) | undefined
+const started62b = new Promise<void>(resolve => { noteStarted62b = resolve })
+let attempted62b = 0
+let failed62b = false
+store62b.update = async (id, mutate) => {
+  if (id === 'session-canceled-note-62b') {
+    attempted62b++
+    if (attempted62b === 2) {
+      noteStarted62b?.()
+      await late62b
+      failed62b = true
+      throw new Error('disk full after cancellation')
+    }
+  }
+  return update62b(id, mutate)
+}
+const engine62b = new ReasoningDistillEngine(ctx as never, cfg10 as never, store62b)
+engine62b.start()
+const s62b = new FakeSession('session-canceled-note-62b')
+sessions.set(s62b.id, s62b)
+await fire('session/created', s62b)
+await runStep40(engine62b, s62b, '62b')
+await settleFor(async () => (await store62b.load(s62b.id)).entries.length === 1)
+const cancel62b = new AbortController()
+let continued62b = 0
+const pre62b = fire('agent/pre-step', { agent: { session: s62b }, signal: cancel62b.signal }, async () => { continued62b++; return { kind: 'enter' } })
+await started62b
+cancel62b.abort()
+await pre62b
+failLate62b?.()
+await settleFor(async () => failed62b && engine62b.snapshot(s62b.id).pendingBranch === null)
+await new Promise<void>(resolve => setTimeout(resolve, 0))
+await fire('agent/pre-step', { agent: { session: s62b } }, async () => { continued62b++; return { kind: 'enter' } })
+await settleFor(async () => (await store62b.load(s62b.id)).entries[0]?.handoff?.state === 'failed')
+check('the late failed note is retried without another backend request',
+  continued62b === 2 && attempted62b >= 3 && (await store62b.load(s62b.id)).entries[0]?.handoff?.state === 'failed',
+  JSON.stringify({ attempted62b, handoff: (await store62b.load(s62b.id)).entries[0]?.handoff }))
+
 console.log('scenario 63: completed stalled read permits the next pre-step to settle and hand off')
 handlers.clear()
 const realStore63 = new SidecarStore()
 const load63 = realStore63.load.bind(realStore63)
 let releaseRead63: (() => void) | undefined
 let readStarted63: (() => void) | undefined
-let delayRead63 = true
-realStore63.load = async id => {
-  if (id === 'session-read-resumed-63' && delayRead63) {
-    delayRead63 = false
+const heldRead63 = new Promise<void>(resolve => { releaseRead63 = resolve })
+let flight63: Promise<Awaited<ReturnType<typeof load63>>> | undefined
+realStore63.load = id => {
+  if (id !== 'session-read-resumed-63') return load63(id)
+  if (flight63 === undefined) {
     readStarted63?.()
-    await new Promise<void>(resolve => { releaseRead63 = resolve })
+    flight63 = heldRead63.then(() => load63(id))
   }
-  return load63(id)
+  return flight63
 }
 const engine63 = new ReasoningDistillEngine(ctx as never, cfg10 as never, realStore63)
 engine63.start()
@@ -2983,23 +3081,19 @@ await reading63
 await runStep40(engine63, s63, '63')
 const internal63 = engine63 as unknown as { loadStarted: Map<string, { at: number }> }
 let continued63 = 0
-const waiting63 = fire('agent/pre-step', { agent: { session: s63 } }, async () => { continued63++; return { kind: 'enter' } })
-internal63.loadStarted.get(s63.id)!.at = Date.now() - 30_020
+const stop63 = new AbortController()
+const waiting63 = fire('agent/pre-step', { agent: { session: s63 }, signal: stop63.signal }, async () => { continued63++; return { kind: 'enter' } })
+internal63.loadStarted.get(s63.id)!.at = Date.now() - 90_020
 await fire('agent/pre-step', { agent: { session: s63 } }, async () => { continued63++; return { kind: 'enter' } })
+stop63.abort()
 await waiting63
 check('the stalled read releases both waiting pre-steps', continued63 === 2)
 releaseRead63?.()
-// The read has completed; a fresh step must now trigger normal compression.
+// Completion retires the expired read gate and allows a fresh sidecar read.
 await settleFor(async () => !internal63.loadStarted.has(s63.id))
-await runStep40(engine63, s63, '63-recovered')
-let resumed63: unknown
-for (const fn of handlers.get('agent/pre-step') ?? []) {
-  resumed63 = await fn({ agent: { session: s63 } }, async () => { continued63++; return { kind: 'enter' } })
-}
-check('the next pre-step settles the recovered compression and branch hand-off',
-  continued63 === 3 && (await realStore63.load(s63.id)).entries[0]?.handoff?.state === 'failed'
-  && engine63.snapshot(s63.id).pendingBranch === null,
-  JSON.stringify({ decision: resumed63, entry: (await realStore63.load(s63.id)).entries[0] }))
+realStore63.load = load63
+check('the completed single-flight read permits fresh sidecar reads',
+  (await realStore63.load(s63.id)).epoch === 0 && continued63 === 2)
 
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

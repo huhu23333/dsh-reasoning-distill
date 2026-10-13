@@ -653,11 +653,11 @@ export class ReasoningDistillEngine {
       // then lose its id without ever switching to it. Record the failure instead
       // and carry on in the original conversation.
       this.ctx.logger.warn('reasoning-distill: no reachable web server port; cannot create a branch for %s', session.id)
-      await this.untilSettled(this.recordHandoff(session.id, entryId, {
+      await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, {
         state: 'failed',
         error: 'the host has no reachable web server port, so no branch could be created',
         at: Date.now(),
-      }, generation), signal).then(ok => { if (ok === false) this.oweNote(session.id, entryId, 'no reachable web server port') })
+      }, 'no reachable web server port', generation), signal)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       return false
     }
@@ -681,14 +681,12 @@ export class ReasoningDistillEngine {
       const created = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       if (!response.ok || created === '') {
         const reason = typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`
-        const noted = await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
-        if (noted === false) this.oweNote(session.id, entryId, reason)
+        await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, reason, generation), signal)
         if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
         this.ctx.logger.warn('reasoning-distill: branch refused for %s (%s); carrying on in place', session.id, reason)
         return false
       }
-      const recorded = await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, generation), signal)
-      if (recorded === false) this.oweNote(session.id, entryId, 'branch created but not recorded')
+      const recorded = await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, 'branch created but not recorded', generation), signal)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       if (!recorded) {
         // The branch exists, but nothing the panel can see points at it. Ending the
@@ -708,8 +706,7 @@ export class ReasoningDistillEngine {
       // of implying nothing happened.
       const detail = error instanceof Error ? error.message : String(error)
       const reason = `branch request did not complete (${detail}); a branch may exist that this plugin cannot name`
-      const noted = await this.untilSettled(this.recordHandoff(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
-      if (noted === false) this.oweNote(session.id, entryId, reason)
+      await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, reason, generation), signal)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       this.ctx.logger.warn('reasoning-distill: branch failed for %s (%s); carrying on in place', session.id, reason)
       return false
@@ -763,6 +760,19 @@ export class ReasoningDistillEngine {
   private oweNote(sessionId: string, entryId: string, error: string, state: 'failed' | 'skipped' = 'failed'): void {
     this.owedHandoffNotes.set(`${sessionId}:${entryId}`, { entryId, outcome: { state, error, at: Date.now() } })
     this.ctx.logger.warn('reasoning-distill: hand-off note for %s could not be written yet; it will be retried', entryId)
+  }
+
+  /** Observe the write after a canceled wait, so a late failure remains retryable. */
+  private async recordHandoffOrOwe(
+    sessionId: string,
+    entryId: string,
+    outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number },
+    reason: string,
+    generation: number,
+  ): Promise<boolean> {
+    const recorded = await this.recordHandoff(sessionId, entryId, outcome, generation)
+    if (!recorded && (this.generation.get(sessionId) ?? 0) === generation) this.oweNote(sessionId, entryId, reason)
+    return recorded
   }
 
   /** Retry every hand-off note still owed for a session (never the backend request). */
@@ -1185,13 +1195,12 @@ export class ReasoningDistillEngine {
    * @returns the value, or undefined when the wait was abandoned.
    */
   private ruleBackstopMs(): number {
-    const rules = [this.config.defaultRule.get(), ...Object.values(this.config.models.get())]
-    const limits = rules.map(rule => (rule === undefined ? undefined : rule.timeoutMs)).filter((value): value is number => value !== undefined)
-    const finite = limits.filter(value => value > 0)
-    // Any rule asking for no limit keeps that meaning; otherwise the largest
-    // configured limit bounds everything, including a gate that has not launched.
-    if (limits.length === 0 || limits.some(value => value === 0)) return 0
-    return Math.max(...finite)
+    const models = Object.keys(this.config.models.get() ?? {})
+    const limits = ['', ...models].map(model => resolveRule(model, this.config).timeoutMs)
+    // Any effective rule asking for no limit keeps that meaning; otherwise the
+    // largest inherited limit bounds even a gate that has not launched.
+    if (limits.some(value => value === 0)) return 0
+    return Math.max(...limits)
   }
 
   private async untilSettled<T>(work: Promise<T>, signal?: AbortSignal): Promise<T | undefined> {
