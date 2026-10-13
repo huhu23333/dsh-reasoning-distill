@@ -1083,6 +1083,9 @@ export class ReasoningDistillEngine {
         }
         const remaining = bound.timeoutMs + 30_000 - (Date.now() - bound.launchedAt)
         if (remaining <= 0) {
+          // Stop waiting *and* refuse a later adoption: otherwise a finally-launched
+          // attempt could reset its own clock and land after the raw request.
+          this.abandoned.add(key)
           void promise.catch(() => undefined)
           return
         }
@@ -1091,11 +1094,17 @@ export class ReasoningDistillEngine {
           timer = setTimeout(resolve, remaining)
           timer.unref?.()
         })
+        let timedOut = false
+        const winner = Promise.race([
+          promise.then(() => 'done' as const),
+          deadline.then(() => { timedOut = true; return 'deadline' as const }),
+        ])
         try {
-          await Promise.race([promise, deadline])
+          await winner
         } finally {
           if (timer !== undefined) clearTimeout(timer)
         }
+        if (timedOut) this.abandoned.add(key)
       })
       await this.untilAborted(Promise.all(waits), signal)
       return signal === undefined || !signal.aborted
