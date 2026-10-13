@@ -282,6 +282,24 @@ npm run typecheck    # 宿主半的真实 tsc（0 错误）；typecheck:all 会�
 
 冒烟测试覆盖四件事：阈值触发与蒸馏调用、`deriveMessages()` 里确实看到蒸馏版而日志仍是原文、工具调用块不被破坏、逐步节省记账与 compaction 纪元重置。`test/stubs/` 只用于这次离线构建，**不会**进入 `node_modules`——放在那里的桩会遮蔽运行时真正的 `@deepseek-ai/dsh-llm`。
 
+## 设计边界：为什么原生页面显示原文（已核实，勿重复踩）
+
+**结论**：对话 / 轨迹 / 上下文页显示的是**原始推理**；只有**发给模型的请求**使用蒸馏后的文本。这是宿主的设计，不是本插件的能力缺口。
+
+证据（宿主源码，已逐条核对）：
+
+1. **位置替换对助手消息被运行时禁止**：`packages/core/session/src/surface.ts:329-365` 要求替换必须逐一引用被遮蔽节点，同时又规定 `assistant/message` **一旦携带 `sourceEventSeqs` 就抛错**；类型层同样（`core/session/src/types.ts:470-478` 里该字段为 `never`）。因此插件无法遮蔽已有助手节点。
+2. **人类转录只读"追加来源"的原始事件**：`surface.ts:78-85` 明说替换副本 **model-only**、转录必须读 durable 原文；原生 chat 直接取 `event.data.message.content`（`client/ui-chat/.../conversation-nodes/assistant.ts:190-205,292-300`），轨迹同理（`ui-trajectory/.../trajectory-assistant-definition.ts:254-269`），上下文页渲染的是 durable 节点内容。
+3. **压缩计量读逐事件原始文本**：`llm/token-meter/src/surface-fold.ts:17,111` 用的是**自由函数** `deriveEventMessage(event)`（不传投影表），所以阈值与压缩输入都按原文计算——本插件省下的 token **不会**降低压缩压力。
+
+**为什么不用 `registerMessageProjection`**（它确实存在：`core/session/src/index.ts:931-945`，可让模型可见面在原位置换成插件文本）：
+
+- 自定义投影事件必须声明 `@messageProjection`，而离线/浏览器/查询读取器只用**构建期目录**（`session-format-catalog/src/message-projections.ts:1-7` 目前只有 `imageOffloadProjection`）；
+- 未知的**必需**事件会在格式恢复时被**拒绝**（`session-format-v3-to-v4/src/validation.ts:52-65`）；把它标成 `ignorable` 又属语义错误（读者会跳过并重建出**不同的**模型历史）。结果就是：外部插件用投影会导致**重启后会话可能加载失败**——比"日志零足迹 + 包装派生"更糟；
+- 且无论投影与否，**原生页面都不会显示投影文本**（见第 2 点）。
+
+**想要"所见即短"只有两条路**：① 用分支功能创建**真实的短历史**会话；② 让宿主在 UI 层提供"显示压缩后内容"的开关（上游需求，见 `docs/upstream-compacted-view.md`）。
+
 ## 已知限制
 
 - **时序**：蒸馏必须在下一步请求之前完成。`timeoutMs`（逐模型，默认 60s）到点即 **abort 并放弃这一次压缩**——原始 reasoning 保持原样，该次尝试记为 `failed`（计入开销、节省为 0），压缩会话保留供排查。`0` = 不设超时。
