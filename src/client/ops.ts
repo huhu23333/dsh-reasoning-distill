@@ -123,6 +123,35 @@ export {
 } from '../backends.ts'
 export type { RewriteBackend } from '../backends.ts'
 
+/** Read the result of a backend request made by this tab before its next settle. */
+export function pendingRewriteOutcome(storage: Pick<Storage, 'getItem'>, key: string): { error?: string } | undefined {
+  try {
+    const saved = storage.getItem(`reasoning-distill:handoff:${key}`)
+    if (saved === null) return undefined
+    const value: unknown = JSON.parse(saved)
+    if (value === null || typeof value !== 'object') return undefined
+    const error = (value as { error?: unknown }).error
+    if (error !== null && typeof error !== 'string') return undefined
+    return error === null ? {} : { error }
+  } catch {
+    return undefined
+  }
+}
+
+/** Remember a terminal backend outcome before asking the host to settle it. */
+export function rememberRewriteOutcome(storage: Pick<Storage, 'setItem'>, key: string, error?: string): void {
+  try {
+    storage.setItem(`reasoning-distill:handoff:${key}`, JSON.stringify({ error: error ?? null }))
+  } catch {
+    // Storage can be blocked; the in-memory marker still guards this mount.
+  }
+}
+
+/** Only a failed settle or a settled attempt with an unwritten note is retried. */
+export function shouldRetrySettle(verdict: 'settled' | 'refused' | 'failed', recorded: boolean): boolean {
+  return verdict === 'failed' || (verdict === 'settled' && !recorded)
+}
+
 /**
  * Whether a backend's response means the rewrite was written.
  *

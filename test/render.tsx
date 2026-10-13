@@ -12,7 +12,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
@@ -259,6 +259,25 @@ check('a 2xx without an ok field counts as applied', rewriteApplyOutcome(true, {
 check('an explicit ok:false is a refusal', !rewriteApplyOutcome(true, { ok: false, error: 'nope' }).done)
 check('and it keeps the backend\'s own message', rewriteApplyOutcome(true, { ok: false, error: 'nope' }).error === 'nope')
 check('a non-2xx is a failure even without a body', !rewriteApplyOutcome(false, null).done)
+
+const savedAttempts = new Map<string, string>()
+const storage = {
+  getItem: (key: string): string | null => savedAttempts.get(key) ?? null,
+  setItem: (key: string, value: string): void => { savedAttempts.set(key, value) },
+}
+rememberRewriteOutcome(storage, 'session-1:entry-1')
+rememberRewriteOutcome(storage, 'session-1:entry-2', 'backend refused')
+check('a successful rewrite remains identifiable to a remounted view before settle',
+  pendingRewriteOutcome(storage, 'session-1:entry-1') !== undefined
+  && pendingRewriteOutcome(storage, 'session-1:entry-1')?.error === undefined)
+check('a refused backend also retains its failure note for settle',
+  pendingRewriteOutcome(storage, 'session-1:entry-2')?.error === 'backend refused')
+check('the outcome is scoped to the session and attempt',
+  pendingRewriteOutcome(storage, 'session-2:entry-1') === undefined)
+check('a refused settle never retries even when not recorded', !shouldRetrySettle('refused', false))
+check('a failed transport and an unwritten settled note still retry',
+  shouldRetrySettle('failed', true) && shouldRetrySettle('settled', false)
+  && !shouldRetrySettle('settled', true))
 
 // The panel must hand the backend exactly the text the engine stores and replays,
 // never the raw untruncated answer.
