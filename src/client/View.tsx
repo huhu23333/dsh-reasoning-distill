@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { backendById, isStaleResponse, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
+import { availableSessionStorage, backendById, isStaleResponse, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
 import { HANDOFF_ROUTE, REPORT_ROUTE, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
@@ -305,7 +305,7 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     if (backendById(current.config.rewriteBackend)?.kind !== 'in-place') return
     // The backend outcome is recorded before settle, so a remount can never
     // interpret an uncleared host marker as permission to POST the rewrite again.
-    const saved = pendingRewriteOutcome(window.sessionStorage, attemptKey)
+    const saved = pendingRewriteOutcome(availableSessionStorage(), attemptKey)
     if (saved !== undefined) {
       settlePending.current.set(attemptKey, saved.error)
       applyingPending.current.add(attemptKey)
@@ -340,13 +340,13 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
         // why on the entry, and never re-post it (an in-place rewrite is not
         // idempotent). Only an unfinished settle is retried.
         const refusal = outcome.error ?? `HTTP ${response.status}`
-        rememberRewriteOutcome(sessionStorage, attemptKey, refusal)
+        rememberRewriteOutcome(availableSessionStorage(), attemptKey, refusal)
         const { verdict, recorded } = await settleHandoff(current, pending, refusal)
         appliedPending.current.add(attemptKey)
         if (shouldRetrySettle(verdict, recorded)) settlePending.current.set(attemptKey, refusal)
         return
       }
-      rememberRewriteOutcome(sessionStorage, attemptKey)
+      rememberRewriteOutcome(availableSessionStorage(), attemptKey)
       const { verdict, recorded } = await settleHandoff(current, pending)
       if (shouldRetrySettle(verdict, recorded)) {
         // Keep the rewrite and retry only the settle on a later poll instead of
@@ -362,8 +362,8 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       // worse than a rewrite that did not land. Only an unfinished *settle* is
       // retried, so the host's pending flag cannot linger and trigger a re-post.
       const detail = error instanceof Error ? error.message : String(error)
-      if (pendingRewriteOutcome(window.sessionStorage, attemptKey) === undefined) {
-        rememberRewriteOutcome(sessionStorage, attemptKey, detail)
+      if (pendingRewriteOutcome(availableSessionStorage(), attemptKey) === undefined) {
+        rememberRewriteOutcome(availableSessionStorage(), attemptKey, detail)
       }
       const { verdict, recorded } = await settleHandoff(current, pending, detail)
       appliedPending.current.add(attemptKey)

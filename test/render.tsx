@@ -12,7 +12,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
@@ -259,6 +259,12 @@ check('a 2xx without an ok field counts as applied', rewriteApplyOutcome(true, {
 check('an explicit ok:false is a refusal', !rewriteApplyOutcome(true, { ok: false, error: 'nope' }).done)
 check('and it keeps the backend\'s own message', rewriteApplyOutcome(true, { ok: false, error: 'nope' }).error === 'nope')
 check('a non-2xx is a failure even without a body', !rewriteApplyOutcome(false, null).done)
+
+const blockedStorage = { get sessionStorage(): Storage { throw new Error('storage blocked') } } as Window
+check('a throwing sessionStorage getter is treated as unavailable', availableSessionStorage(blockedStorage) === undefined)
+check('without storage, a pending rewrite has no saved outcome and can still proceed',
+  pendingRewriteOutcome(availableSessionStorage(blockedStorage), 'session-1:entry-1') === undefined)
+rememberRewriteOutcome(availableSessionStorage(blockedStorage), 'session-1:entry-1')
 
 const savedAttempts = new Map<string, string>()
 const storage = {

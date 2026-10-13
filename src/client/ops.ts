@@ -123,11 +123,20 @@ export {
 } from '../backends.ts'
 export type { RewriteBackend } from '../backends.ts'
 
-/** Read the result of a backend request made by this tab before its next settle. */
-export function pendingRewriteOutcome(storage: Pick<Storage, 'getItem'>, key: string): { error?: string } | undefined {
+/** Get this tab's storage without letting a blocked property getter crash the panel. */
+export function availableSessionStorage(source: Pick<Window, 'sessionStorage'> = window): Storage | undefined {
   try {
-    const saved = storage.getItem(`reasoning-distill:handoff:${key}`)
-    if (saved === null) return undefined
+    return source.sessionStorage
+  } catch {
+    return undefined
+  }
+}
+
+/** Read the result of a backend request made by this tab before its next settle. */
+export function pendingRewriteOutcome(storage: Pick<Storage, 'getItem'> | undefined, key: string): { error?: string } | undefined {
+  try {
+    const saved = storage?.getItem(`reasoning-distill:handoff:${key}`)
+    if (saved == null) return undefined
     const value: unknown = JSON.parse(saved)
     if (value === null || typeof value !== 'object') return undefined
     const error = (value as { error?: unknown }).error
@@ -139,9 +148,9 @@ export function pendingRewriteOutcome(storage: Pick<Storage, 'getItem'>, key: st
 }
 
 /** Remember a terminal backend outcome before asking the host to settle it. */
-export function rememberRewriteOutcome(storage: Pick<Storage, 'setItem'>, key: string, error?: string): void {
+export function rememberRewriteOutcome(storage: Pick<Storage, 'setItem'> | undefined, key: string, error?: string): void {
   try {
-    storage.setItem(`reasoning-distill:handoff:${key}`, JSON.stringify({ error: error ?? null }))
+    storage?.setItem(`reasoning-distill:handoff:${key}`, JSON.stringify({ error: error ?? null }))
   } catch {
     // Storage can be blocked; the in-memory marker still guards this mount.
   }
