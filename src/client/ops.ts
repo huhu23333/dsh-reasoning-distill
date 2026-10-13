@@ -123,6 +123,28 @@ export {
 } from '../backends.ts'
 export type { RewriteBackend } from '../backends.ts'
 
+/**
+ * Whether a backend's response means the rewrite was written.
+ *
+ * Success bodies differ per backend (`context-shaping` answers a bare result,
+ * `msg-edit` answers its own envelope), so an absent `ok` means success while an
+ * explicit `false` is a refusal — and a non-2xx always is.
+ * @param ok - whether the HTTP status was in the 2xx range.
+ * @param payload - the parsed body, when it parsed.
+ * @returns whether the hand-off completed, and why not when it did not.
+ */
+export function rewriteApplyOutcome(ok: boolean, payload: unknown): { done: boolean; error?: string } {
+  if (!ok) {
+    const stated = (payload as { error?: unknown } | null)?.error
+    return { done: false, error: typeof stated === 'string' && stated !== '' ? stated : 'HTTP request failed' }
+  }
+  const body = payload as { ok?: unknown; error?: unknown } | null
+  if (body?.ok === false) {
+    return { done: false, error: typeof body.error === 'string' && body.error !== '' ? body.error : 'backend refused (ok: false)' }
+  }
+  return { done: true }
+}
+
 /** The settings document the panel edits. */
 export type SettingsValue = {
   enabled: boolean

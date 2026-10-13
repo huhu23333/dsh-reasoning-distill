@@ -12,7 +12,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, rewriteRequest, ruleFieldsIdle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
@@ -254,6 +254,11 @@ check('the client plugin registers the composer activity slot',
   injected.includes('conversation.input.activity'), JSON.stringify(injected))
 check('and still registers the settings section and the report tab',
   injected.includes('settings.section') && injected.includes('conversation.view'), JSON.stringify(injected))
+
+check('a 2xx without an ok field counts as applied', rewriteApplyOutcome(true, { sessionId: 's' }).done)
+check('an explicit ok:false is a refusal', !rewriteApplyOutcome(true, { ok: false, error: 'nope' }).done)
+check('and it keeps the backend\'s own message', rewriteApplyOutcome(true, { ok: false, error: 'nope' }).error === 'nope')
+check('a non-2xx is a failure even without a body', !rewriteApplyOutcome(false, null).done)
 
 console.log('render: a report from an older host (version skew)')
 const legacy = modernReport()

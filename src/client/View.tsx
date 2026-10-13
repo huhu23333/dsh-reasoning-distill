@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { isStaleResponse, rewriteRequest } from './ops.ts'
+import { isStaleResponse, rewriteApplyOutcome, rewriteRequest } from './ops.ts'
 import { HANDOFF_ROUTE, REPORT_ROUTE, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
@@ -205,11 +205,12 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request.body),
     }).then(async response => {
-      if (!response.ok) {
-        const payload = await response.json().catch(() => null) as { error?: string } | null
+      const payload: unknown = await response.json().catch(() => null)
+      const outcome = rewriteApplyOutcome(response.ok, payload)
+      if (!outcome.done) {
         // A backend that refused must not look like a completed hand-off: record
         // why on the entry so the panel shows it.
-        await settle(payload?.error ?? `HTTP ${response.status}`)
+        await settle(outcome.error ?? `HTTP ${response.status}`)
         return
       }
       appliedPending.current.add(pending)
