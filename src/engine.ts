@@ -185,6 +185,12 @@ export class ReasoningDistillEngine {
       // the read is still in flight. Single-flight makes this join that read.
       // The host passes the turn's signal, but its event declaration does not
       // always carry it, so read it defensively rather than trusting the type.
+      const session = payload.agent.session
+      // A queued pre-step from a session object that a successor has replaced must
+      // not act for the new one. Only a *different* known object counts: an id the
+      // engine never attached (resumed before this plugin loaded) is left alone.
+      const attached = this.current.get(session.id)
+      if (attached !== undefined && attached !== session) return next()
       const signal = (payload as { signal?: AbortSignal }).signal
       // A stalled sidecar read must not outlive a stop either: the host only looks
       // at its signal once this handler returns.

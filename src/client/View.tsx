@@ -185,6 +185,10 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   // Attempts whose backend call already succeeded but whose hand-off settle did
   // not: the panel must retry *only* the settle, never the backend request.
   const settlePending = useRef(new Set<string>())
+  // When this view mounted, every branch that already existed was old news: only a
+  // hand-off that lands while the panel is open may pull the user across, or
+  // returning to the original session would bounce them to an old branch forever.
+  const branchBaseline = useRef<number | undefined>(undefined)
 
   /**
    * Settle one hand-off and say how it went.
@@ -218,16 +222,21 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     const current = cache[sessionId]?.report
     if (current === undefined) return
     // The hand-off outcome lives on the entry, so the panel reads it there.
-    // Newest first: earlier branches were opened when they were created, and the
-    // first successful branch must not shadow every later one.
-    const created = current.entries
-      .filter(item => item.handoff?.state === 'created' && item.handoff.branchId !== undefined)
-      .pop()
-    const branchId = created?.handoff?.branchId
-    if (branchId !== undefined && !openedBranch.current.has(branchId)) {
-      openedBranch.current.add(branchId)
-      openSession(branchId)
-      return
+    const createdBranches = current.entries.filter(item => item.handoff?.state === 'created' && item.handoff.branchId !== undefined)
+    if (branchBaseline.current === undefined) {
+      // First report for this mount: adopt what already exists, open nothing.
+      branchBaseline.current = createdBranches.reduce((latest, item) => Math.max(latest, item.handoff?.at ?? 0), 0)
+    } else {
+      const fresh = createdBranches.filter(item => (item.handoff?.at ?? 0) > (branchBaseline.current ?? 0)).pop()
+      const branchId = fresh?.handoff?.branchId
+      if (branchId !== undefined) {
+        branchBaseline.current = fresh?.handoff?.at ?? branchBaseline.current
+        if (!openedBranch.current.has(branchId)) {
+          openedBranch.current.add(branchId)
+          openSession(branchId)
+          return
+        }
+      }
     }
     const pending = current.pendingBranch
     if (pending == null) return
