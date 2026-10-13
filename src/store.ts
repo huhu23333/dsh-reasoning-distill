@@ -249,7 +249,10 @@ export class SidecarStore {
         // record may be readable by other users on the host.
         await mkdir(dir, { recursive: true, mode: 0o700 })
         const target = fileFor(sessionId)
-        const tmp = `${target}.${process.pid}.${Date.now()}.tmp`
+        // Unique per write: two stores (a reload, a second instance in tests) can
+        // otherwise pick the same name in the same millisecond and one rename then
+        // loses its source file.
+        const tmp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
         await writeFile(tmp, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 })
         await rename(tmp, target)
       } catch (error: unknown) {

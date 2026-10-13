@@ -2062,6 +2062,67 @@ const mutated = await runArmed('session-armed-41b', session => {
 })
 check('a surface that moved after the request credits nothing', mutated.liveSaved === 0, JSON.stringify(mutated))
 
+console.log('scenario 42: a stop ends the pre-step wait, and a disposed session cannot hold its successor')
+// (1) Cancellation must break the wait, not queue behind the distillation.
+handlers.clear()
+const store42 = new SidecarStore()
+const cfg42 = makeConfig({ defaultRule: { get: () => ({ ...rule7, timeoutMs: 0 }) } })
+const engine42 = new ReasoningDistillEngine({ ...ctx, llm: slowLlm } as never, cfg42 as never, store42)
+engine42.start()
+const s42 = new FakeSession('session-cancel-42')
+sessions.set(s42.id, s42)
+await fire('session/created', s42)
+await runStep40(engine42, s42, '42')
+let preFinished = false
+const controller = new AbortController()
+const pre42 = (async () => {
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    await fn({ agent: { session: s42 }, signal: controller.signal }, async () => ({ kind: 'enter', messages: [] }))
+  }
+  preFinished = true
+})()
+await new Promise(resolve => setTimeout(resolve, 80))
+check('the pre-step still waits while the distillation runs', !preFinished)
+const stoppedAt = Date.now()
+controller.abort()
+await pre42
+check('a stop releases that wait immediately', preFinished && Date.now() - stoppedAt < 200,
+  `${Date.now() - stoppedAt}ms`)
+
+// (2) Disposal must retire work and id-keyed state.
+handlers.clear()
+const store43 = new SidecarStore()
+const engine43 = new ReasoningDistillEngine({ ...ctx, llm: slowLlm } as never, cfg42 as never, store43)
+engine43.start()
+const first = new FakeSession('session-reused-43')
+sessions.set(first.id, first)
+await fire('session/created', first)
+await runStep40(engine43, first, '43a')
+const oldSeq = first.log.filter(entry => entry.type === 'assistant/message').map(entry => entry.seq)[0]!
+// The session is disposed while its compression is still running…
+await fire('session/disposed', first)
+// …and the same persisted id comes back.
+const second = new FakeSession('session-reused-43')
+sessions.set(second.id, second)
+await fire('session/created', second)
+// Its own step is not started: this probe asks only whether the *disposed*
+// generation's work can hold the successor back.
+let successorDone = false
+const successor = (async () => {
+  for (const fn of handlers.get('agent/pre-step') ?? []) {
+    await fn({ agent: { session: second } }, async () => ({ kind: 'enter', messages: [] }))
+  }
+  successorDone = true
+})()
+await Promise.race([successor, new Promise(resolve => setTimeout(resolve, 150))])
+check('a replacement session is not blocked by the disposed one\'s work', successorDone)
+// Let the stale compression finish, then check it kept out of the successor's record.
+await new Promise(resolve => setTimeout(resolve, 500))
+const after43 = await store43.load(second.id)
+check('and the disposed generation does not hand a rewrite to the successor',
+  after43.entries.every(entry => entry.targetSeq !== oldSeq) || after43.entries.length === 0,
+  JSON.stringify({ oldSeq, entries: after43.entries.map(entry => entry.targetSeq) }))
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1

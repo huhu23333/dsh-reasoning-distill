@@ -113,6 +113,8 @@ export class ReasoningDistillEngine {
   private readonly expectRequest = new Set<string>()
   /** Per-compression wait bound: its rule's distillation timeout, 0 = unbounded. */
   private readonly waitBound = new Map<string, number>()
+  /** Bumped whenever a session id is attached again; stale work checks it. */
+  private readonly generation = new Map<string, number>()
   /** Cached derived-index maps keyed by session id. */
   /** Session ids whose accessor this engine already wrapped. */
   private readonly wrapped = new WeakSet<object>()
@@ -173,11 +175,14 @@ export class ReasoningDistillEngine {
       // `attach` preloads the sidecar fire-and-forget, so on a resumed session
       // the first request could otherwise be assembled from raw reasoning while
       // the read is still in flight. Single-flight makes this join that read.
+      const signal = payload.signal
       await this.ensureLoaded(payload.agent.session)
-      await this.settle(payload.agent.session)
+      // A stop must end the wait, not queue behind it: the host only looks at its
+      // signal once this handler returns.
+      if (!await this.settle(payload.agent.session, signal)) return next()
       // A successful compression with a branch backend ends this turn *before* any
       // request goes out: the conversation continues on the branch instead.
-      if (await this.handOffToBranch(payload.agent.session)) return { kind: 'reject' }
+      if (signal?.aborted !== true && await this.handOffToBranch(payload.agent.session, signal)) return { kind: 'reject' }
       // The loop assembles the request right after this returns; arming the
       // session here is what lets the wrapper tell that derivation apart from a
       // viewer's.
@@ -227,13 +232,31 @@ export class ReasoningDistillEngine {
   private forgetSession(sessionId: string): void {
     this.ownSessions.delete(sessionId)
     this.sessionKind.delete(sessionId)
-    this.storageBroken.delete(sessionId)
+    this.releaseSession(sessionId)
+  }
+
+  /**
+   * Drop every per-session trace, keyed by id.
+   *
+   * Called when the session goes away and when an id is attached again: a later
+   * compression of the old generation must not keep a new session's requests
+   * waiting (its in-flight entry is matched by id prefix) or write into its
+   * record.
+   * @param sessionId - session whose per-id state should go.
+   */
+  private releaseSession(sessionId: string): void {
+    const prefix = `${sessionId}:`
+    for (const map of [this.pending, this.inFlight, this.running, this.waitBound] as Array<Map<string, unknown>>) {
+      for (const key of [...map.keys()]) {
+        if (key.startsWith(prefix)) map.delete(key)
+      }
+    }
     this.pendingBranch.delete(sessionId)
     this.expectRequest.delete(sessionId)
     this.blocked.delete(sessionId)
-    for (const key of [...this.pending.keys()]) {
-      if (key.startsWith(`${sessionId}:`)) this.pending.delete(key)
-    }
+    this.applied.delete(sessionId)
+    this.rawDerive.delete(sessionId)
+    this.storageBroken.delete(sessionId)
   }
 
   /**
@@ -302,6 +325,12 @@ export class ReasoningDistillEngine {
   private attach(session: Session): void {
     if (this.wrapped.has(session)) return
     this.wrapped.add(session)
+    // A session object is attached once, but the *id* can come back (a cleared or
+    // re-created conversation). Everything keyed by that id belongs to the
+    // previous generation, and a later compression must not write into the new
+    // one's record or block its requests.
+    this.generation.set(session.id, (this.generation.get(session.id) ?? 0) + 1)
+    this.releaseSession(session.id)
     const original = session.deriveMessages.bind(session)
     const engine = this
     this.rawDerive.set(session.id, original)
@@ -460,7 +489,7 @@ export class ReasoningDistillEngine {
    * @param session - session whose pre-step is running.
    * @returns true when the turn should be rejected in favour of the branch.
    */
-  private async handOffToBranch(session: Session): Promise<boolean> {
+  private async handOffToBranch(session: Session, signal?: AbortSignal): Promise<boolean> {
     const entryId = this.pendingBranch.get(session.id)
     if (entryId === undefined) return false
     const backend = backendById(this.config.rewriteBackend.get())
@@ -492,7 +521,7 @@ export class ReasoningDistillEngine {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(request.body),
-        ...branchSignal(this.config.branchTimeoutMs.get()),
+        ...branchSignal(this.config.branchTimeoutMs.get(), signal),
       })
       const payload = await response.json().catch(() => null) as { sessionId?: unknown; error?: unknown } | null
       const created = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
@@ -632,6 +661,15 @@ export class ReasoningDistillEngine {
         // A step boundary closes the arming window: the next one is opened by the
         // pre-step that actually leads to a request.
         this.expectRequest.delete(session.id)
+        // Most steps are not candidates (no reasoning, below the threshold, the
+        // rule off, no backend). Nothing is launched for them, so no gate may be
+        // registered either: a resolved promise left in `inFlight` per ordinary
+        // step would accumulate for the life of the process and slow every later
+        // pre-step down.
+        if (!this.pending.has(key)) {
+          this.ctx.logger.debug('reasoning-distill: step end %s had nothing staged', key)
+          return
+        }
         // The record is read *before* paying, not merely before the next request:
         // a distillation whose result could not be stored must not be bought. The
         // gate is registered as in-flight so a following pre-step still waits for
@@ -755,10 +793,10 @@ export class ReasoningDistillEngine {
    * cannot stall the next request past its useful window.
    * @param sessionId - session entering a pre-step boundary.
    */
-  private async settle(session: Session): Promise<void> {
+  private async settle(session: Session, signal?: AbortSignal): Promise<boolean> {
     const sessionId = session.id
     const mine = [...this.inFlight.entries()].filter(([key]) => key.startsWith(`${sessionId}:`))
-    if (mine.length === 0) return
+    if (mine.length === 0) return true
     // Each compression is already bounded by its own rule's timeout, so waiting
     // for the promise to settle is the whole guarantee: the next request is
     // built only after the rewrite is in place, or after that compression gave up.
@@ -773,17 +811,45 @@ export class ReasoningDistillEngine {
       const waits = Promise.allSettled(mine.map(([, promise]) => promise))
       const bounds = mine.map(([key]) => this.waitBound.get(key) ?? 0)
       if (bounds.includes(0)) {
-        await waits
+        // No configured limit: wait until the compression ends, but never past a
+        // user's own stop, which arrives as this signal.
+        await this.untilAborted(waits, signal)
       } else {
         const deadline = new Promise<void>(resolve => {
           const timer = setTimeout(resolve, Math.max(...bounds) + 30_000)
           timer.unref?.()
         })
-        await Promise.race([waits, deadline])
+        await this.untilAborted(Promise.race([waits, deadline]), signal)
       }
+      return signal?.aborted !== true
     } finally {
       this.blocked.delete(sessionId)
     }
+  }
+
+  /**
+   * Await pending work unless the caller's signal aborts first.
+   *
+   * The host checks its signal only after the `agent/pre-step` waterfall returns,
+   * so a plugin that waits here without watching it would make Stop hang for as
+   * long as the wait lasts — unbounded with `timeoutMs: 0`.
+   * @param work - the wait to observe.
+   * @param signal - the turn's abort signal, when the host supplied one.
+   */
+  private async untilAborted(work: Promise<unknown>, signal?: AbortSignal): Promise<void> {
+    if (signal === undefined) {
+      await work
+      return
+    }
+    if (signal.aborted) return
+    await new Promise<void>(resolve => {
+      const done = (): void => {
+        signal.removeEventListener('abort', done)
+        resolve()
+      }
+      signal.addEventListener('abort', done, { once: true })
+      void work.then(done, done)
+    })
   }
 
   /**
@@ -925,6 +991,10 @@ export class ReasoningDistillEngine {
    * @param target - the staged assistant message.
    */
   private async compress(session: Session, target: PendingTarget): Promise<void> {
+    // Work started for a previous generation of this session id must not write
+    // into the current one's record or hand its rewrite to the panel.
+    const generation = this.generation.get(session.id) ?? 0
+    const stale = (): boolean => (this.generation.get(session.id) ?? 0) !== generation
     const reasoning = reasoningOf(target.content)
     const maxInput = target.rule.maxInputChars
     const input = maxInput > 0 && reasoning.length > maxInput ? reasoning.slice(0, maxInput) : reasoning
@@ -952,6 +1022,7 @@ export class ReasoningDistillEngine {
         'reasoning-distill: gave up on %s after %dms: %s',
         target.model, outcome.run.durationMs, outcome.run.error ?? 'empty answer',
       )
+      if (stale()) return
       await this.store.update(session.id, (record) => {
         record.entries = record.entries.filter(item => item.targetSeq !== target.seq)
         record.entries.push({
@@ -1074,7 +1145,7 @@ export class ReasoningDistillEngine {
     })
     // The rewrite is now durable and worth writing into the history itself: the
     // panel asks the selected backend to do that, then stops this turn.
-    if (this.config.enabled.get() && this.config.rewriteBackend.get() !== '') {
+    if (!stale() && this.config.enabled.get() && this.config.rewriteBackend.get() !== '') {
       this.pendingBranch.set(session.id, entry.id)
     }
     this.ctx.logger.info(
@@ -1339,8 +1410,11 @@ function blockingReason(session: Session): BlockingReason {
  * @param timeoutMs - configured timeout in milliseconds.
  * @returns fetch options carrying a signal, or nothing when unbounded.
  */
-function branchSignal(timeoutMs: number): { signal?: AbortSignal } {
-  return timeoutMs > 0 ? { signal: AbortSignal.timeout(timeoutMs) } : {}
+function branchSignal(timeoutMs: number, turn?: AbortSignal): { signal?: AbortSignal } {
+  if (turn === undefined) return timeoutMs > 0 ? { signal: AbortSignal.timeout(timeoutMs) } : {}
+  return timeoutMs > 0
+    ? { signal: AbortSignal.any([turn, AbortSignal.timeout(timeoutMs)]) }
+    : { signal: turn }
 }
 
 /** Index of the message's reasoning block, or -1 when it carries none. */
