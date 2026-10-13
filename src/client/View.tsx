@@ -263,6 +263,21 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
         }
       }
     }
+    // Settles we still owe are retried first: the host's pending flag may already be
+    // gone (its note write failed), and waiting for it to reappear would strand the
+    // failure forever.
+    for (const owedKey of [...settlePending.current.keys()]) {
+      if (!owedKey.startsWith(`${current.sessionId}:`) || applyingPending.current.has(owedKey)) continue
+      const owedEntry = owedKey.slice(current.sessionId.length + 1)
+      applyingPending.current.add(owedKey)
+      void settleHandoff(current, owedEntry, settlePending.current.get(owedKey)).then(({ verdict, recorded }) => {
+        applyingPending.current.delete(owedKey)
+        if (verdict !== 'failed' && recorded) {
+          settlePending.current.delete(owedKey)
+          appliedPending.current.add(owedKey)
+        }
+      })
+    }
     const pending = current.pendingBranch
     if (pending == null) return
     const attemptKey = `${current.sessionId}:${pending}`
