@@ -296,6 +296,19 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     }).then(async response => {
       const payload: unknown = await response.json().catch(() => null)
       const outcome = rewriteApplyOutcome(response.ok, payload)
+      // A branch backend answers with the new session id: follow it, or the branch
+      // would exist with nobody looking at it.
+      const createdBranch = (payload as { sessionId?: unknown } | null)?.sessionId
+      if (outcome.done && typeof createdBranch === 'string' && createdBranch !== '') {
+        appliedPending.current.add(attemptKey)
+        if (!openedBranch.current.has(createdBranch)) {
+          openedBranch.current.add(createdBranch)
+          // Clear our pending marker (the branch exists either way) and go there.
+          void settleHandoff(current, pending)
+          openSession(createdBranch)
+        }
+        return
+      }
       if (!outcome.done) {
         // A backend that refused must not look like a completed hand-off: record
         // why on the entry, and never re-post it (an in-place rewrite is not

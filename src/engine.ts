@@ -580,9 +580,17 @@ export class ReasoningDistillEngine {
     }
     const port = (this.ctx as unknown as { webServer?: { port?: number } }).webServer?.port
     if (typeof port !== 'number') {
-      // No reachable endpoint: leave the hand-off to the panel rather than
-      // wedging the turn.
-      this.ctx.logger.debug('reasoning-distill: no web server port; branch hand-off deferred to the panel')
+      // The panel can drive an in-place backend itself, but a *branch* backend must
+      // be driven from here: the panel's in-place path would create a branch and
+      // then lose its id without ever switching to it. Record the failure instead
+      // and carry on in the original conversation.
+      this.ctx.logger.warn('reasoning-distill: no reachable web server port; cannot create a branch for %s', session.id)
+      await this.untilSettled(this.recordHandoff(session.id, entryId, {
+        state: 'failed',
+        error: 'the host has no reachable web server port, so no branch could be created',
+        at: Date.now(),
+      }, generation), signal)
+      if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       return false
     }
     const request = rewriteRequest(backend.id, session.id, {
