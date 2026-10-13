@@ -136,7 +136,7 @@ export class ReasoningDistillEngine {
    * Only the *note* is retried: re-posting the backend request would create a
    * second branch, so the pending marker is not kept for this.
    */
-  private readonly owedHandoffNotes = new Map<string, { entryId: string; outcome: { state: 'failed' | 'skipped'; error: string; at: number } }>()
+  private readonly owedHandoffNotes = new Map<string, { entryId: string; outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number } }>()
   /** Audit links known to be non-durable, keyed `sessionId:entryId`. */
   private readonly auditBroken = new Set<string>()
   /** Bumped whenever a session id is attached again; stale work checks it. */
@@ -657,7 +657,7 @@ export class ReasoningDistillEngine {
         state: 'failed',
         error: 'the host has no reachable web server port, so no branch could be created',
         at: Date.now(),
-      }, 'no reachable web server port', generation), signal)
+      }, generation), signal)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       return false
     }
@@ -681,12 +681,12 @@ export class ReasoningDistillEngine {
       const created = typeof payload?.sessionId === 'string' ? payload.sessionId : ''
       if (!response.ok || created === '') {
         const reason = typeof payload?.error === 'string' ? payload.error : `HTTP ${response.status}`
-        await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, reason, generation), signal)
+        await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
         if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
         this.ctx.logger.warn('reasoning-distill: branch refused for %s (%s); carrying on in place', session.id, reason)
         return false
       }
-      const recorded = await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, 'branch created but not recorded', generation), signal)
+      const recorded = await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, { state: 'created', branchId: created, at: Date.now() }, generation), signal)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       if (!recorded) {
         // The branch exists, but nothing the panel can see points at it. Ending the
@@ -706,7 +706,7 @@ export class ReasoningDistillEngine {
       // of implying nothing happened.
       const detail = error instanceof Error ? error.message : String(error)
       const reason = `branch request did not complete (${detail}); a branch may exist that this plugin cannot name`
-      await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, reason, generation), signal)
+      await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, { state: 'failed', error: reason, at: Date.now() }, generation), signal)
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       this.ctx.logger.warn('reasoning-distill: branch failed for %s (%s); carrying on in place', session.id, reason)
       return false
@@ -757,8 +757,8 @@ export class ReasoningDistillEngine {
   }
 
   /** Remember a hand-off note that could not be written, so the next pre-step retries it. */
-  private oweNote(sessionId: string, entryId: string, error: string, state: 'failed' | 'skipped' = 'failed'): void {
-    this.owedHandoffNotes.set(`${sessionId}:${entryId}`, { entryId, outcome: { state, error, at: Date.now() } })
+  private oweNote(sessionId: string, entryId: string, outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number }): void {
+    this.owedHandoffNotes.set(`${sessionId}:${entryId}`, { entryId, outcome })
     this.ctx.logger.warn('reasoning-distill: hand-off note for %s could not be written yet; it will be retried', entryId)
   }
 
@@ -767,11 +767,10 @@ export class ReasoningDistillEngine {
     sessionId: string,
     entryId: string,
     outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number },
-    reason: string,
     generation: number,
   ): Promise<boolean> {
     const recorded = await this.recordHandoff(sessionId, entryId, outcome, generation)
-    if (!recorded && (this.generation.get(sessionId) ?? 0) === generation) this.oweNote(sessionId, entryId, reason)
+    if (!recorded && (this.generation.get(sessionId) ?? 0) === generation) this.oweNote(sessionId, entryId, outcome)
     return recorded
   }
 
@@ -860,7 +859,7 @@ export class ReasoningDistillEngine {
       recorded = await this.recordHandoff(sessionId, target, { state: 'failed', error, at: Date.now() }, generation)
       // The panel's own retry dies with its tab: keep the note host-side too, so
       // closing the panel cannot make a failed backend operation invisible.
-      if (!recorded) this.oweNote(sessionId, target, error)
+      if (!recorded) this.oweNote(sessionId, target, { state: 'failed', error, at: Date.now() })
     }
     // `ok` means "this settle took effect": with nothing pending there was nothing
     // of ours to settle. Ending a turn is a side effect, not the outcome — an
@@ -1646,9 +1645,9 @@ export class ReasoningDistillEngine {
         // The committed entry remains visible and any real savings remain payable;
         // only the branch hand-off is skipped after the original turn was released.
         const reason = 'branch hand-off skipped after the wait deadline'
-        const noted = await this.recordHandoff(session.id, entry.id,
-          { state: 'skipped', error: reason, at: Date.now() }, generation)
-        if (!noted && !stale()) this.oweNote(session.id, entry.id, reason, 'skipped')
+        const outcome = { state: 'skipped' as const, error: reason, at: Date.now() }
+        const noted = await this.recordHandoff(session.id, entry.id, outcome, generation)
+        if (!noted && !stale()) this.oweNote(session.id, entry.id, outcome)
       } else this.pendingBranch.set(session.id, entry.id)
     }
     this.ctx.logger.info(

@@ -2706,7 +2706,9 @@ console.log('scenario 54: a branch that cannot be recorded must not stop the ori
 handlers.clear()
 const { createServer: createServer54 } = await import('node:http')
 let failWrites54 = false
+let branchRequests54 = 0
 const branchBackend54 = createServer54((request, response) => {
+  branchRequests54++
   request.on('data', () => undefined)
   request.on('end', () => {
     // The branch is created; from here on the local record cannot be written.
@@ -2743,6 +2745,14 @@ check('an unrecordable branch leaves the original turn running',
   nextCalled54 && (decision54 as { kind?: string }).kind === 'enter', JSON.stringify(decision54))
 check('and the entry records no branch it cannot point at',
   (await realStore54.load(s54.id)).entries.find(item => item.id === entry54.id)?.handoff === undefined)
+failWrites54 = false
+await fire('agent/pre-step', { agent: { session: s54 } }, async () => ({ kind: 'enter', messages: [] }))
+await settleFor(async () => (await realStore54.load(s54.id)).entries.find(item => item.id === entry54.id)?.handoff !== undefined)
+const recovered54 = (await realStore54.load(s54.id)).entries.find(item => item.id === entry54.id)?.handoff
+check('the next pre-step publishes the created branch for panel auto-open without retrying the backend',
+  recovered54?.state === 'created' && recovered54.branchId === 'branch-54'
+  && branchRequests54 === 1, JSON.stringify({ recovered54, branchRequests54 }))
+check('a recovered created branch is never recorded as failed', recovered54?.state === 'created', JSON.stringify(recovered54))
 await new Promise<void>(resolve => branchBackend54.close(() => { resolve() }))
 
 console.log('scenario 55: an in-place settle reports that it took effect')
