@@ -735,32 +735,32 @@ export class ReasoningDistillEngine {
    * @param error - why a panel-driven backend could not apply the rewrite.
    * @returns whether a running agent was found and asked to stop.
    */
-  handoff(sessionId: string, cancel = true, error?: string, entryId?: string, generation?: number): boolean {
+  async handoff(sessionId: string, cancel = true, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }> {
     // The panel tells us which attempt it is settling: a later compression can
     // install its own pending rewrite while an earlier request is still open, and
     // that successor must not be cleared or blamed for this attempt's failure.
-    if (entryId !== undefined && this.pendingBranch.get(sessionId) !== entryId) return false
-    if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return false
+    if (entryId !== undefined && this.pendingBranch.get(sessionId) !== entryId) return { ok: false, recorded: false }
+    if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return { ok: false, recorded: false }
     const pending = this.pendingBranch.get(sessionId)
     this.pendingBranch.delete(sessionId)
-    if (error !== undefined && pending !== undefined) {
-      void this.recordHandoff(sessionId, pending, { state: 'failed', error, at: Date.now() }, generation)
+    // The failure note is part of the contract, not a nicety: say whether it landed
+    // so the panel can ask again for the record (never for the backend request). A
+    // record-only retry passes just the entry id, and is answered the same way.
+    let recorded = true
+    const target = pending ?? entryId
+    if (error !== undefined && target !== undefined) {
+      recorded = await this.recordHandoff(sessionId, target, { state: 'failed', error, at: Date.now() }, generation)
     }
-    // The returned value means "this settle took effect" (the pending rewrite of
-    // that entry is gone). Ending a turn is a side effect, not the outcome: an
+    // `ok` means "this settle took effect": with nothing pending there was nothing
+    // of ours to settle. Ending a turn is a side effect, not the outcome — an
     // in-place settle never stops the turn yet has still settled successfully.
-    // Nothing pending means nothing settled, whatever the caller asked for.
-    if (pending === undefined) return false
-    if (!cancel) return true
+    if (pending === undefined) return { ok: error !== undefined, recorded }
+    if (!cancel) return { ok: true, recorded }
+    // Only a hand-off this plugin is completing may stop a turn: cancelling would
+    // otherwise let any same-origin caller end an unrelated session's turn.
     const agents = (this.ctx as unknown as { agents?: { get(id: string): { cancel(cause: { kind: string }): void } | undefined } }).agents
-    // Only a hand-off this plugin is completing may stop a turn: without a pending
-    // rewrite of ours there is nothing to hand over, and cancelling would let any
-    // same-origin caller end an unrelated session's turn.
-    if (!cancel || pending === undefined) return false
-    const agent = agents?.get(sessionId)
-    if (agent === undefined) return false
-    agent.cancel({ kind: 'user' })
-    return true
+    agents?.get(sessionId)?.cancel({ kind: 'user' })
+    return { ok: true, recorded }
   }
 
   /** The live session behind an id, when this engine still knows it. */

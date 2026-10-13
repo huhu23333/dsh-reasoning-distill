@@ -48,7 +48,7 @@ export function registerRoutes(
       generation: number
     }
     stock(sessionId: string): { tokens: number; saved: number; ids: string[] } | undefined
-    handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): boolean
+    handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }>
   },
 ): void {
   ctx.inject(['connection', 'sessions', 'llm'], (child) => {
@@ -141,7 +141,8 @@ export function registerRoutes(
           const failure = typeof body.error === 'string' && body.error !== '' ? body.error : undefined
           const entryId = typeof body.entryId === 'string' && body.entryId !== '' ? body.entryId : undefined
           const generation = typeof body.generation === 'number' ? body.generation : undefined
-          return json({ ok: engine.handoff(sessionId, body.cancel !== false, failure, entryId, generation) })
+          const settled = await engine.handoff(sessionId, body.cancel !== false, failure, entryId, generation)
+          return json(settled)
         } catch (error: unknown) {
           return json({ error: error instanceof Error ? error.message : String(error) }, 500)
         }

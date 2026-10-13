@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { isStaleResponse, rewriteApplyOutcome, rewriteRequest } from './ops.ts'
+import { backendById, isStaleResponse, rewriteApplyOutcome, rewriteRequest } from './ops.ts'
 import { HANDOFF_ROUTE, REPORT_ROUTE, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
@@ -205,7 +205,7 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
    * one (nothing to retry); `failed` means the request itself did not complete, so
    * the settle is still owed.
    */
-  const settleHandoff = async (current: SessionReport, entryId: string, error?: string): Promise<'settled' | 'refused' | 'failed'> => {
+  const settleHandoff = async (current: SessionReport, entryId: string, error?: string): Promise<{ verdict: 'settled' | 'refused' | 'failed'; recorded: boolean }> => {
     try {
       const response = await fetch(HANDOFF_ROUTE, {
         method: 'POST',
@@ -218,11 +218,12 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
           ...error === undefined ? {} : { error },
         }),
       })
-      if (!response.ok) return 'failed'
+      if (!response.ok) return { verdict: 'failed', recorded: true }
       const payload = await response.json().catch(() => null) as { ok?: unknown } | null
-      return payload?.ok === false ? 'refused' : 'settled'
+      const recorded = (payload as { recorded?: unknown } | null)?.recorded !== false
+      return { verdict: payload?.ok === false ? 'refused' : 'settled', recorded }
     } catch {
-      return 'failed'
+      return { verdict: 'failed', recorded: true }
     }
   }
   // Stamped when the view starts showing a session, not when its first report
@@ -273,9 +274,9 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     if (settlePending.current.has(attemptKey)) {
       // The rewrite is already in the history; only the host's pending flag is left.
       applyingPending.current.add(attemptKey)
-      void settleHandoff(current, pending, settlePending.current.get(attemptKey)).then(verdict => {
+      void settleHandoff(current, pending, settlePending.current.get(attemptKey)).then(({ verdict, recorded }) => {
         applyingPending.current.delete(attemptKey)
-        if (verdict !== 'failed') {
+        if (verdict !== 'failed' && recorded) {
           settlePending.current.delete(attemptKey)
           appliedPending.current.add(attemptKey)
         }
@@ -283,6 +284,10 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       return
     }
     if (appliedPending.current.has(attemptKey)) return
+    // A branch backend is driven by the host before the next model request; if the
+    // panel posted it too, the two non-idempotent requests would create two
+    // branches. The panel only ever drives in-place backends.
+    if (backendById(current.config.rewriteBackend)?.kind !== 'in-place') return
     const entry = current.entries.find(item => item.id === pending)
     if (entry === undefined) return
     // The engine caps the answer at maxOutputChars and replays that stored text;
@@ -300,33 +305,18 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     }).then(async response => {
       const payload: unknown = await response.json().catch(() => null)
       const outcome = rewriteApplyOutcome(response.ok, payload)
-      // A branch backend answers with the new session id: follow it, or the branch
-      // would exist with nobody looking at it.
-      const createdBranch = (payload as { sessionId?: unknown } | null)?.sessionId
-      if (outcome.done && typeof createdBranch === 'string' && createdBranch !== '') {
-        appliedPending.current.add(attemptKey)
-        if (!openedBranch.current.has(createdBranch)) {
-          openedBranch.current.add(createdBranch)
-          // Clear our pending marker (the branch exists either way).
-          void settleHandoff(current, pending)
-          // Only follow it while this view is still showing that session: the user
-          // may have navigated elsewhere while the request was in flight.
-          if (showingSession.current === current.sessionId) openSession(createdBranch)
-        }
-        return
-      }
       if (!outcome.done) {
         // A backend that refused must not look like a completed hand-off: record
         // why on the entry, and never re-post it (an in-place rewrite is not
         // idempotent). Only an unfinished settle is retried.
         const refusal = outcome.error ?? `HTTP ${response.status}`
-        const verdict = await settleHandoff(current, pending, refusal)
+        const { verdict, recorded } = await settleHandoff(current, pending, refusal)
         appliedPending.current.add(attemptKey)
-        if (verdict === 'failed') settlePending.current.set(attemptKey, refusal)
+        if (verdict === 'failed' || !recorded) settlePending.current.set(attemptKey, refusal)
         return
       }
-      const verdict = await settleHandoff(current, pending)
-      if (verdict === 'failed') {
+      const { verdict, recorded } = await settleHandoff(current, pending)
+      if (verdict === 'failed' || !recorded) {
         // Keep the rewrite and retry only the settle on a later poll instead of
         // re-posting a backend request that already succeeded.
         settlePending.current.set(attemptKey, undefined)
@@ -340,9 +330,9 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       // worse than a rewrite that did not land. Only an unfinished *settle* is
       // retried, so the host's pending flag cannot linger and trigger a re-post.
       const detail = error instanceof Error ? error.message : String(error)
-      const verdict = await settleHandoff(current, pending, detail)
+      const { verdict, recorded } = await settleHandoff(current, pending, detail)
       appliedPending.current.add(attemptKey)
-      if (verdict === 'failed') settlePending.current.set(attemptKey, detail)
+      if (verdict === 'failed' || !recorded) settlePending.current.set(attemptKey, detail)
     }).finally(() => {
       // Released once the attempt is over: whether to try again is decided by the
       // host's pending flag, not by this marker.
