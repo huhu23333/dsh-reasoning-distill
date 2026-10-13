@@ -2493,6 +2493,36 @@ const entry52 = (await store52.load(s52.id)).entries[0]!
 check('the skipped attempt is the entry that gets marked', entry52.skipped === true && entry52.sessionMissing === true,
   JSON.stringify({ skipped: entry52.skipped, missing: entry52.sessionMissing, id: entry52.id }))
 
+console.log('scenario 53: a stale in-place completion cannot settle a newer pending rewrite')
+handlers.clear()
+const store53 = new SidecarStore()
+const engine53 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store53)
+engine53.start()
+const s53 = new FakeSession('session-settle-53')
+sessions.set(s53.id, s53)
+await fire('session/created', s53)
+await runStep40(engine53, s53, '53a')
+await settleFor(async () => (await store53.load(s53.id)).entries.length === 1)
+const firstId = (await store53.load(s53.id)).entries[0]!.id
+// A later step installs its own pending rewrite, replacing the first one.
+await runStep40(engine53, s53, '53b')
+await settleFor(async () => (await store53.load(s53.id)).entries.length === 2)
+const second53 = (await store53.load(s53.id)).entries.find(entry => entry.id !== firstId)!
+const before53 = engine53.snapshot(s53.id).pendingBranch
+check('the newer attempt owns the pending hand-off', before53 === second53.id, JSON.stringify({ before: before53, second: second53.id }))
+// The panel's reply for the *older* attempt arrives now.
+const stale53 = engine53.handoff(s53.id, false, undefined, firstId, engine53.snapshot(s53.id).generation)
+check('a settle for the older attempt is refused', stale53 === false)
+check('and the newer attempt still owes its hand-off',
+  engine53.snapshot(s53.id).pendingBranch === second53.id, JSON.stringify(engine53.snapshot(s53.id).pendingBranch))
+// A settle from another generation is refused too.
+check('a settle from a different generation is refused',
+  engine53.handoff(s53.id, true, 'x', second53.id, engine53.snapshot(s53.id).generation + 1) === false
+  && engine53.snapshot(s53.id).pendingBranch === second53.id)
+check('and the attempt that does own it can settle',
+  engine53.handoff(s53.id, false, undefined, second53.id, engine53.snapshot(s53.id).generation) === false
+  && engine53.snapshot(s53.id).pendingBranch === null)
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1

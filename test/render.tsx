@@ -265,6 +265,15 @@ check('a non-2xx is a failure even without a body', !rewriteApplyOutcome(false, 
 check('the rewrite request carries the stored distilled text',
   rewriteRequest('msg-edit', 'session-1', { ...target, targetMessageId: 'm-12' }, 'capped').body['reasoning'] === 'capped')
 
+console.log('render: an undurable audit link is called out')
+const undurable = modernReport()
+undurable.entries[0]!.sessionMissing = true
+undurable.entries[0]!.distill.sessionId = 'session-audit-1'
+undurable.entries[0]!.sessionLive = true
+const undurableHtml = tryRender(<ReportBody report={undurable} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
+check('the panel says the audit log is not persistent even while it can be opened',
+  undurableHtml.includes('view.auditUndurable') && undurableHtml.includes('>view.open<'), undurableHtml.slice(0, 200))
+
 console.log('render: a report from an older host (version skew)')
 const legacy = modernReport()
 // Fields added by later host versions are absent, as they would be mid-upgrade.

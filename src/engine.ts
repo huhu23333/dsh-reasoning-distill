@@ -427,7 +427,11 @@ export class ReasoningDistillEngine {
     const event = session.eventAt(entry.targetSeq as Parameters<Session['eventAt']>[0])
     const message = event === undefined ? null : session.deriveEventMessage(event)
     if (message === null || message.id !== entry.targetMessageId) return false
-    return withDistilledReasoning(message, entry.distilledText) !== undefined
+    if (withDistilledReasoning(message, entry.distilledText) === undefined) return false
+    // The reasoning must still be the text this distillation came from: an edit in
+    // place (same id, same seq) must not be silently overwritten by stale output.
+    if (entry.originalHash !== undefined && hashText(reasoningTextOf(message)) !== entry.originalHash) return false
+    return true
   }
 
   /**
@@ -656,7 +660,12 @@ export class ReasoningDistillEngine {
    * @param error - why a panel-driven backend could not apply the rewrite.
    * @returns whether a running agent was found and asked to stop.
    */
-  handoff(sessionId: string, cancel = true, error?: string): boolean {
+  handoff(sessionId: string, cancel = true, error?: string, entryId?: string, generation?: number): boolean {
+    // The panel tells us which attempt it is settling: a later compression can
+    // install its own pending rewrite while an earlier request is still open, and
+    // that successor must not be cleared or blamed for this attempt's failure.
+    if (entryId !== undefined && this.pendingBranch.get(sessionId) !== entryId) return false
+    if (generation !== undefined && (this.generation.get(sessionId) ?? 0) !== generation) return false
     const pending = this.pendingBranch.get(sessionId)
     this.pendingBranch.delete(sessionId)
     if (error !== undefined && pending !== undefined) {
@@ -949,7 +958,7 @@ export class ReasoningDistillEngine {
    * @param sessionId - session being reported.
    * @returns running compressions and whether a step is currently blocked.
    */
-  snapshot(sessionId: string): { active: ActiveCompression[]; blockingSince: number | null; blockingReason: BlockingReason | null; pendingBranch: string | null } {
+  snapshot(sessionId: string): { active: ActiveCompression[]; blockingSince: number | null; blockingReason: BlockingReason | null; pendingBranch: string | null; generation: number } {
     const active: ActiveCompression[] = []
     for (const entry of this.running.values()) {
       if (entry.sessionId !== sessionId) continue
@@ -962,6 +971,7 @@ export class ReasoningDistillEngine {
       blockingSince: blocked?.since ?? null,
       blockingReason: blocked?.reason ?? null,
       pendingBranch: this.pendingBranch.get(sessionId) ?? null,
+      generation: this.generation.get(sessionId) ?? 0,
     }
   }
 
@@ -1099,6 +1109,8 @@ export class ReasoningDistillEngine {
     const generation = this.generation.get(session.id) ?? 0
     const stale = (): boolean => (this.generation.get(session.id) ?? 0) !== generation
     const reasoning = reasoningOf(target.content)
+    // Captured before any replacement: a later in-place edit must retire this entry.
+    const originalHash = hashText(reasoning)
     const maxInput = target.rule.maxInputChars
     // The reasoning is the *subject* of the rewrite, not context: silently sending
     // only its prefix would let the distiller drop decisions it never saw while
@@ -1168,6 +1180,7 @@ export class ReasoningDistillEngine {
           liveSaved: 0,
           liveRequests: 0,
           frozenSaved: 0,
+          originalHash,
           failed: true,
           ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, failedId) ? { sessionMissing: true as const } : {},
         })
@@ -1217,6 +1230,7 @@ export class ReasoningDistillEngine {
           liveSaved: 0,
           liveRequests: 0,
           frozenSaved: 0,
+          originalHash,
           skipped: true,
           ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, skippedId) ? { sessionMissing: true as const } : {},
         })
@@ -1262,6 +1276,7 @@ export class ReasoningDistillEngine {
       liveSaved: 0,
       liveRequests: 0,
       frozenSaved: 0,
+      originalHash,
       ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, adoptedId) ? { sessionMissing: true as const } : {},
     }
     await this.store.update(session.id, (record) => {
@@ -1356,12 +1371,41 @@ export class ReasoningDistillEngine {
         signal,
       })
       let sawFinish = false
-      for await (const chunk of stream) {
-        // Count as it arrives: a stream that throws part-way still generated
-        // this much output, and the estimate must reflect the spend.
-        if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') receivedChars += chunk.text.length
-        if (chunk.type === 'finish') sawFinish = true
-        assembler.push(chunk)
+      let timedOut = false
+      const collect = (async (): Promise<void> => {
+        for await (const chunk of stream) {
+          // Count as it arrives: a stream that throws part-way still generated
+          // this much output, and the estimate must reflect the spend.
+          if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') receivedChars += chunk.text.length
+          if (chunk.type === 'finish') sawFinish = true
+          assembler.push(chunk)
+        }
+      })()
+      if (target.rule.timeoutMs > 0) {
+        // An adapter that ignores its abort signal would otherwise keep this
+        // attempt alive past its own timeout and let a stale result land after the
+        // next request has already been sent. The deadline therefore ends the
+        // attempt here, and whatever the abandoned stream does later is ignored.
+        let timer: ReturnType<typeof setTimeout> | undefined
+        const deadline = new Promise<void>(resolve => {
+          timer = setTimeout(() => { timedOut = true; resolve() }, target.rule.timeoutMs)
+          timer.unref?.()
+        })
+        await Promise.race([collect, deadline])
+        if (timer !== undefined) clearTimeout(timer)
+        if (timedOut) {
+          // Bounded drain: a cooperative adapter hands over the usage it already
+          // produced (the attempt was paid for and must be reported), while the
+          // text is discarded below. The abandoned stream can no longer affect
+          // anything after this point.
+          await Promise.race([
+            collect.catch(() => undefined),
+            new Promise<void>(resolve => { const timer = setTimeout(resolve, 250); timer.unref?.() }),
+          ])
+          run.error = `timed out after ${target.rule.timeoutMs}ms`
+        }
+      } else {
+        await collect
       }
 
       // An interrupted or truncated stream can still carry text, but that text is
@@ -1372,7 +1416,8 @@ export class ReasoningDistillEngine {
       // A stream that ended without a finish event leaves the assembler at its
       // default kind, which says nothing about success: partial text must not be
       // substituted for a real distillation.
-      const usable = sawFinish && finish !== 'aborted' && finish !== 'error' && finish !== 'max-tokens'
+      // A timed-out attempt is never usable, whatever the adapter eventually sent.
+      const usable = !timedOut && sawFinish && finish !== 'aborted' && finish !== 'error' && finish !== 'max-tokens'
       let blocks: ContentBlock[] = []
       try { blocks = assembler.blocks() } catch { blocks = [] }
       const text = blocks.filter(block => block.type === 'text').map(block => block.text).join('').trim()
@@ -1610,6 +1655,27 @@ function collectToolResults(session: Session, turn: number, step: number): strin
  * @param text - distilled reasoning.
  * @returns the substituted message, or undefined when it has no reasoning.
  */
+/**
+ * Text of the reasoning blocks a message carries, in order.
+ * @param message - derived message.
+ * @returns the joined reasoning text.
+ */
+function reasoningTextOf(message: Message): string {
+  return message.content.filter(block => block.type === 'reasoning').map(block => block.text).join('\n')
+}
+
+/**
+ * Cheap stable digest of reasoning text, used to retire a rewrite whose source
+ * changed under it.
+ * @param text - the reasoning text.
+ * @returns a short hex digest.
+ */
+function hashText(text: string): string {
+  let hash = 5381
+  for (let index = 0; index < text.length; index += 1) hash = ((hash * 33) ^ text.charCodeAt(index)) | 0
+  return `${hash >>> 0}:${text.length}`
+}
+
 /**
  * Cheap order-sensitive fingerprint of a surface's node set.
  *

@@ -55,6 +55,8 @@ function SessionRow({ entry, t, openSession }: { entry: CompressionEntry; t: Tra
       <button type="button" className={css.iconButton} title={t('view.copy')} aria-label={t('view.copy')} onClick={() => { void navigator.clipboard.writeText(id).then(() => setCopied(true)).catch(() => setCopied(false)) }}><IconCopyOutlineRegular /></button>
       {copied && <span className={css.muted} role="status">{t('view.copied')}</span>}
       {id !== '' && !expired && <button type="button" className={css.secondary} onClick={() => openSession(id)}>{t('view.open')}</button>}
+      {entry.sessionMissing === true && !expired
+        && <span className={css.note}>{t('view.auditUndurable')}</span>}
     </div>}
   </div>
 }
@@ -176,7 +178,7 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   // One follow-up per session: the host creates the branch before the original
   // turn would have called the model, so all that is left here is to go there.
   const openedBranch = useRef(new Set<string>())
-  const appliedPending = useRef(new Set<string>())
+  const appliedPending = useRef(new Set<string>())  // keys: `${sessionId}:${entryId}`
   // Entries whose rewrite request is still open: the report polls every few
   // seconds, and a slow backend must not be asked twice for the same entry.
   const applyingPending = useRef(new Set<string>())
@@ -192,7 +194,8 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       return
     }
     const pending = current.pendingBranch
-    if (pending == null || appliedPending.current.has(pending) || applyingPending.current.has(pending)) return
+    const attemptKey = `${current.sessionId}:${pending}`
+    if (appliedPending.current.has(attemptKey) || applyingPending.current.has(attemptKey)) return
     const entry = current.entries.find(item => item.id === pending)
     if (entry === undefined) return
     // The engine caps the answer at maxOutputChars and replays that stored text;
@@ -204,9 +207,15 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     const settle = (error?: string): Promise<void> => fetch(HANDOFF_ROUTE, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ sessionId: current.sessionId, cancel: false, ...error === undefined ? {} : { error } }),
+      body: JSON.stringify({
+        sessionId: current.sessionId,
+        cancel: false,
+        entryId: pending,
+        generation: current.generation,
+        ...error === undefined ? {} : { error },
+      }),
     }).then(() => undefined).catch(() => undefined)
-    applyingPending.current.add(pending)
+    applyingPending.current.add(attemptKey)
     void fetch(request.path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -220,14 +229,14 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
         await settle(outcome.error ?? `HTTP ${response.status}`)
         return
       }
-      appliedPending.current.add(pending)
+      appliedPending.current.add(attemptKey)
       await settle()
     }).catch(async (error: unknown) => {
       await settle(error instanceof Error ? error.message : String(error))
     }).finally(() => {
       // Released once the attempt is over: whether to try again is decided by the
       // host's pending flag, not by this marker.
-      applyingPending.current.delete(pending)
+      applyingPending.current.delete(attemptKey)
     })
   }, [cache, sessionId, openSession])
   const current = cache[sessionId]

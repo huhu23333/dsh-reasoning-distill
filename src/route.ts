@@ -45,9 +45,10 @@ export function registerRoutes(
       blockingSince: number | null
       blockingReason: BlockingReason | null
       pendingBranch: string | null
+      generation: number
     }
     stock(sessionId: string): { tokens: number; saved: number; ids: string[] } | undefined
-    handoff(sessionId: string, cancel?: boolean, error?: string): boolean
+    handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): boolean
   },
 ): void {
   ctx.inject(['connection', 'sessions', 'llm'], (child) => {
@@ -132,13 +133,15 @@ export function registerRoutes(
       // same way the user's own stop button stops it.
       fetch: async (request: Request): Promise<Response> => {
         try {
-          const body = await request.json() as { sessionId?: unknown; cancel?: unknown; error?: unknown }
+          const body = await request.json() as { sessionId?: unknown; cancel?: unknown; error?: unknown; entryId?: unknown; generation?: unknown }
           const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
           if (sessionId === '') return json({ error: 'sessionId is required' }, 400)
           // In-place backends rewrite the history the turn keeps using, so their
           // hand-off clears the pending flag without stopping the conversation.
           const failure = typeof body.error === 'string' && body.error !== '' ? body.error : undefined
-          return json({ ok: engine.handoff(sessionId, body.cancel !== false, failure) })
+          const entryId = typeof body.entryId === 'string' && body.entryId !== '' ? body.entryId : undefined
+          const generation = typeof body.generation === 'number' ? body.generation : undefined
+          return json({ ok: engine.handoff(sessionId, body.cancel !== false, failure, entryId, generation) })
         } catch (error: unknown) {
           return json({ error: error instanceof Error ? error.message : String(error) }, 500)
         }

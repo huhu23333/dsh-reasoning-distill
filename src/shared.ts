@@ -122,6 +122,8 @@ export interface SessionReport {
    * backend, or null. The panel applies it and then calls the hand-off route.
    */
   pendingBranch?: string | null
+  /** Session generation, quoted back when settling a hand-off. */
+  generation?: number
   /** savedTotal − distillCost − cacheBreakCost. */
   net: number
   triggers: number

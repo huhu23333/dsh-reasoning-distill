@@ -47,6 +47,8 @@ export function buildReport(
     stock?: { tokens: number; saved: number; ids: string[] }
     /** Clock used to price the fallback stock; defaults to now. */
     now?: number
+    /** Session generation the panel must quote when settling a hand-off. */
+    generation?: number
     /** Entry awaiting a backend hand-off, when one is owed. */
     pendingBranch?: string | null
   } = { active: [], blockingSince: null, blockingReason: null },
@@ -150,6 +152,7 @@ export function buildReport(
       peak: peakInfo(config),
     },
     pendingBranch: live.pendingBranch ?? null,
+    generation: live.generation ?? 0,
     active: live.active,
     blockingSince: live.blockingSince,
     blockingReason: live.blockingReason,

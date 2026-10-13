@@ -1,6 +1,7 @@
 export const NS = 'reasoningDistill'
 
 export const zh = {
+  'view.auditUndurable': '未写入持久日志（当前可打开，重启后消失）',
   'view.sessions': '压缩会话', 'view.sessionExpired': '会话已随上次运行结束（内容见下方明细）',
   'settings.maxInput': '背景块长度上限（字符）', 'settings.maxOutput': '蒸馏结果长度上限（字符）',
   'settings.branchTimeout': '分支超时（毫秒）', 'settings.branchTimeoutHint': '宿主等待分支型后端建好分支的时限；超时就按“无事发生”继续原会话。仅分支型后端使用，0 = 永不超时。', 'view.branchCreated': '已创建分支', 'view.branchKept': '已按原会话继续',
@@ -76,6 +77,7 @@ export const zh = {
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
+  'view.auditUndurable': 'not written to a persistent log (openable now, gone after a restart)',
   'view.sessions': 'Distillation sessions', 'view.sessionExpired': 'session ended with the previous run (full text below)',
   'settings.maxInput': 'Context block limit (chars)', 'settings.maxOutput': 'Distilled result limit (chars)',
   'settings.branchTimeout': 'Branch timeout (ms)', 'settings.branchTimeoutHint': 'How long the host waits for a branch backend before carrying on in the original conversation; only used by branch-type backends. 0 waits forever.', 'view.branchCreated': 'Branch created', 'view.branchKept': 'the original conversation carried on',

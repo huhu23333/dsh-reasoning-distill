@@ -11,7 +11,7 @@
  */
 
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -57,6 +57,11 @@ export interface StoredEntry {
    * substitution simply never happened.
    */
   skipped?: true
+  /**
+   * Cheap digest of the reasoning this rewrite was distilled from. A message
+   * edited in place under the same id must stop receiving this distillation.
+   */
+  originalHash?: string
   /**
    * What happened when this rewrite was handed to a branch backend. Absent means
    * no backend was selected when it was recorded.
@@ -248,6 +253,14 @@ export class SidecarStore {
         // prompts/responses and tool output, so neither the directory nor the
         // record may be readable by other users on the host.
         await mkdir(dir, { recursive: true, mode: 0o700 })
+        // `mkdir` does not tighten a directory that already exists, and this one
+        // names sessions by id: an installation that created it 0755 would expose
+        // the file names to other local users even though each file is 0600.
+        const info = await stat(dir).catch(() => undefined)
+        if (info === undefined || !info.isDirectory()) {
+          throw new Error(`reasoning-distill: ${dir} is not a directory`)
+        }
+        await chmod(dir, 0o700).catch(() => undefined)
         const target = fileFor(sessionId)
         // Unique per write: two stores (a reload, a second instance in tests) can
         // otherwise pick the same name in the same millisecond and one rename then
