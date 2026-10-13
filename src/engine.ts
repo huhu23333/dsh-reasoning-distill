@@ -761,10 +761,18 @@ export class ReasoningDistillEngine {
   }
 
   /** Remember a hand-off note that could not be written, so the next pre-step retries it. */
-  private oweNote(sessionId: string, entryId: string, outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number }): void {
+  private oweNote(sessionId: string, entryId: string, outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number }, order: number): void {
     const key = `${sessionId}:${entryId}`
-    this.owedHandoffNotes.set(key, { entryId, outcome, order: this.handoffOrder.get(key) ?? 0 })
+    this.owedHandoffNotes.set(key, { entryId, outcome, order })
     this.ctx.logger.warn('reasoning-distill: hand-off note for %s could not be written yet; it will be retried', entryId)
+  }
+
+  /** Assign each attempt its order before its asynchronous store write starts. */
+  private nextHandoffOrder(sessionId: string, entryId: string): number {
+    const key = `${sessionId}:${entryId}`
+    const order = (this.handoffOrder.get(key) ?? 0) + 1
+    this.handoffOrder.set(key, order)
+    return order
   }
 
   /** Observe the write after a canceled wait, so a late failure remains retryable. */
@@ -774,8 +782,9 @@ export class ReasoningDistillEngine {
     outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number },
     generation: number,
   ): Promise<boolean> {
-    const recorded = await this.recordHandoff(sessionId, entryId, outcome, generation)
-    if (!recorded && (this.generation.get(sessionId) ?? 0) === generation) this.oweNote(sessionId, entryId, outcome)
+    const order = this.nextHandoffOrder(sessionId, entryId)
+    const recorded = await this.recordHandoff(sessionId, entryId, outcome, generation, undefined, order)
+    if (!recorded && (this.generation.get(sessionId) ?? 0) === generation) this.oweNote(sessionId, entryId, outcome, order)
     return recorded
   }
 
@@ -814,10 +823,10 @@ export class ReasoningDistillEngine {
     outcome: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number },
     generation?: number,
     replayOrder?: number,
+    attemptOrder?: number,
   ): Promise<boolean> {
     const key = `${sessionId}:${entryId}`
-    const order = replayOrder ?? (this.handoffOrder.get(key) ?? 0) + 1
-    if (replayOrder === undefined) this.handoffOrder.set(key, order)
+    const order = replayOrder ?? attemptOrder ?? this.nextHandoffOrder(sessionId, entryId)
     let written = false
     try {
       await this.store.update(sessionId, (record) => {
@@ -872,9 +881,10 @@ export class ReasoningDistillEngine {
     if (!mine) {
       if (error === undefined || entryId === undefined) return { ok: false, recorded: false }
       const outcome = { state: 'failed' as const, error, at: Date.now() }
-      const retried = await this.recordHandoff(sessionId, entryId, outcome, generation)
+      const order = this.nextHandoffOrder(sessionId, entryId)
+      const retried = await this.recordHandoff(sessionId, entryId, outcome, generation, undefined, order)
       if (!retried && (generation === undefined || (this.generation.get(sessionId) ?? 0) === generation)) {
-        this.oweNote(sessionId, entryId, outcome)
+        this.oweNote(sessionId, entryId, outcome, order)
       }
       return { ok: false, recorded: retried }
     }
@@ -885,10 +895,12 @@ export class ReasoningDistillEngine {
     let recorded = true
     const target = pending ?? entryId
     if (error !== undefined && target !== undefined) {
-      recorded = await this.recordHandoff(sessionId, target, { state: 'failed', error, at: Date.now() }, generation)
+      const outcome = { state: 'failed' as const, error, at: Date.now() }
+      const order = this.nextHandoffOrder(sessionId, target)
+      recorded = await this.recordHandoff(sessionId, target, outcome, generation, undefined, order)
       // The panel's own retry dies with its tab: keep the note host-side too, so
       // closing the panel cannot make a failed backend operation invisible.
-      if (!recorded) this.oweNote(sessionId, target, { state: 'failed', error, at: Date.now() })
+      if (!recorded) this.oweNote(sessionId, target, outcome, order)
     }
     // `ok` means "this settle took effect": with nothing pending there was nothing
     // of ours to settle. Ending a turn is a side effect, not the outcome — an
@@ -1675,8 +1687,9 @@ export class ReasoningDistillEngine {
         // only the branch hand-off is skipped after the original turn was released.
         const reason = 'branch hand-off skipped after the wait deadline'
         const outcome = { state: 'skipped' as const, error: reason, at: Date.now() }
-        const noted = await this.recordHandoff(session.id, entry.id, outcome, generation)
-        if (!noted && !stale()) this.oweNote(session.id, entry.id, outcome)
+        const order = this.nextHandoffOrder(session.id, entry.id)
+        const noted = await this.recordHandoff(session.id, entry.id, outcome, generation, undefined, order)
+        if (!noted && !stale()) this.oweNote(session.id, entry.id, outcome, order)
       } else this.pendingBranch.set(session.id, entry.id)
     }
     this.ctx.logger.info(
