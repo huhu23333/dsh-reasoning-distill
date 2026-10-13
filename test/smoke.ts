@@ -2465,6 +2465,34 @@ const entry51 = (await store51.load(s51.id)).entries[0]!
 check('a flush that rejects before the insert still marks the entry',
   entry51.sessionMissing === true && entry51.distilledText !== '', JSON.stringify({ missing: entry51.sessionMissing }))
 
+console.log('scenario 52: a failed flush marks the entry the attempt was recorded as')
+handlers.clear()
+const store52 = new SidecarStore()
+const ctx52 = {
+  ...ctx,
+  sessions: {
+    ...(ctx as unknown as { sessions: Record<string, unknown> }).sessions,
+    flush: () => Promise.reject(new Error('no disk')),
+  },
+}
+// A distiller answer worth less than the threshold, so the attempt is "skipped".
+const skipRule = { ...rule7, minSavedTokens: 100000, maxInputChars: 200000 }
+const cfg52 = {
+  ...(makeConfig() as unknown as Record<string, unknown>),
+  defaultRule: { get: () => skipRule },
+} as never
+const engine52 = new ReasoningDistillEngine(ctx52 as never, cfg52 as never, store52)
+engine52.start()
+const s52 = new FakeSession('session-skip-52')
+sessions.set(s52.id, s52)
+await fire('session/created', s52)
+await runStep40(engine52, s52, '52')
+await settleFor(async () => (await store52.load(s52.id)).entries.length === 1)
+await settleFor(async () => (await store52.load(s52.id)).entries[0]!.sessionMissing === true)
+const entry52 = (await store52.load(s52.id)).entries[0]!
+check('the skipped attempt is the entry that gets marked', entry52.skipped === true && entry52.sessionMissing === true,
+  JSON.stringify({ skipped: entry52.skipped, missing: entry52.sessionMissing, id: entry52.id }))
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1

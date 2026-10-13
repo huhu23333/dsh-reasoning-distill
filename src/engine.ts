@@ -1155,7 +1155,6 @@ export class ReasoningDistillEngine {
     }
     const ceiling = target.rule.maxOutputChars
     const distilled = ceiling > 0 && outcome.text.length > ceiling ? outcome.text.slice(0, ceiling) : outcome.text
-    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, adoptedId)
     const originalTokens = estimateChars(reasoning.length)
     const distilledTokens = estimateChars(distilled.length)
     const saved = originalTokens - distilledTokens
@@ -1164,6 +1163,9 @@ export class ReasoningDistillEngine {
         'reasoning-distill: skipped rewrite for %s (saved %d < %d tokens)',
         target.model, saved, target.rule.minSavedTokens,
       )
+      // Settle the audit session under the id this attempt will actually be
+      // recorded as: a late failure must mark that entry, not the adopted one.
+      this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, skippedId)
       // The distiller was paid for, so the attempt is recorded even though the
       // rewrite was not adopted: otherwise the report understates the spend and
       // hides the audit session entirely.
@@ -1200,6 +1202,7 @@ export class ReasoningDistillEngine {
       })
       return
     }
+    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, adoptedId)
     // A substitution moves everything from the rewritten message to the end of
     // the next request out of the cache-hit prefix and into miss pricing.
     const { bucket: prices } = priceAt(target.model, this.config.prices.get(), startedAt, this.config)
@@ -1238,7 +1241,7 @@ export class ReasoningDistillEngine {
       liveSaved: 0,
       liveRequests: 0,
       frozenSaved: 0,
-      ...sessionId === '' || !opened.durable ? { sessionMissing: true as const } : {},
+      ...sessionId === '' || !opened.durable || this.auditBroken.has(`${session.id}:${adoptedId}`) ? { sessionMissing: true as const } : {},
     }
     await this.store.update(session.id, (record) => {
       if (stale()) return
