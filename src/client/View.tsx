@@ -344,7 +344,7 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
     {report && <>
       <div className={css.summary}>
         <div><span>{t('view.triggers')}</span><strong>{t('view.succeeded')} {count(report.succeeded)}</strong><small>{t('view.attempts')} {count(report.triggers)} · {t('view.estimate')} {signedCount(-lifetimeTokens)} {t('view.tokens')} {t('view.historical')}</small></div>
-        <div><span>{t('view.distillCost')}</span><strong>{signedMoney(report.distillCost)}</strong><small>{count(report.entries.reduce((sum, entry) => sum + entry.distill.inputTokens + entry.distill.outputTokens, 0))} token</small></div>
+        <div><span>{t('view.distillCost')}</span><strong>{signedMoney(report.distillCost)}</strong><small>{count(report.entries.reduce((sum, entry) => sum + entry.distill.inputTokens + entry.distill.cacheReadTokens + entry.distill.cacheWriteTokens + entry.distill.outputTokens, 0))} token</small></div>
         <div><span>{t('view.stock')}</span><strong>{signedMoney(-stockSaved)}</strong><small>{t('view.estimate')} {signedCount(-stockTokens)} {t('view.tokens')} · {t('view.stockNote')}</small></div>
         <div><span>{t('view.savedTotal')}</span><strong>{signedMoney(-report.savedTotal)}</strong><small>{t('view.estimate')} {signedCount(-lifetimeTokens)} {t('view.tokens')} {t('view.lifetime')}</small></div>
         <div><span>{t('view.net')}</span><strong className={report.net < 0 ? css.negative : css.positive}>{signedMoney(-report.net)}</strong><small>{t('view.estimate')} {signedCount(-lifetimeTokens)} {t('view.tokens')} {t('view.lifetime')}</small></div>
