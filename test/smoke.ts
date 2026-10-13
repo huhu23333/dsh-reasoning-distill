@@ -2419,6 +2419,52 @@ check('a rejected flush marks the audit link as missing', entry49.sessionMissing
   JSON.stringify({ missing: entry49.sessionMissing, session: entry49.distill.sessionId }))
 check('and the compression itself still landed', entry49.distilledText !== '')
 
+console.log('scenario 50: a stream without a finish event is not a distillation')
+handlers.clear()
+// The host's assembler reports `stop` when a stream just ends, so the plugin must
+// insist on having seen the finish chunk itself.
+const noFinishLlm = {
+  stream() {
+    return (async function* gen() {
+      yield { type: 'text-delta', index: 0, text: 'Partial thought that never finished.' }
+    })()
+  },
+}
+const store50 = new SidecarStore()
+const engine50 = new ReasoningDistillEngine({ ...ctx, llm: noFinishLlm } as never, cfg10 as never, store50)
+engine50.start()
+const s50 = new FakeSession('session-nofinish-50')
+sessions.set(s50.id, s50)
+await fire('session/created', s50)
+await runStep40(engine50, s50, '50')
+await settleFor(async () => (await store50.load(s50.id)).entries.length === 1)
+const entry50 = (await store50.load(s50.id)).entries[0]!
+check('an unfinished stream is recorded as failed', entry50.failed === true, JSON.stringify({ failed: entry50.failed }))
+check('and its partial text is never substituted',
+  !s50.deriveMessages().some(message => JSON.stringify(message).includes('Partial thought that never finished')))
+
+console.log('scenario 51: a fast audit failure still marks the entry, and a failed retry keeps an adopted one')
+handlers.clear()
+const store51 = new SidecarStore()
+// The flush rejects immediately, before the entry has been inserted.
+const raceCtx51 = {
+  ...ctx,
+  sessions: {
+    ...(ctx as unknown as { sessions: Record<string, unknown> }).sessions,
+    flush: () => Promise.reject(new Error('no disk')),
+  },
+}
+const engine51 = new ReasoningDistillEngine(raceCtx51 as never, cfg10 as never, store51)
+engine51.start()
+const s51 = new FakeSession('session-audit-51')
+sessions.set(s51.id, s51)
+await fire('session/created', s51)
+await runStep40(engine51, s51, '51')
+await settleFor(async () => (await store51.load(s51.id)).entries.length === 1)
+const entry51 = (await store51.load(s51.id)).entries[0]!
+check('a flush that rejects before the insert still marks the entry',
+  entry51.sessionMissing === true && entry51.distilledText !== '', JSON.stringify({ missing: entry51.sessionMissing }))
+
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
 process.exitCode = failures === 0 ? 0 : 1

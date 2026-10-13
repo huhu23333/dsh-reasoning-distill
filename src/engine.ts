@@ -113,6 +113,8 @@ export class ReasoningDistillEngine {
   private readonly expectRequest = new Set<string>()
   /** Per-compression wait bound: its rule's distillation timeout, 0 = unbounded. */
   private readonly waitBound = new Map<string, number>()
+  /** Audit links known to be non-durable, keyed `sessionId:entryId`. */
+  private readonly auditBroken = new Set<string>()
   /** Bumped whenever a session id is attached again; stale work checks it. */
   private readonly generation = new Map<string, number>()
   /** The session object currently attached for an id; late events are ignored. */
@@ -578,6 +580,9 @@ export class ReasoningDistillEngine {
    * @param entryId - entry whose audit link is broken.
    */
   private async markAuditUndurable(sessionId: string, entryId: string): Promise<void> {
+    // Remembered as well as written: a flush can reject before the entry is even
+    // inserted, and then the entry must be born marked rather than marked later.
+    this.auditBroken.add(`${sessionId}:${entryId}`)
     const generation = this.generation.get(sessionId) ?? 0
     try {
       await this.store.update(sessionId, (record) => {
@@ -1090,6 +1095,11 @@ export class ReasoningDistillEngine {
     const prompt = this.config.prompt.get() || DEFAULT_PROMPT
     const startedAt = Date.now()
     const opened = await this.createCompressionSession(session, prompt, userText)
+    // The three shapes an attempt can be recorded in; the audit-link marker needs
+    // the same ids, and it can arrive before the entry exists.
+    const failedId = `${target.seq}-${startedAt}-failed`
+    const skippedId = `${target.seq}-${startedAt}-skipped`
+    const adoptedId = `${target.seq}-${startedAt}`
     const sessionId = opened.id
     if (!opened.ok) {
       this.ctx.logger.warn(
@@ -1105,7 +1115,7 @@ export class ReasoningDistillEngine {
       // reasoning stays raw and nothing is substituted, so the session keeps
       // working; the failed compression session stays for inspection, and the
       // attempt is still recorded so its spending is not invisible.
-      this.failCompressionSession(sessionId, outcome.run.error ?? 'distiller returned no text', session.id, `${target.seq}-${startedAt}-failed`)
+      this.failCompressionSession(sessionId, outcome.run.error ?? 'distiller returned no text', session.id, failedId)
       this.ctx.logger.warn(
         'reasoning-distill: gave up on %s after %dms: %s',
         target.model, outcome.run.durationMs, outcome.run.error ?? 'empty answer',
@@ -1113,9 +1123,9 @@ export class ReasoningDistillEngine {
       if (stale()) return
       await this.store.update(session.id, (record) => {
       if (stale()) return
-      record.entries = record.entries.filter(item => item.targetSeq !== target.seq)
+      record.entries = record.entries.filter(item => item.targetSeq !== target.seq || (item.failed !== true && item.skipped !== true))
         record.entries.push({
-          id: `${target.seq}-${startedAt}-failed`,
+          id: failedId,
           targetSeq: target.seq,
           targetMessageId: target.messageId,
           targetBlockIndex: target.reasoningBlockIndex,
@@ -1138,14 +1148,14 @@ export class ReasoningDistillEngine {
           liveRequests: 0,
           frozenSaved: 0,
           failed: true,
-          ...sessionId === '' || !opened.durable ? { sessionMissing: true as const } : {},
+          ...sessionId === '' || !opened.durable || this.auditBroken.has(`${session.id}:${failedId}`) ? { sessionMissing: true as const } : {},
         })
       })
       return
     }
     const ceiling = target.rule.maxOutputChars
     const distilled = ceiling > 0 && outcome.text.length > ceiling ? outcome.text.slice(0, ceiling) : outcome.text
-    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, `${target.seq}-${startedAt}`)
+    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, adoptedId)
     const originalTokens = estimateChars(reasoning.length)
     const distilledTokens = estimateChars(distilled.length)
     const saved = originalTokens - distilledTokens
@@ -1160,9 +1170,9 @@ export class ReasoningDistillEngine {
       if (stale()) return
       await this.store.update(session.id, (record) => {
       if (stale()) return
-      record.entries = record.entries.filter(item => item.targetSeq !== target.seq)
+      record.entries = record.entries.filter(item => item.targetSeq !== target.seq || (item.failed !== true && item.skipped !== true))
         record.entries.push({
-          id: `${target.seq}-${startedAt}-skipped`,
+          id: skippedId,
           targetSeq: target.seq,
           targetMessageId: target.messageId,
           targetBlockIndex: target.reasoningBlockIndex,
@@ -1185,7 +1195,7 @@ export class ReasoningDistillEngine {
           liveRequests: 0,
           frozenSaved: 0,
           skipped: true,
-          ...sessionId === '' || !opened.durable ? { sessionMissing: true as const } : {},
+          ...sessionId === '' || !opened.durable || this.auditBroken.has(`${session.id}:${skippedId}`) ? { sessionMissing: true as const } : {},
         })
       })
       return
@@ -1206,7 +1216,7 @@ export class ReasoningDistillEngine {
     const cacheBreakTokens = 0
     const cacheBreakCost = 0
     const entry: StoredEntry = {
-      id: `${target.seq}-${startedAt}`,
+      id: adoptedId,
       targetSeq: target.seq,
       targetMessageId: target.messageId,
       targetBlockIndex: target.reasoningBlockIndex,
@@ -1321,10 +1331,12 @@ export class ReasoningDistillEngine {
         messages: [createUserMessage({ content: [{ type: 'text', text: userText }], source: { kind: 'user' } })],
         signal,
       })
+      let sawFinish = false
       for await (const chunk of stream) {
         // Count as it arrives: a stream that throws part-way still generated
         // this much output, and the estimate must reflect the spend.
         if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') receivedChars += chunk.text.length
+        if (chunk.type === 'finish') sawFinish = true
         assembler.push(chunk)
       }
 
@@ -1333,7 +1345,10 @@ export class ReasoningDistillEngine {
       // `aborted`/`error` were cut off by failure, `max-tokens` was cut off mid
       // answer. Unknown kinds keep working, as the finish union is extensible.
       const finish = assembler.finish.kind
-      const usable = finish !== 'aborted' && finish !== 'error' && finish !== 'max-tokens'
+      // A stream that ended without a finish event leaves the assembler at its
+      // default kind, which says nothing about success: partial text must not be
+      // substituted for a real distillation.
+      const usable = sawFinish && finish !== 'aborted' && finish !== 'error' && finish !== 'max-tokens'
       let blocks: ContentBlock[] = []
       try { blocks = assembler.blocks() } catch { blocks = [] }
       const text = blocks.filter(block => block.type === 'text').map(block => block.text).join('').trim()
