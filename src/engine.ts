@@ -944,7 +944,11 @@ export class ReasoningDistillEngine {
     // A distillation is only useful when some companion can write the result into
     // the session's own history. With no backend selected the panel forces the
     // master switch off; this is the belt-and-braces half of the same rule.
-    if (this.config.rewriteBackend.get() === '') return model
+    // The same rule the settings page enforces: an unknown backend id (its plugin
+    // was removed or renamed, or the config was edited by hand) must not enable
+    // spending or substitution, because the result could never be written into the
+    // history.
+    if (backendById(this.config.rewriteBackend.get()) === undefined) return model
     // A canceled step is not an answer: the host still appends `step/end` after
     // an abort (agent-loop), so staging here would spend a distillation on
     // partial reasoning and hold the next request until it finished. Accounting
@@ -1516,7 +1520,7 @@ export class ReasoningDistillEngine {
     // Follow the decision the mutation actually made: the wait bound can expire
     // while the queued write is in flight, and re-checking it here would adopt the
     // rewrite yet refuse to hand it over.
-    if (adopted && !stale() && this.config.enabled.get() && this.config.rewriteBackend.get() !== '') {
+    if (adopted && !stale() && this.config.enabled.get() && backendById(this.config.rewriteBackend.get()) !== undefined) {
       this.pendingBranch.set(session.id, entry.id)
     }
     this.ctx.logger.info(
