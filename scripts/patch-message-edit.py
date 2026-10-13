@@ -22,11 +22,36 @@ import sys
 
 DRIFTED = 'require("@deepseek-ai/dsh-client-runtime/client")'
 FIXED = 'require("@deepseek-ai/dsh-client-store")'
-DEFAULT = pathlib.Path.home() / ".dsh/profiles/web/node_modules/dsh-message-edit/client.js"
+#: Every known package that ships the same drifted client import.
+CANDIDATES = (
+    "dsh-message-edit",
+    "@yunyv/dsh-message-edit",
+)
+
+
+def installed_candidates() -> list[pathlib.Path]:
+    """Client bundles of every known package, installed or not."""
+    import os
+    roots = [pathlib.Path.home() / ".dsh/profiles/web/node_modules"]
+    roots.extend(pathlib.Path(p) / "node_modules" for p in os.environ.get("DSH_PLUGIN_ROOTS", "").split(":") if p)
+    return [root / name / "client.js" for root in roots for name in CANDIDATES]
 
 
 def main() -> int:
-    target = pathlib.Path(sys.argv[1]).expanduser() if len(sys.argv) > 1 else DEFAULT
+    if len(sys.argv) == 1:
+        present = [p for p in installed_candidates() if p.is_file()]
+        if not present:
+            print("none of the known packages are installed; looked for:")
+            for candidate in installed_candidates():
+                print(f"  {candidate}")
+            print("install one first: dsh plugin --profile web add dsh-message-edit")
+            return 1
+        codes = [patch(path) for path in present]
+        return max(codes)
+    return patch(pathlib.Path(sys.argv[1]).expanduser())
+
+
+def patch(target: pathlib.Path) -> int:
     if not target.is_file():
         print(f"not found: {target}")
         print("install the plugin first: dsh plugin --profile web add dsh-message-edit")

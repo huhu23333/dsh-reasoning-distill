@@ -299,6 +299,14 @@ registered package factory (a build-time externals drift …)
 +require("@deepseek-ai/dsh-client-store")
 ```
 
+同族衍生包 **`@yunyv/dsh-message-edit`（0.2.8）** 有**同样**的漂移导入、**同样**的端点 `/message-edit` 与 **同样**支持 `assistant.reasoning`——我们的桥接对两者都适用。补丁脚本已能**自动发现并修补**这两个包（无需参数）：
+
+```bash
+python3 scripts/patch-message-edit.py           # 自动修补已安装的 dsh-message-edit / @yunyv/dsh-message-edit
+DSH_PLUGIN_ROOTS=/some/profile python3 scripts/patch-message-edit.py   # 指定其他 profile
+python3 scripts/patch-message-edit.py <client.js 路径>                  # 指定单个文件
+```
+
 **安装方式（任选其一）**：
 
 1. **用打好补丁的包**：`vendor/dsh-message-edit-patched1.tgz`（已改名 `dsh-message-edit-patched`、版本 `0.2.3-patched1`）。
