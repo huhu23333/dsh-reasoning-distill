@@ -953,6 +953,14 @@ export class ReasoningDistillEngine {
     if (tokens < rule.thresholdTokens) return model
     const hasToolCall = message.content.some(block => block.type === 'tool-call')
     if (!hasToolCall && !rule.includeFinalTurns) return model
+    // The replay folds every reasoning block of a message into one, while a branch
+    // backend replaces a single block: compressing a multi-block message would
+    // leave its other originals in the branch and leak uncompressed reasoning.
+    const reasoningBlocks = (message.content ?? []).filter(block => block.type === 'reasoning').length
+    if (reasoningBlocks !== 1) {
+      this.ctx.logger.debug('reasoning-distill: leaving a %d-block reasoning message uncompressed', reasoningBlocks)
+      return model
+    }
     const key = this.pendingKey(session.id, data.turn ?? 0, data.step ?? 0)
     this.pending.set(key, {
       sessionId: session.id,

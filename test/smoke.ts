@@ -530,7 +530,6 @@ const replayFixture = {
     response: { id: 'r-1', model: 'deepseek-flash' },
     blocks: [
       { type: 'reasoning', thinkingSignature: 'SIG-A' },
-      { type: 'reasoning', signature: 'SIG-B' },
       { type: 'text', textSignature: 'TEXT-SIG' },
     ],
   },
@@ -551,8 +550,9 @@ const seq10 = s10.append('assistant/message', {
   turn: 1, step: 1,
   message: {
     id: 'durable-assistant-id', role: 'assistant',
+    // One reasoning block: multi-block messages are deliberately left
+    // uncompressed (a branch backend replaces a single block).
     content: [
-      { type: 'reasoning', text: fatReasoning },
       { type: 'reasoning', text: fatReasoning },
       { type: 'text', text: 'done' },
     ],
@@ -569,13 +569,45 @@ const derived10 = s10.deriveMessages().find(message => (message as { id?: string
   content: Array<{ type: string; text?: string }>
   source: { replayState?: { blocks?: Array<Record<string, unknown>> } }
 }
-check('every reasoning block is folded into one rewrite', derived10.content.filter(block => block.type === 'reasoning').length === 1)
+check('the message keeps exactly one reasoning block after the rewrite', derived10.content.filter(block => block.type === 'reasoning').length === 1)
 check('the durable message identity survives derivation', derived10.id === 'durable-assistant-id')
 const replay10 = derived10.source.replayState?.blocks ?? []
 check('replay stays aligned with the new content', replay10.length === derived10.content.length, `${replay10.length} vs ${derived10.content.length}`)
 check('no signature survives next to rewritten text',
-  !JSON.stringify(replay10).includes('SIG-A') && !JSON.stringify(replay10).includes('SIG-B') && !JSON.stringify(replay10).includes('thinkingSignature'))
+  !JSON.stringify(replay10).includes('SIG-A') && !JSON.stringify(replay10).includes('thinkingSignature'))
 check('untouched text keeps its own replay payload', JSON.stringify(replay10).includes('TEXT-SIG'))
+
+console.log('scenario 10a: a multi-reasoning message is left uncompressed')
+handlers.clear()
+const store10a = new SidecarStore()
+const engine10a = new ReasoningDistillEngine(ctx as never, cfg10 as never, store10a)
+engine10a.start()
+const s10a = new FakeSession('session-multiblock')
+sessions.set(s10a.id, s10a)
+await fire('session/created', s10a)
+s10a.append('user/message', { id: 'u10a', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const seq10a = s10a.append('assistant/message', {
+  turn: 1, step: 1,
+  message: {
+    id: 'multi-block-id', role: 'assistant',
+    content: [
+      { type: 'reasoning', text: fatReasoning },
+      { type: 'reasoning', text: fatReasoning },
+      { type: 'text', text: 'done' },
+    ],
+    source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+  },
+  stream: [],
+}).seq
+s10a.append('step/end', { turn: 1, step: 1 })
+await fire('session/event', s10a, s10a.eventAt(seq10a))
+await fire('session/event', s10a, s10a.eventAt(s10a.log.length - 1))
+await new Promise(resolve => setTimeout(resolve, 50))
+check('a two-reasoning message is neither distilled nor recorded',
+  (await store10a.load(s10a.id)).entries.length === 0)
+check('and both original reasoning blocks are still replayed',
+  (s10a.deriveMessages().find(message => (message as { id?: string }).id === 'multi-block-id') as { content: Array<{ type: string }> })
+    .content.filter(block => block.type === 'reasoning').length === 2)
 
 console.log('scenario 10b: savings are credited only for substitutions that shipped')
 const before10b = (await store10.load(s10.id)).entries[0]!
