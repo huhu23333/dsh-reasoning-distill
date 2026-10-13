@@ -184,7 +184,9 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
   const applyingPending = useRef(new Set<string>())
   // Attempts whose backend call already succeeded but whose hand-off settle did
   // not: the panel must retry *only* the settle, never the backend request.
-  const settlePending = useRef(new Set<string>())
+  // Keyed to the outcome that still has to be recorded, so a retried settle keeps
+  // reporting why the backend (or the request) failed.
+  const settlePending = useRef(new Map<string, string | undefined>())
   // When this view mounted, every branch that already existed was old news: only a
   // hand-off that lands while the panel is open may pull the user across, or
   // returning to the original session would bounce them to an old branch forever.
@@ -249,7 +251,7 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     if (settlePending.current.has(attemptKey)) {
       // The rewrite is already in the history; only the host's pending flag is left.
       applyingPending.current.add(attemptKey)
-      void settleHandoff(current, pending).then(verdict => {
+      void settleHandoff(current, pending, settlePending.current.get(attemptKey)).then(verdict => {
         applyingPending.current.delete(attemptKey)
         if (verdict !== 'failed') {
           settlePending.current.delete(attemptKey)
@@ -279,16 +281,17 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
         // A backend that refused must not look like a completed hand-off: record
         // why on the entry, and never re-post it (an in-place rewrite is not
         // idempotent). Only an unfinished settle is retried.
-        const verdict = await settleHandoff(current, pending, outcome.error ?? `HTTP ${response.status}`)
+        const refusal = outcome.error ?? `HTTP ${response.status}`
+        const verdict = await settleHandoff(current, pending, refusal)
         appliedPending.current.add(attemptKey)
-        if (verdict === 'failed') settlePending.current.add(attemptKey)
+        if (verdict === 'failed') settlePending.current.set(attemptKey, refusal)
         return
       }
       const verdict = await settleHandoff(current, pending)
       if (verdict === 'failed') {
         // Keep the rewrite and retry only the settle on a later poll instead of
         // re-posting a backend request that already succeeded.
-        settlePending.current.add(attemptKey)
+        settlePending.current.set(attemptKey, undefined)
       } else {
         appliedPending.current.add(attemptKey)
       }
@@ -298,9 +301,10 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
       // terminal for the backend whatever the settle says: a duplicate mutation is
       // worse than a rewrite that did not land. Only an unfinished *settle* is
       // retried, so the host's pending flag cannot linger and trigger a re-post.
-      const verdict = await settleHandoff(current, pending, error instanceof Error ? error.message : String(error))
+      const detail = error instanceof Error ? error.message : String(error)
+      const verdict = await settleHandoff(current, pending, detail)
       appliedPending.current.add(attemptKey)
-      if (verdict === 'failed') settlePending.current.add(attemptKey)
+      if (verdict === 'failed') settlePending.current.set(attemptKey, detail)
     }).finally(() => {
       // Released once the attempt is over: whether to try again is decided by the
       // host's pending flag, not by this marker.
