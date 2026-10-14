@@ -37,13 +37,9 @@ OLD_TIMELINE_FUNCTION = '''async function timeline(ctx, sessionId) {
 NEW_TIMELINE_FUNCTION = '''const TIMELINE_MESSAGE_LIMIT = 200;
 const TIMELINE_JSON_LIMIT = 128 * 1024;
 const timelineCache = /* @__PURE__ */ new Map();
-function timelineRevision(ctx, sessionId, trace) {
+function timelineRevision(ctx, sessionId) {
 \tconst events = ctx.sessions.get(sessionId)?.events;
-\tconst live = events === void 0 ? "persisted" : `${String(events.length)}:${String(events.at(-1)?.seq ?? 0)}`;
-\tconst lineage = [trace.target, ...trace.ancestors, ...trace.descendants.flatMap(function visit(node) {
-\t\treturn [node.session, ...node.descendants.flatMap(visit)];
-\t})].map((record) => `${record.header.id}:${String(record.header.seedLength ?? 0)}:${String(record.header.createdAt)}:${record.header.parentSession ?? ""}`).sort().join("|");
-\treturn `${live}|${lineage}`;
+\treturn events === void 0 ? "persisted" : `${String(events.length)}:${String(events.at(-1)?.seq ?? 0)}`;
 }
 function boundedTimeline(value) {
 \tlet messages = value.messages.slice(-TIMELINE_MESSAGE_LIMIT);
@@ -56,10 +52,10 @@ function boundedTimeline(value) {
 \treturn result;
 }
 async function timeline(ctx, sessionId) {
-\tconst targetTrace = await ctx.sessionQuery.traceSession(sessionId);
-\tconst revision = timelineRevision(ctx, sessionId, targetTrace);
+\tconst revision = timelineRevision(ctx, sessionId);
 \tconst cached = timelineCache.get(sessionId);
-\tif (cached?.revision === revision) return cached.value;'''
+\tif (cached?.revision === revision) return cached.value;
+\tconst targetTrace = await ctx.sessionQuery.traceSession(sessionId);'''
 OLD_TIMELINE_RETURN = '''\treturn {
 \t\tsessionId,
 \t\tmessages: editableMessages(turns),
