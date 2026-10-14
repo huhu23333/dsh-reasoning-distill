@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Rebuild vendor's patched package deterministically from patched1 + client patch.
+"""Rebuild vendor's patched package deterministically from patched1 + client/server patches.
 
 Usage: python3 scripts/package-message-edit.py
 The npm package identity stays dsh-message-edit (never rename the bundle id).
@@ -23,11 +23,20 @@ with tarfile.open(source, 'r:gz') as original, tarfile.open(target, 'w:gz', form
         data = original.extractfile(member).read()
         if member.name == 'package/client.js':
             text = data.decode('utf8')
-            for before, after in ((patch.DRIFTED, patch.FIXED), (patch.OLD_REVISION, patch.NEW_REVISION), (patch.OLD_BINDING, patch.NEW_BINDING)):
+            for before, after in ((patch.DRIFTED, patch.FIXED), (patch.OLD_REVISION, patch.NEW_REVISION), (patch.OLD_BINDING, patch.NEW_BINDING)) + patch.ACTION_REPLACEMENTS:
                 if text.count(after) == 1:
                     continue
                 if text.count(before) != 1:
                     raise ValueError('unexpected client bundle shape')
+                text = text.replace(before, after, 1)
+            data = text.encode('utf8')
+        elif member.name == 'package/index.mjs':
+            text = data.decode('utf8')
+            for before, after in patch.SERVER_REPLACEMENTS:
+                if text.count(after) == 1:
+                    continue
+                if text.count(before) != 1:
+                    raise ValueError('unexpected server bundle shape')
                 text = text.replace(before, after, 1)
             data = text.encode('utf8')
         elif member.name == 'package/package.json':
