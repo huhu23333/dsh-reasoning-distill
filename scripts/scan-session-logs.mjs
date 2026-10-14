@@ -46,12 +46,23 @@ for (const file of findLogs(root)) {
   }
   const wire = records[0];
   const events = records.slice(1);
+  // The physical first line allows only these keys (session-persistence-jsonl/src/format.ts):
+  // the inherited cut is NOT a header field, it lives on the last tagged session/end-seed
+  // event. A stray field makes the line fail its guard and the log unreadable.
+  const allowedHeaderKeys = ['type', 'version', 'id', 'createdAt', 'isSeeded', 'delegationDepth', 'cwd', 'parentSession', 'origin', 'agentPreset'];
+  const strayKeys = Object.keys(wire).filter(key => !allowedHeaderKeys.includes(key));
+  if (strayKeys.length > 0 || ['type', 'version', 'id', 'createdAt', 'isSeeded', 'delegationDepth'].some(key => !(key in wire))) {
+    const reason = strayKeys.length > 0
+      ? `header line has unexpected field ${strayKeys.join(',')}`
+      : 'header line lacks a required field';
+    failures.set(reason, [...(failures.get(reason) ?? []), path.basename(path.dirname(file))]);
+    continue;
+  }
+  const lastInherited = events.filter(event => event.type === 'session/end-seed' && event.data?.inherited === true).at(-1)?.seq ?? 0;
   const header = {
     version: 4,
     id: wire.id,
     createdAt: wire.createdAt,
-    // The wire header carries isSeeded itself; seedLength is the inherited count, present
-    // only once the fork cut is persisted.
     isSeeded: wire.isSeeded === true,
     delegationDepth: wire.delegationDepth ?? 0,
     ...wire.cwd === undefined ? {} : { cwd: wire.cwd },
@@ -59,7 +70,7 @@ for (const file of findLogs(root)) {
     ...wire.origin === undefined ? {} : { origin: wire.origin },
     ...wire.agentPreset === undefined ? {} : { agentPreset: wire.agentPreset },
   };
-  const artifact = { header, events, inheritedEventCount: wire.seedLength ?? 0 };
+  const artifact = { header, events, inheritedEventCount: lastInherited };
   try {
     format.restoreReleasedV4Artifact(artifact, known);
     format.assertReleasedV4Relationships(artifact, known);

@@ -250,6 +250,33 @@ try {
   // the visible-conversation switch); the route must not archive anything itself.
   assert.equal(archived.length, 0, 'the mutation route must not archive the source');
   console.log('OPERATION ok   archive  the route leaves archiving to the client UI step');
+  // A hand-off can be triggered by a user message that is still waiting in the inbox: the
+  // copy cannot carry a message the log has not surfaced yet, so the branch must be driven
+  // by that very message. Otherwise the branch opens with an empty input and the text the
+  // user just sent is lost.
+  const waitingText = 'the message that triggered the branch';
+  events.push({
+    type: 'agent/inbox/spliced',
+    seq: events.length,
+    time: Date.now(),
+    data: {
+      target: 'next-turn',
+      start: 0,
+      inserted: [{
+        id: 'waiting-message',
+        role: 'user',
+        source: { kind: 'user', rpcId: 'waiting-rpc', clientTimeZone: 'Asia/Shanghai' },
+        content: [{ type: 'text', text: waitingText }],
+      }],
+    },
+  });
+  const waitingLength = events.length;
+  followups.length = 0;
+  await operate('splice-wait', { action: 'splice', sessionId: header.id, eventSeq: assistantTarget.seq, blockIndex: assistantTarget.blockIndex, text: 'waiting splice' }, 1);
+  assert.equal(followups.length, 1, 'the branch must be driven once');
+  assert.deepEqual(followups[0].content, [{ type: 'text', text: waitingText }], 'the waiting user message must drive the branch');
+  console.log('OPERATION ok   waiting  the message waiting in the inbox drives the branch');
+  events.length = waitingLength - 1;
   // A hand-off lands mid-turn: the copied prefix ends inside an open turn, and the
   // seed must close it exactly as buildForkSeed does -- otherwise the branch's own
   // turn opens while that one is still open and the stored log is rejected on reload.

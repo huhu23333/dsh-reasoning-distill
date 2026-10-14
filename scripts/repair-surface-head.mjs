@@ -56,7 +56,9 @@ function artifactOf(wire, events) {
       ...wire.agentPreset === undefined ? {} : { agentPreset: wire.agentPreset },
     },
     events,
-    inheritedEventCount: wire.seedLength ?? 0,
+    // The current format keeps the inherited cut on the last tagged session/end-seed event;
+    // the physical header has no such field (a stray one makes the first line invalid).
+    inheritedEventCount: events.filter(event => event.type === 'session/end-seed' && event.data?.inherited === true).at(-1)?.seq ?? 0,
   };
 }
 

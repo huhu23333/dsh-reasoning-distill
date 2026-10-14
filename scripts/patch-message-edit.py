@@ -361,6 +361,7 @@ function splicePlan(operation, events) {
 \tconst before = target.data.message.content[operation.blockIndex];
 \tif (!isTextualBlock(before)) throw new Error("所选助手消息块不是文本或思考。");
 \tconst user = turnUserInput(events, operation.eventSeq);
+\tconst waiting = waitingUserInput(events);
 \treturn {
 \t\tboundary: events.length - 1,
 \t\tversion: pairVersionEffect(operation.sessionId, {
@@ -378,11 +379,16 @@ function splicePlan(operation, events) {
 \t\t\tblockIndex: operation.blockIndex,
 \t\t\ttext: operation.text
 \t\t},
-\t\t// The turn this block belongs to continues in the branch as an empty user
-\t\t// input: it opens the branch's turn, and the LLM layer drops empty user
-\t\t// content, so the model resumes from the copied history without replaying
-\t\t// the request (and without redoing work it already did).
-\t\tqueuedUsers: user === void 0 ? [] : [cloneUser(user.data, [])]
+\t\t// A user message still waiting in the inbox has not become a surface turn, so the
+\t\t// copy cannot carry it: the branch must be driven by that message. Otherwise the
+\t\t// deferred hand-off -- the one a new user message triggers -- opens the branch with
+\t\t// an empty input, and the message the user just sent is lost.
+\t\t//
+\t\t// With nothing waiting, the turn this block belongs to continues in the branch as an
+\t\t// empty user input: it opens the branch's turn, and the LLM layer drops empty user
+\t\t// content, so the model resumes from the copied history without replaying the
+\t\t// request (and without redoing work it already did).
+\t\tqueuedUsers: waiting.length > 0 ? waiting : user === void 0 ? [] : [cloneUser(user.data, [])]
 \t};
 }
 /** The user input of the turn containing one event, or undefined outside a turn. */
@@ -398,6 +404,20 @@ function turnUserInput(events, seq) {
 \t\tif (event?.type === "user/message" && event.data?.source?.kind === "user") return event;
 \t}
 \treturn void 0;
+}
+/** User messages the inbox holds for the next turn that the log has not surfaced yet.
+* The host records an arriving message as an agent/inbox/spliced event, and the surface
+* user/message appears only once the turn runs; a hand-off in between must carry it. */
+function waitingUserInput(events) {
+\tconst surfaced = events.filter((event) => event.type === "user/message").at(-1)?.seq ?? -1;
+\tfor (let index = events.length - 1; index > surfaced; index -= 1) {
+\t\tconst event = events[index];
+\t\tif (event?.type !== "agent/inbox/spliced" || event.data?.target !== "next-turn") continue;
+\t\tconst inserted = Array.isArray(event.data.inserted) ? event.data.inserted : [];
+\t\tconst users = inserted.filter((message) => message?.role === "user" && message.source?.kind === "user" && Array.isArray(message.content) && message.content.length > 0);
+\t\tif (users.length > 0) return users.map((message) => cloneUser(message, structuredClone(message.content)));
+\t}
+\treturn [];
 }
 /** Copy one assistant message event with a single content block's text replaced.
 * Tool-call blocks and the event envelope survive; the embedded provider stream no

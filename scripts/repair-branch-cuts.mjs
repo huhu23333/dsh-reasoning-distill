@@ -1,15 +1,17 @@
 #!/usr/bin/env node
-// Repair session logs whose inherited cut was never persisted.
+// Relabel copied delivery markers that name another Session.
 //
-// A branch created before the fork-marker fix stores no `seedLength`, so a reload
-// derives no inherited prefix; a copied session-log-deepseek/delivery-accepted marker
-// (it names the source session) then fails the v4 relationship check, and a snapshot
-// load additionally requires a session/end-seed marker at the cut index.
+// A branch log is a copy of its source, so it carries the source's
+// session-log-deepseek/delivery-accepted markers. The v4 relationship check rejects a marker
+// that names another Session unless it sits inside the inherited prefix, and an old branch
+// (created before the fork marker existed) has no inherited cut at all: its header says
+// isSeeded false and the cut is 0. Relabelling those markers to the branch's own id makes the
+// log readable without inventing header fields -- session-persistence-jsonl/src/format.ts
+// allows no inherited-cut field and recovers the cut from the last tagged session/end-seed
+// event, so a header field here would itself invalidate the first line.
 //
-// The host's own convention (buildForkSeed) is that the inherited cut *is* the seq of
-// its `session/end-seed { inherited: true }` marker, so the last such marker gives the
-// length to persist. Every candidate is validated with the host's own Session
-// constructors before anything is written.
+// Every candidate is validated with the host's own Session constructors before it is written,
+// and every file is backed up first.
 //
 // Usage: node scripts/repair-branch-cuts.mjs [--apply] [--root <sessions dir>] [--host <session package>]
 import { execFileSync } from 'node:child_process';
@@ -26,6 +28,10 @@ const argOf = (flag, fallback) => {
 };
 const root = argOf('--root', path.join(os.homedir(), '.dsh', 'sessions'));
 const hostPath = argOf('--host', path.join(os.homedir(), 'otherProject', 'deepseek-harness', 'packages', 'core', 'session', 'lib', 'index.js'));
+const checkout = argOf('--checkout', path.join(os.homedir(), 'otherProject', 'deepseek-harness'));
+
+// The authoritative gate: the same released-v4 validation the persistence read path runs.
+const format = await import(pathToFileURL(path.join(checkout, 'packages/session/session-format-v3-to-v4/lib/index.js')).href);
 
 let host;
 try {
@@ -33,10 +39,6 @@ try {
 } catch {
   host = undefined;
   console.error('note: host Session package not found; structural verification only');
-}
-
-function decode(file) {
-  return execFileSync('zstd', ['-d', '-c', file], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8');
 }
 
 function findLogs(dir) {
@@ -49,19 +51,45 @@ function findLogs(dir) {
   return found;
 }
 
+/** The reason the host's released-v4 validation refuses this log, or undefined. */
+function formatRejects(raw, events) {
+  const artifact = {
+    header: {
+      version: 4,
+      id: raw.id,
+      createdAt: raw.createdAt,
+      isSeeded: raw.isSeeded === true,
+      delegationDepth: raw.delegationDepth ?? 0,
+      ...raw.cwd === undefined ? {} : { cwd: raw.cwd },
+      ...raw.parentSession === undefined ? {} : { parentSession: raw.parentSession },
+      ...raw.origin === undefined ? {} : { origin: raw.origin },
+      ...raw.agentPreset === undefined ? {} : { agentPreset: raw.agentPreset },
+    },
+    events,
+    inheritedEventCount: events.filter(event => event.type === 'session/end-seed' && event.data?.inherited === true).at(-1)?.seq ?? 0,
+  };
+  try {
+    format.restoreReleasedV4Artifact(artifact, new Set([...(host?.KNOWN_SESSION_EVENT_TYPES ?? []), 'message-edit/version']));
+    format.assertReleasedV4Relationships(artifact, new Set([...(host?.KNOWN_SESSION_EVENT_TYPES ?? []), 'message-edit/version']));
+    return undefined;
+  } catch (error) {
+    return String(error.message);
+  }
+}
+
 /** Load the candidate through both host paths, exactly as the host would. */
-function hostAccepts(raw, events, cut, seeded = true) {
+function hostAccepts(raw, events) {
   if (host === undefined) return { ok: true, detail: 'structural only' };
   const header = {
     version: host.SESSION_FORMAT_VERSION,
     id: host.SessionId(raw.id),
     createdAt: raw.createdAt,
-    isSeeded: seeded,
+    isSeeded: raw.isSeeded === true,
     ...(raw.parentSession === undefined ? {} : { parentSession: host.SessionId(raw.parentSession) }),
     ...(raw.cwd === undefined ? {} : { cwd: raw.cwd }),
   };
   const id = host.SessionId(raw.id);
-  const offset = host.SessionLogOffset(cut);
+  const offset = host.SessionLogOffset(0);
   try {
     host.Session.fromRestore(id, events, header, offset, 'detached');
   } catch (error) {
@@ -80,51 +108,32 @@ let repaired = 0;
 for (const file of findLogs(root)) {
   let records;
   try {
-    records = decode(file).trim().split('\n').map(line => JSON.parse(line));
-  } catch (error) {
-    console.log('SKIP (undecodable)', file, String(error).slice(0, 80));
+    records = execFileSync('zstd', ['-d', '-c', file], { maxBuffer: 512 * 1024 * 1024 })
+      .toString('utf8').trim().split('\n').map(line => JSON.parse(line));
+  } catch {
     continue;
   }
   const raw = records[0];
-  if (raw?.type !== 'session' || raw.seedLength !== undefined) continue;
+  if (raw?.type !== 'session') continue;
   const events = records.slice(1);
   const foreign = events.filter(event => event.type === 'session-log-deepseek/delivery-accepted'
     && typeof event.data?.sessionId === 'string' && event.data.sessionId !== raw.id);
-  const markers = events.filter(event => event.type === 'session/end-seed' && event.data?.inherited === true);
-  // A seeded header that never persisted its cut is equally unreadable ("seeded header
-  // disagrees with its last inherited end-seed marker"), with or without copied markers.
-  const seededWithoutCut = raw.isSeeded === true && markers.length > 0;
-  if (foreign.length === 0 && !seededWithoutCut) continue;
+  if (foreign.length === 0) continue;
+  // Only a log the host actually refuses is a candidate: a foreign marker inside the
+  // inherited prefix (cut = the last tagged session/end-seed event) is legitimate.
+  if (formatRejects(raw, events) === undefined) continue;
   candidates += 1;
-  const cut = markers.at(-1)?.seq;
-  const cutUsable = cut !== undefined && cut > 0 && !foreign.some(marker => marker.seq >= cut);
-  let patched;
-  let detail;
-  if (cutUsable) {
-    // Strategy A: the host marked an inherited cut; record it as the prefix length.
-    const header = { ...raw, seedLength: cut };
-    detail = `cut=${String(cut)} ${hostAccepts(header, events, cut).detail}`;
-    patched = [header, ...events];
-  } else {
-    // Strategy B: the log is a plain copy with no inherited cut, so its delivery
-    // markers must name this session. Rewriting them keeps the header unseeded, and
-    // both host paths then accept the log unchanged otherwise.
-    const foreignSet = new Set(foreign);
-    const rewritten = events.map(event => foreignSet.has(event)
-      ? { ...event, data: { ...event.data, sessionId: raw.id } }
-      : event);
-    detail = `relabelledMarkers=${String(foreign.length)} ${hostAccepts(raw, rewritten, 0, false).detail}`;
-    patched = [raw, ...rewritten];
-  }
-  const encoded = zlib.zstdCompressSync(Buffer.from(patched.map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8'));
-  const check = JSON.parse(zlib.zstdDecompressSync(encoded).toString('utf8').split('\n')[0]);
-  const accepted = detail.includes('accept it') || detail.includes('structural only');
-  console.log(`${apply ? 'REPAIR' : 'WOULD REPAIR'} ${raw.id} ${detail}`);
-  if (!apply || !accepted || check.type !== 'session') continue;
-  const backup = `${file}.bak-repair-${new Date().toISOString().replace(/[:.]/g, '')}`;
+  const foreignSet = new Set(foreign);
+  const rewritten = events.map(event => foreignSet.has(event)
+    ? { ...event, data: { ...event.data, sessionId: raw.id } }
+    : event);
+  const verdict = hostAccepts(raw, rewritten);
+  console.log(`${apply ? 'REPAIR' : 'WOULD REPAIR'} ${raw.id} relabelledMarkers=${String(foreign.length)} -> ${verdict.detail}`);
+  if (!apply || !verdict.ok) continue;
+  const encoded = zlib.zstdCompressSync(Buffer.from([raw, ...rewritten].map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8'));
+  const backup = `${file}.bak-branchcuts-${new Date().toISOString().replace(/[:.]/g, '')}`;
   fs.copyFileSync(file, backup);
   fs.writeFileSync(file, encoded);
   repaired += 1;
-  console.log(`  backed up: ${backup}`);
 }
 console.log(`${apply ? 'REPAIRED' : 'CANDIDATES'} ${apply ? repaired : candidates}`);
