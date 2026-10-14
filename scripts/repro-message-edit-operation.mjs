@@ -156,7 +156,6 @@ try {
   // the source agent's maintenance phase (that would demand true idle).
   assert.equal(agent.maintenanceCalls(), 0, 'the route must not require the source agent to be idle');
   followups.length = 0;
-  const turnUserText = (closedTurn.user.data.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n');
   await operate('splice ', {
     action: 'splice', sessionId: header.id, eventSeq: assistantTarget.seq,
     blockIndex: assistantTarget.blockIndex, text: 'spliced reasoning text',
@@ -174,10 +173,12 @@ try {
     'tool calls must survive the splice');
   assert.deepEqual(spliced.surfaceOp, events[assistantTarget.seq].surfaceOp, 'the event envelope must survive');
   assert.equal(lastSeed[events.length].type, 'message-edit/version', 'the version record must follow the copied log');
-  // The branch continues the interrupted turn: its user input is re-issued there.
+  // The branch continues the interrupted turn from an empty user input: the LLM
+  // layer drops empty user content, so the model resumes from the copied history
+  // instead of replaying the request.
   assert.equal(followups.length, 1, 'the branch must be driven to continue the turn');
   assert.equal(followups[0].role, 'user');
-  assert.equal((followups[0].content ?? []).map(block => block.text).join('\n'), turnUserText, 'the current turn user input must be re-issued in the branch');
+  assert.deepEqual(followups[0].content, [], 'the continuation input must carry no content');
   console.log(`OPERATION ok   splice   seedEvents=${String(lastSeed.length)} blocks=${spliced.data.message.content.map(block => block.type).join('+')}`);
 
   // Hiding the replaced conversation belongs to the client UI step (it must follow

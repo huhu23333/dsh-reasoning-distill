@@ -350,9 +350,11 @@ function splicePlan(operation, events) {
 \t\t\tblockIndex: operation.blockIndex,
 \t\t\ttext: operation.text
 \t\t},
-\t\t// The turn this block belongs to continues in the branch: the branch carries the
-\t\t// compressed history, so re-issuing its user input resumes the work there.
-\t\tqueuedUsers: user === void 0 ? [] : [cloneUser(user.data)]
+\t\t// The turn this block belongs to continues in the branch as an empty user
+\t\t// input: it opens the branch's turn, and the LLM layer drops empty user
+\t\t// content, so the model resumes from the copied history without replaying
+\t\t// the request (and without redoing work it already did).
+\t\tqueuedUsers: user === void 0 ? [] : [cloneUser(user.data, [])]
 \t};
 }
 /** The user input of the turn containing one event, or undefined outside a turn. */
