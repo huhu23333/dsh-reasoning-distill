@@ -470,6 +470,28 @@ SERVER_REPLACEMENTS = (
      '''\tswitch (operation.action) {
 \t\tcase "edit": return editPlan(operation, turns);
 \t\tcase "splice": return splicePlan(operation, events);'''),
+    # A plugin-owned event type is unknown to the harness; the persistence contract
+    # refuses to interpret the whole log unless the envelope marks it ignorable
+    # (session-persistence/src/storage-contract.ts), which also drops the session from
+    # the session list.
+    ('''function appendLogSeedEvent(events, type, data) {
+\tevents.push({
+\t\ttype,
+\t\tseq: events.length,
+\t\ttime: Date.now(),
+\t\tdata
+\t});
+}''',
+     '''function appendLogSeedEvent(events, type, data) {
+\tevents.push({
+\t\ttype,
+\t\tseq: events.length,
+\t\ttime: Date.now(),
+\t\tdata,
+\t\t...type.startsWith(\"message-edit/\") ? { ignorable: true } : {}
+\t});
+}'''),
+
     # A fork child must persist its inherited prefix: the modern agent API takes the
     # fork marker in meta and the exact cut as a top-level option, and the Session
     # header rejects the obsolete `seedLength` field. Without it the stored log

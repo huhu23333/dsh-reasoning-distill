@@ -196,7 +196,22 @@ try {
   assert.deepEqual(spliced.surfaceOp, events[assistantTarget.seq].surfaceOp, 'the event envelope must survive');
   assert.equal(lastSeed[events.length].type, 'session/end-seed', 'the inherited cut must be marked at the boundary');
   assert.equal(lastSeed[events.length].data.inherited, true, 'the cut marker must be the inherited one');
-  assert.equal(lastSeed[events.length + 1].type, 'message-edit/version', 'the version record must follow the copied log');
+  const versionIndex = lastSeed.findLastIndex(candidate => candidate.type === 'message-edit/version');
+  assert(versionIndex > events.length, 'the version record must follow the copied log and its cut marker');
+  // An open copied tail must be closed before the branch's own turn can open; the host's
+  // buildForkSeed does the same with a forked turn/end.
+  const copiedTail = lastSeed.slice(events.length + 1, versionIndex);
+  const openTurnInCopy = events.reduce((state, event) => event.type === 'turn/start' ? event.data.turn : event.type === 'turn/end' ? null : state, null);
+  if (openTurnInCopy !== null) {
+    assert(copiedTail.some(candidate => candidate.type === 'turn/end' && candidate.data.reason?.kind === 'forked'),
+      'an open copied turn must be closed with a forked turn/end');
+  }
+  // The persistence contract refuses a log containing a type the harness does not know
+  // unless the envelope marks it ignorable, and that refusal drops the session from the
+  // session list. Every plugin-owned event must carry the flag.
+  for (const event of lastSeed.filter(candidate => candidate.type.startsWith('message-edit/'))) {
+    assert.equal(event.ignorable, true, `${event.type} at ${String(event.seq)} must be ignorable`);
+  }
   // The host rejects a reloaded log whose delivery marker names another session
   // unless the marker sits inside the recorded inherited prefix. Reproduce that rule:
   // the branch must be created with the fork marker and a cut past every copied marker.
