@@ -41,6 +41,17 @@ const agent = {
   runMaintenance: async operation => operation(agent),
 };
 
+// The host validates a branch seed with the real Session constructor; use it so a
+// seed the host would reject cannot pass this harness.
+const checkout = process.env.DSH_CHECKOUT ?? '/home/huhu233/otherProject/deepseek-harness';
+let SessionApi;
+try {
+  SessionApi = await import(pathToFileURL(path.join(checkout, 'packages/core/session/lib/index.js')).href);
+} catch {
+  SessionApi = undefined;
+  console.error('note: host Session package not found; seed validation is skipped');
+}
+
 const plugin = await import(`${pathToFileURL(bundle).href}?t=${Date.now()}`);
 let handler;
 const ctx = {
@@ -53,7 +64,12 @@ const ctx = {
   },
   agents: {
     get: id => (id === header.id ? agent : undefined),
-    create: async () => ({ agent: { followup: () => {} }, dispose: async () => {} }),
+    create: async options => {
+      if (SessionApi !== undefined) {
+        SessionApi.Session.create(SessionApi.SessionId(options.sessionId), options.seed);
+      }
+      return { agent: { followup: () => {} }, dispose: async () => {} };
+    },
   },
   workspaceRegistry: { list: () => [] },
   get: () => undefined,
@@ -65,19 +81,32 @@ const server = http.createServer((request, response) => handler(request, respons
 await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
 const origin = `http://127.0.0.1:${String(server.address().port)}`;
 
-// First closed turn with a real user message: the target for retry/edit.
+// First closed turn with a real user message and an editable assistant block.
 const closedTurn = (() => {
   let current;
   for (const event of events) {
-    if (event.type === 'turn/start') current = { turn: event.data.turn, user: undefined };
-    else if (current !== undefined && event.type === 'user/message' && current.user === undefined && event.data?.source?.kind === 'user') current.user = event;
-    else if (current !== undefined && event.type === 'turn/end' && event.data.turn === current.turn) return current;
+    if (event.type === 'turn/start') current = { turn: event.data.turn, user: undefined, assistants: [] };
+    else if (current === undefined) continue;
+    else if (event.type === 'user/message' && current.user === undefined && event.data?.source?.kind === 'user') current.user = event;
+    else if (event.type === 'assistant/message' && event.data?.turn === current.turn) current.assistants.push(event);
+    else if (event.type === 'turn/end' && event.data.turn === current.turn) return current;
   }
   return undefined;
 })();
 assert(closedTurn?.user !== undefined, 'the fixture log must contain a closed turn with a user message');
+const assistantTarget = (() => {
+  for (const event of closedTurn.assistants) {
+    const content = event.data?.message?.content ?? [];
+    // The reasoning-distill hand-off rewrites a reasoning block; prefer it.
+    const index = content.findIndex(block => block.type === 'reasoning');
+    const target = index >= 0 ? index : content.findIndex(block => block.type === 'text');
+    if (target >= 0) return { seq: event.seq, blockIndex: target };
+  }
+  return undefined;
+})();
+assert(assistantTarget !== undefined, 'the fixture log must contain an editable assistant block');
 
-async function operate(label, operation) {
+async function operate(label, operation, expectedQueuedTurns = 1) {
   const started = process.hrtime.bigint();
   const response = await fetch(`${origin}/message-edit`, {
     method: 'POST',
@@ -89,7 +118,7 @@ async function operate(label, operation) {
   const body = JSON.parse(text);
   assert.equal(response.status, 200, `${label} must succeed, got ${String(response.status)}: ${text}`);
   assert.match(body.sessionId, /^session-/);
-  assert(body.queuedTurns >= 1, `${label} must queue at least one turn`);
+  assert.equal(body.queuedTurns, expectedQueuedTurns, `${label} must queue the expected turns`);
   console.log(
     `OPERATION ok   ${label} status=${String(response.status)} time=${ms.toFixed(1)}ms branch=${body.sessionId} queuedTurns=${String(body.queuedTurns)}`,
   );
@@ -102,6 +131,12 @@ try {
     action: 'edit', sessionId: header.id, eventSeq: closedTurn.user.seq, blockIndex: 0,
     text: 'edited by the offline acceptance harness', cascade: 'truncate',
   });
+  // An assistant-message edit rebuilds the turn from a synthesized manual turn, so
+  // nothing is queued; the host seed validator still has to accept that turn.
+  await operate('edit-a', {
+    action: 'edit', sessionId: header.id, eventSeq: assistantTarget.seq, blockIndex: assistantTarget.blockIndex,
+    text: 'edited assistant block by the offline acceptance harness', cascade: 'truncate',
+  }, 0);
   console.log('OPERATION ACCEPTANCE PASSED (offline, real handler + real log)');
 } finally {
   server.close();

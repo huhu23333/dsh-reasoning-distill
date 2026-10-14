@@ -208,6 +208,46 @@ def patch_server_timeline(source: str) -> str:
     if start >= end:
         raise ValueError('invalid server timeline region')
     return source[:start] + NEW_TIMELINE_FUNCTION + '\n' + source[end:]
+MANUAL_TURN_FUNCTION = '''function appendManualTurn(events, manual) {
+\tconst { turn, user, assistant } = manual;
+\tappendLogSeedEvent(events, "turn/start", { turn });
+\tappendSurfaceSeedEvent(events, "user/message", user, { surfaceOp: "append" });
+\tappendLogSeedEvent(events, "step/start", {
+\t\tturn,
+\t\tstep: 1
+\t});
+\t// The host validates restored assistant settlement fields without replaying the
+\t// embedded stream: a synthesized message carries turn/step and an empty stream,
+\t// and never sourceEventSeqs (an embedded stream already carries its sources).
+\tappendSurfaceSeedEvent(events, "assistant/message", {
+\t\tturn,
+\t\tstep: 1,
+\t\tmessage: assistant,
+\t\tstream: []
+\t}, {
+\t\tsurfaceOp: "append"
+\t});
+\tappendLogSeedEvent(events, "step/end", {
+\t\tturn,
+\t\tstep: 1
+\t});
+\tappendLogSeedEvent(events, "turn/end", {
+\t\tturn,
+\t\treason: { kind: "completed" }
+\t});
+}'''
+
+
+def patch_manual_turn(source: str) -> str:
+    """Normalize the synthesized manual turn to the host's seed validator shape."""
+    marker = 'function appendManualTurn(events, manual) {'
+    start = source.find(marker)
+    if start < 0:
+        raise ValueError('unexpected manual-turn marker')
+    end = source.index('\n}', start) + 2
+    return source[:start] + MANUAL_TURN_FUNCTION + source[end:]
+
+
 SERVER_REPLACEMENTS = (
     ('if (persistence !== void 0) return (await persistence.inspect(sessionId)).events;',
      'if (typeof persistence?.inspect === "function") return (await persistence.inspect(sessionId)).events;'),
@@ -424,6 +464,7 @@ def patch(target: pathlib.Path) -> int:
     if target.name == 'index.mjs':
         try:
             patched = patch_server_timeline(patched)
+            patched = patch_manual_turn(patched)
         except ValueError as error:
             print(f"nothing to patch ({error}): {target}")
             return 1
