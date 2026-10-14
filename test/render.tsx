@@ -7,6 +7,7 @@
  */
 
 import type { ReactElement } from 'react'
+import { effectHarness } from './effect-harness.ts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, signedCount, signedMoney, stockOfEntry } from '../src/client/View.tsx'
 import { CompressionActivity } from '../src/client/ActivityChip.tsx'
@@ -307,6 +308,68 @@ check('the activity chip is silent while idle',
   tryRender(<CompressionActivity sessionId="session-1" onActiveChange={noop} t={t} />) === '')
 
 check('no render path threw', !rendered.some(markup => markup.includes('__THREW__')))
+
+// Effect-only regressions: the SSR checks above do not run the view's effects.
+const globals = globalThis as typeof globalThis & { window: Window; document: Document }
+const priorWindow = globals.window
+const priorDocument = globals.document
+const priorFetch = globals.fetch
+const storageData = new Map<string, string>()
+const storage = { getItem: (key: string) => storageData.get(key) ?? null, setItem: (key: string, value: string) => { storageData.set(key, value) } }
+globals.window = { sessionStorage: storage, addEventListener: noop, removeEventListener: noop } as unknown as Window
+globals.document = { addEventListener: noop, removeEventListener: noop } as unknown as Document
+try {
+  const branchReport = modernReport()
+  branchReport.entries = [
+    { ...branchReport.entries[0]!, id: 'earlier-entry', handoff: { state: 'created', branchId: 'newer-branch', at: 130 } },
+    { ...branchReport.entries[0]!, id: 'later-entry', handoff: { state: 'created', branchId: 'older-branch', at: 120 } },
+  ]
+  branchReport.pendingBranch = null
+  const opened: string[] = []
+  const clock = Date.now
+  Date.now = () => 100
+  globals.fetch = async () => ({ ok: true, json: async () => branchReport }) as Response
+  const branch = effectHarness(() => ReasoningDistillView({ sessionId: 'session-1', openSession: id => { opened.push(id) }, t } as never))
+  try {
+    await branch.tick()
+    await branch.tick()
+    await branch.tick()
+    check('auto-open chooses greatest handoff.at regardless of entry order and never redirects twice',
+      opened.length === 1 && opened[0] === 'newer-branch')
+  } finally { branch.stop(); Date.now = clock }
+
+  const pending = modernReport()
+  pending.config.rewriteBackend = 'msg-edit'
+  pending.entries[0]!.id = 'in-place-1'
+  pending.entries[0]!.targetMessageId = 'm-12'
+  pending.entries[0]!.distilledText = 'capped'
+  pending.pendingBranch = 'in-place-1'
+  let backendPosts = 0
+  let settles = 0
+  globals.fetch = async (input: RequestInfo | URL) => {
+    if (String(input).includes('/report')) return { ok: true, json: async () => pending } as Response
+    if (String(input).includes('/handoff')) { settles++; return { ok: true, json: async () => ({ ok: true, recorded: false }) } as Response }
+    backendPosts++
+    return { ok: true, json: async () => ({ ok: true }) } as Response
+  }
+  const mount = (): ReturnType<typeof effectHarness> => effectHarness(() => ReasoningDistillView({ sessionId: 'session-1', openSession: noop, t } as never))
+  const inPlace = mount()
+  try {
+    await inPlace.tick()
+    await inPlace.tick()
+    const beforeRemount = { backendPosts, settles }
+    await inPlace.remount()
+    await inPlace.tick()
+    check('successful in-place POST survives remount: only failed handoff settlement retries',
+      beforeRemount.backendPosts === 1 && beforeRemount.settles >= 1
+      && backendPosts === 1 && settles > beforeRemount.settles && storageData.has('reasoning-distill:handoff:session-1:in-place-1'),
+      JSON.stringify({ backendPosts, settles, storage: [...storageData] }))
+  } finally { inPlace.stop() }
+} finally {
+  globals.fetch = priorFetch
+  globals.window = priorWindow
+  globals.document = priorDocument
+}
 
 console.log(`\n${failures === 0 ? 'ALL RENDER CHECKS PASSED' : `${failures} RENDER CHECK(S) FAILED`}`)
 console.log(log.join('\n'))
