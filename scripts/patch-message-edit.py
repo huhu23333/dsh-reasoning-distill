@@ -328,6 +328,31 @@ def patch_manual_turn(source: str) -> str:
 
 
 SPLICE_FUNCTIONS = '''
+/** Close a copied open turn the way the host's buildForkSeed does. Without this the
+* branch's own turn opens while the copied turn is still open, and the stored log is
+* rejected on reload ("turn/start does not open the expected turn"). */
+function openTurnClosers(events, cause) {
+\tlet openTurn = null;
+\tlet openStep = null;
+\tfor (const event of events) {
+\t\tif (event.type === "turn/start") {
+\t\t\topenTurn = event.data.turn;
+\t\t\topenStep = null;
+\t\t} else if (event.type === "turn/end") {
+\t\t\topenTurn = null;
+\t\t\topenStep = null;
+\t\t} else if (event.type === "step/start") openStep = event.data.step;
+\t\telse if (event.type === "step/end") openStep = null;
+\t}
+\tconst last = events.at(-1);
+\tif (openTurn === null || last === void 0) return [];
+\tconst closers = [];
+\tlet seq = last.seq + 1;
+\tif (openStep !== null) closers.push({ type: "step/end", seq: seq++, time: last.time, data: { turn: openTurn, step: openStep } });
+\tclosers.push({ type: "turn/end", seq: seq++, time: last.time, data: { turn: openTurn, reason: { kind: cause } } });
+\treturn closers;
+}
+
 /** Rewrite one assistant block in place: the branch is a copy of the whole
 * conversation with that single block's text replaced. */
 function splicePlan(operation, events) {
@@ -395,7 +420,9 @@ function splicedAssistantEvent(event, blockIndex, text) {
 def patch_splice_plan(source: str) -> str:
     """Normalize the splice planner and its rewriter, whatever variant is present."""
     end = source.index('function agentOptions(events, fallback) {')
-    marker = '/** Rewrite one assistant block in place:'
+    # Locate the whole blob by its first content line, not by a line inside it:
+    # the blob grows and the search must start where the blob starts.
+    marker = SPLICE_FUNCTIONS.split('\n')[1]
     at = source.rfind(marker, 0, end)
     if at < 0:
         at = source.rindex('\n}', 0, end) + 2
@@ -487,6 +514,7 @@ SERVER_REPLACEMENTS = (
      '''\tconst events = inheritedSeed(source, plan.boundary);
 \tconst inheritedLength = events.length;
 \tevents.push({ type: \"session/end-seed\", seq: events.length, time: events.at(-1)?.time ?? Date.now(), data: { inherited: true } });
+\tfor (const closer of openTurnClosers(events, \"forked\")) events.push(closer);
 \tif (plan.splice !== void 0) events[plan.splice.seq] = splicedAssistantEvent(events[plan.splice.seq], plan.splice.blockIndex, plan.splice.text);
 \tappendLogSeedEvent(events, \"message-edit/version\", plan.version);'''),
 

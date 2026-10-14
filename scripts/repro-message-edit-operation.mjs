@@ -28,11 +28,14 @@ const header = records[0];
 const events = records.slice(1);
 assert.equal(header.type, 'session', 'the first record must be the session header');
 
+// `tailDrop` hides the final turn/end so the route sees a turn still in progress,
+// exactly the situation a compression hand-off runs in.
+let tailDrop = 0;
 const session = {
   id: header.id,
   header: { createdAt: header.createdAt, cwd: header.cwd },
-  seq: events.length,
-  snapshotEvents: (from = 0, to = events.length) => events.slice(from, to),
+  get seq() { return events.length - tailDrop; },
+  snapshotEvents: (from = 0, to = events.length - tailDrop) => events.slice(from, to),
 };
 const followups = [];
 let maintenanceCalls = 0;
@@ -218,6 +221,25 @@ try {
   // the visible-conversation switch); the route must not archive anything itself.
   assert.equal(archived.length, 0, 'the mutation route must not archive the source');
   console.log('OPERATION ok   archive  the route leaves archiving to the client UI step');
+  // A hand-off lands mid-turn: the copied prefix ends inside an open turn, and the
+  // seed must close it exactly as buildForkSeed does -- otherwise the branch's own
+  // turn opens while that one is still open and the stored log is rejected on reload.
+  const lastTurnEnd = events.map((event, index) => event.type === 'turn/end' ? index : -1).filter(index => index >= 0).pop();
+  assert(lastTurnEnd !== undefined, 'the fixture log must contain a closed turn');
+  tailDrop = events.length - lastTurnEnd;
+  followups.length = 0;
+  await operate('splice-open', { action: 'splice', sessionId: header.id, eventSeq: assistantTarget.seq, blockIndex: assistantTarget.blockIndex, text: 'open-tail splice' }, 1);
+  assert(lastSeed.some(event => event.type === 'turn/end' && event.data?.reason?.kind === 'forked'),
+    'a copied open turn must be closed with the forked cause');
+  let open = false;
+  for (const event of lastSeed) {
+    if (event.type === 'turn/start') {
+      assert(!open, 'no turn may start while another is still open in the seed');
+      open = true;
+    } else if (event.type === 'turn/end') open = false;
+  }
+  console.log('OPERATION ok   open-tail  the copied open turn is closed before the branch continues');
+
   console.log('OPERATION ACCEPTANCE PASSED (offline, real handler + real log)');
 } finally {
   server.close();
