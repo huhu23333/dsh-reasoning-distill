@@ -46,7 +46,16 @@ export function apply(ctx: Context): void {
   ctx.slots.inject('conversation.input.activity', () => ctx.slots.register({
     name: 'conversation.input.activity', id: 'reasoning-distill', order: 30,
     locale: NS,
-    inject: (sessionId) => ({ sessionId }),
+    // This seat is mounted whenever a conversation is open, so it is the follower
+    // that can switch conversations after a hand-off the engine made at idle; the
+    // report panel is only mounted while the user looks at it.
+    inject: (sessionId) => ({
+      sessionId,
+      openSession: (id: string) => ctx.uiWorkspace.openSession(id as SessionTarget),
+      archiveSession: (id: string) => {
+        void ctx.uiWorkspace.archiveSession(id as Parameters<typeof ctx.uiWorkspace.archiveSession>[0])
+      },
+    }),
   }, CompressionActivity))
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view', id: 'reasoning-distill', order: 30,

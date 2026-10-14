@@ -1040,8 +1040,10 @@ const decision37 = await decide('agent/pre-step', { agent: idleAgent(s37) }, asy
 await settleFor(async () => (await store37.load(s37.id)).entries[0]?.handoff?.state === 'created')
 check('the finished compression is handed to the branch backend',
   backendCalls.length === 1 && backendCalls[0]!.path === '/message-edit', JSON.stringify(backendCalls))
-check('the backend is asked to edit exactly that reasoning block',
-  backendCalls[0]?.body['action'] === 'edit' && backendCalls[0]?.body['eventSeq'] === seq37
+check('the backend is asked to splice exactly that reasoning block',
+  // `splice` keeps the branch a faithful copy of the conversation (tool calls and
+  // later steps included); `edit` would rebuild the turn from its start instead.
+  backendCalls[0]?.body['action'] === 'splice' && backendCalls[0]?.body['eventSeq'] === seq37
   && backendCalls[0]?.body['blockIndex'] === 0 && backendCalls[0]?.body['text'] === 'Distilled: ask for Paris weather and call the tool.',
   JSON.stringify(backendCalls[0]?.body))
 check('the original turn continues while branch creation waits for idle',

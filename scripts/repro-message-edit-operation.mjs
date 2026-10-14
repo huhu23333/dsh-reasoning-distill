@@ -53,6 +53,7 @@ try {
 }
 
 const archived = [];
+let lastSeed;
 
 const plugin = await import(`${pathToFileURL(bundle).href}?t=${Date.now()}`);
 let handler;
@@ -67,6 +68,7 @@ const ctx = {
   agents: {
     get: id => (id === header.id ? agent : undefined),
     create: async options => {
+      lastSeed = options.seed;
       if (SessionApi !== undefined) {
         SessionApi.Session.create(SessionApi.SessionId(options.sessionId), options.seed);
       }
@@ -144,6 +146,28 @@ try {
     action: 'edit', sessionId: header.id, eventSeq: assistantTarget.seq, blockIndex: assistantTarget.blockIndex,
     text: 'edited assistant block by the offline acceptance harness', cascade: 'truncate',
   }, 0);
+  // A splice branch is the whole conversation with one block rewritten: the tool
+  // calls and later steps must survive, and the version record rides along.
+  const originalContent = events[assistantTarget.seq].data.message.content;
+  await operate('splice ', {
+    action: 'splice', sessionId: header.id, eventSeq: assistantTarget.seq,
+    blockIndex: assistantTarget.blockIndex, text: 'spliced reasoning text',
+  }, 0);
+  assert(lastSeed !== undefined, 'the splice must hand a seed to the host');
+  assert(lastSeed.length >= events.length, 'the branch seed must carry the whole conversation');
+  const spliced = lastSeed[assistantTarget.seq];
+  assert.equal(spliced.data.message.content[assistantTarget.blockIndex].text, 'spliced reasoning text');
+  assert.deepEqual(
+    spliced.data.message.content.map(block => block.type),
+    originalContent.map(block => block.type),
+    'every content block must survive the splice',
+  );
+  assert(originalContent.some(block => block.type === 'tool-call') && spliced.data.message.content.some(block => block.type === 'tool-call'),
+    'tool calls must survive the splice');
+  assert.deepEqual(spliced.surfaceOp, events[assistantTarget.seq].surfaceOp, 'the event envelope must survive');
+  assert.equal(lastSeed[events.length].type, 'message-edit/version', 'the version record must follow the copied log');
+  console.log(`OPERATION ok   splice   seedEvents=${String(lastSeed.length)} blocks=${spliced.data.message.content.map(block => block.type).join('+')}`);
+
   // Hiding the replaced conversation belongs to the client UI step (it must follow
   // the visible-conversation switch); the route must not archive anything itself.
   assert.equal(archived.length, 0, 'the mutation route must not archive the source');

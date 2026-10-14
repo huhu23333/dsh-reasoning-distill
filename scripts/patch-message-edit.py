@@ -340,6 +340,86 @@ SERVER_REPLACEMENTS = (
 \t\t\treturn {''',
      '''\t\t\tinverses.length = 0;
 \t\t\treturn {'''),
+    # A faithful compression branch: copy the whole conversation and replace one
+    # assistant block in place. Unlike \`edit\`, tool-call blocks and every later
+    # step survive, and the copied session/title events name the branch.
+    ('''\t\t\t\ttext: record["text"],
+\t\t\t\tcascade: cascadeOf(record["cascade"])
+\t\t\t};
+\t\tcase "reroll": return {''',
+     '''\t\t\t\ttext: record["text"],
+\t\t\t\tcascade: cascadeOf(record["cascade"])
+\t\t\t};
+\t\tcase "splice":
+\t\t\tif (typeof record["text"] !== "string") throw new TypeError("text 必须是字符串。");
+\t\t\treturn {
+\t\t\t\taction: "splice",
+\t\t\t\tsessionId,
+\t\t\t\teventSeq: integerOf(record["eventSeq"], "eventSeq"),
+\t\t\t\tblockIndex: integerOf(record["blockIndex"], "blockIndex"),
+\t\t\t\ttext: record["text"]
+\t\t\t};
+\t\tcase "reroll": return {'''),
+    ('\t\tdefault: throw new TypeError("action 必须是 edit、reroll 或 retry。");',
+     '\t\tdefault: throw new TypeError("action 必须是 edit、splice、reroll 或 retry。");'),
+    ('''\tswitch (operation.action) {
+\t\tcase "edit": return editPlan(operation, turns);''',
+     '''\tswitch (operation.action) {
+\t\tcase "edit": return editPlan(operation, turns);
+\t\tcase "splice": return splicePlan(operation, events);'''),
+    # The splice needs its planner and its in-place event rewriter, and versionSeed
+    # has to apply the rewrite to the copied log before the version record is added.
+    ('function agentOptions(events, fallback) {',
+     '''/** Rewrite one assistant block in place: the branch is a copy of the whole
+* conversation with that single block's text replaced. */
+function splicePlan(operation, events) {
+\tconst target = events[operation.eventSeq];
+\tif (target === void 0 || target.type !== "assistant/message") throw new Error("splice 目标必须是助手消息事件。");
+\tconst before = target.data.message.content[operation.blockIndex];
+\tif (!isTextualBlock(before)) throw new Error("所选助手消息块不是文本或思考。");
+\treturn {
+\t\tboundary: events.length - 1,
+\t\tversion: pairVersionEffect(operation.sessionId, {
+\t\t\toperation: "edit",
+\t\t\tcascade: "preserve",
+\t\t\ttargetTurn: target.data.turn,
+\t\t\ttargetEventSeq: target.seq,
+\t\t\ttargetBlockIndex: operation.blockIndex,
+\t\t\tblockKind: before.type === "reasoning" ? "assistant.reasoning" : "assistant.response",
+\t\t\tbefore: before.text,
+\t\t\tafter: operation.text
+\t\t}),
+\t\tsplice: {
+\t\t\tseq: operation.eventSeq,
+\t\t\tblockIndex: operation.blockIndex,
+\t\t\ttext: operation.text
+\t\t},
+\t\tqueuedUsers: []
+\t};
+}
+/** Copy one assistant message event with a single content block's text replaced.
+* Tool-call blocks and the event envelope survive; the embedded provider stream no
+* longer describes the edited content, so it is dropped. */
+function splicedAssistantEvent(event, blockIndex, text) {
+\tconst data = structuredClone(event.data);
+\tdata.message.content[blockIndex] = {
+\t\t...data.message.content[blockIndex],
+\t\ttext
+\t};
+\tdata.stream = [];
+\treturn {
+\t\t...event,
+\t\tdata
+\t};
+}
+function agentOptions(events, fallback) {'''),
+    ('''\tconst events = inheritedSeed(source, plan.boundary);
+\tconst inheritedLength = events.length;
+\tappendLogSeedEvent(events, "message-edit/version", plan.version);''',
+     '''\tconst events = inheritedSeed(source, plan.boundary);
+\tconst inheritedLength = events.length;
+\tif (plan.splice !== void 0) events[plan.splice.seq] = splicedAssistantEvent(events[plan.splice.seq], plan.splice.blockIndex, plan.splice.text);
+\tappendLogSeedEvent(events, "message-edit/version", plan.version);'''),
     # The branch-mutation route reads the same live Session log. It must not read
     # the removed `.events` array either, or every branch creation answers
     # 400 "events is not iterable" and the compression hand-off falls back in place.

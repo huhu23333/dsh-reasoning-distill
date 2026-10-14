@@ -8,7 +8,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { isStaleResponse } from './ops.ts'
-import { REPORT_ROUTE, type BlockingReason, type SessionReport } from '../shared.ts'
+import { REPORT_ROUTE, type BlockingReason, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
 
@@ -28,6 +28,10 @@ export const IDLE: Live = { count: 0, blockingSince: null, reason: null, started
 type Props = PropsRuntime<'conversation.input.activity'> & PropsLocale<typeof NS> & {
   /** Session whose compressions are shown. */
   sessionId: string
+  /** Select one conversation through the UI navigation service. */
+  openSession: (id: string) => void
+  /** Hide one conversation from the list, once its branch is on screen. */
+  archiveSession: (id: string) => void
 }
 
 /**
@@ -56,11 +60,61 @@ export function liveAfterReport(report: SessionReport | null): Live {
   }
 }
 
-export function CompressionActivity({ sessionId, onActiveChange, t }: Props) {
+/**
+ * The newest created hand-off that landed after this seat started showing the
+ * session, or undefined when none did. A branch that predates the current view is
+ * history: it must never redirect a user who is simply browsing.
+ * @param report - the report just read, or null when the read failed.
+ * @param sessionId - the session this seat currently shows.
+ * @param stamped - when that session started being shown.
+ * @returns the branch to follow and its hand-off time.
+ */
+export function freshHandoff(
+  report: SessionReport | null,
+  sessionId: string,
+  stamped: { sessionId: string; at: number },
+): { branchId: string; at: number } | undefined {
+  if (report === null || stamped.sessionId !== sessionId) return undefined
+  let best: { branchId: string; at: number } | undefined
+  for (const entry of report.entries) {
+    const handoff = entry.handoff
+    if (handoff?.state !== 'created' || handoff.branchId === undefined) continue
+    const at = handoff.at ?? 0
+    if (at <= stamped.at) continue
+    if (best === undefined || at > best.at) best = { branchId: handoff.branchId, at }
+  }
+  return best
+}
+
+export function CompressionActivity({ sessionId, openSession, archiveSession, onActiveChange, t }: Props) {
   const [live, setLive] = useState<Live>(IDLE)
   const [now, setNow] = useState(() => Date.now())
   const sequence = useRef(0)
   const applied = useRef(0)
+  // Stamped when this seat starts showing a session, not when its first report
+  // arrives: browsing history must never redirect to an old hand-off.
+  const followedAt = useRef<{ sessionId: string; at: number }>({ sessionId: '', at: 0 })
+  const followed = useRef(new Set<string>())
+
+  useEffect(() => {
+    followedAt.current = { sessionId, at: Date.now() }
+  }, [sessionId])
+
+  /**
+   * Follow the newest hand-off that landed after this session was opened: show its
+   * branch, then hide the conversation the branch replaced. The engine defers the
+   * branch to idle, so this seat — not the report panel — has to be the follower:
+   * the panel is only mounted while the user looks at it.
+   */
+  const follow = (report: SessionReport | null): void => {
+    const fresh = freshHandoff(report, sessionId, followedAt.current)
+    if (fresh === undefined) return
+    followedAt.current = { sessionId, at: fresh.at }
+    if (followed.current.has(fresh.branchId)) return
+    followed.current.add(fresh.branchId)
+    openSession(fresh.branchId)
+    archiveSession(sessionId)
+  }
 
 
   useEffect(() => {
@@ -80,6 +134,7 @@ export function CompressionActivity({ sessionId, onActiveChange, t }: Props) {
         if (!alive || isStaleResponse(request, applied.current)) return
         applied.current = request
         setLive(liveAfterReport(report))
+        follow(report)
       }).catch(() => {
         // A read that failed says nothing about the compression, so the chip goes
         // back to silence instead of staying expanded on a stale "busy". An older

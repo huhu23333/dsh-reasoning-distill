@@ -109,9 +109,12 @@ export function rewriteRequest(
   if (backend === undefined) return undefined
   if (backend.id === 'message-edit') {
     if (entry.targetBlockIndex < 0) return undefined
+    // A compression branch must be *this* conversation with one block rewritten:
+    // `edit` rebuilds the turn from its start, dropping tool calls and every later
+    // step, while `splice` copies the whole history and replaces the block in place.
     return {
       path: '/message-edit',
-      body: { action: 'edit', sessionId, eventSeq: entry.targetSeq, blockIndex: entry.targetBlockIndex, text, cascade: 'truncate' },
+      body: { action: 'splice', sessionId, eventSeq: entry.targetSeq, blockIndex: entry.targetBlockIndex, text },
     }
   }
   if (entry.targetMessageId === '') return undefined

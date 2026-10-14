@@ -11,7 +11,7 @@ import { readFileSync } from 'node:fs'
 import { effectHarness } from './effect-harness.ts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, signedCount, signedMoney, stockOfEntry } from '../src/client/View.tsx'
-import { CompressionActivity } from '../src/client/ActivityChip.tsx'
+import { CompressionActivity, freshHandoff } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
 import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
@@ -179,9 +179,11 @@ check('and an uninstalled/unknown id does not unlock it', masterSwitchState('nop
 // Requests: branch backend needs seq + block index, in-place backend needs the message id.
 const target = { targetSeq: 12, targetMessageId: 'm-12', targetBlockIndex: 2 }
 const branchCall = rewriteRequest('message-edit', 'session-1', target, 'short')
-check('the branch backend is asked to edit the reasoning block',
+check('the branch backend is asked to splice the reasoning block',
+  // The branch must stay the whole conversation: `splice` keeps tool calls and the
+  // later steps, while `edit` rebuilds the turn from its start.
   branchCall?.path === '/message-edit' && branchCall.body['eventSeq'] === 12 && branchCall.body['blockIndex'] === 2
-  && branchCall.body['text'] === 'short' && branchCall.body['action'] === 'edit',
+  && branchCall.body['text'] === 'short' && branchCall.body['action'] === 'splice',
   JSON.stringify(branchCall))
 const inPlaceCall = rewriteRequest('msg-edit', 'session-1', target, 'short')
 check('the in-place backend is asked to rewrite the message reasoning',
@@ -323,7 +325,26 @@ check('a default-rule edit writes one field',
 
 console.log('render: header action and composer activity chip')
 check('the activity chip is silent while idle',
-  tryRender(<CompressionActivity sessionId="session-1" onActiveChange={noop} t={t} />) === '')
+  tryRender(<CompressionActivity sessionId="session-1" openSession={noop} archiveSession={noop} onActiveChange={noop} t={t} />) === '')
+
+// The composer seat — not the report panel — follows a hand-off, so its decision
+// has to be exact: follow only a branch that landed after this view opened, and
+// follow the newest one when out-of-order reports arrive.
+const handoffReport = (...handoffs: { state: 'created' | 'failed' | 'skipped'; branchId?: string; at: number }[]): SessionReport =>
+  ({ entries: handoffs.map(handoff => ({ handoff })) } as unknown as SessionReport)
+check('a hand-off created after this session opened is followed',
+  freshHandoff(handoffReport({ state: 'created', branchId: 'branch-1', at: 20 }), 'session-1', { sessionId: 'session-1', at: 10 })?.branchId === 'branch-1')
+check('a hand-off that predates the current view is history, not a redirect',
+  freshHandoff(handoffReport({ state: 'created', branchId: 'branch-1', at: 5 }), 'session-1', { sessionId: 'session-1', at: 10 }) === undefined)
+check('the newest hand-off wins when reports arrive out of order',
+  freshHandoff(handoffReport(
+    { state: 'created', branchId: 'older', at: 15 },
+    { state: 'created', branchId: 'newer', at: 30 },
+  ), 'session-1', { sessionId: 'session-1', at: 10 })?.branchId === 'newer')
+check('a seat showing another session follows nothing',
+  freshHandoff(handoffReport({ state: 'created', branchId: 'branch-1', at: 20 }), 'session-2', { sessionId: 'session-1', at: 10 }) === undefined)
+check('a failed hand-off is never followed',
+  freshHandoff(handoffReport({ state: 'failed', at: 20 }), 'session-1', { sessionId: 'session-1', at: 10 }) === undefined)
 
 check('no render path threw', !rendered.some(markup => markup.includes('__THREW__')))
 
