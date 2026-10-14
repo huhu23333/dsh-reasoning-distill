@@ -43,8 +43,7 @@ function TextBlock({ label, value }: { label: string; value: string }) {
 function SessionRow({ entry, t, openSession }: { entry: CompressionEntry; t: Translate; openSession: (id: string) => void }) {
   const [copied, setCopied] = useState(false)
   const id = entry.distill.sessionId
-  // Audit sessions are deliberately in-memory, so an id from an earlier run no
-  // longer opens anything; say that instead of offering a dead button.
+  // An id that genuinely cannot be loaded no longer offers a dead button.
   const expired = entry.sessionLive === false
   const label = id === ''
     ? (entry.sessionMissing === true ? t('view.sessionMissing') : t('view.noSession'))
@@ -112,11 +111,11 @@ function Entry({ entry, t, liveStockIds }: {
       {entry.skipped === true && <p role="status" className={css.note}>{t('view.skippedNote')}</p>}
       {run.error && <p role="alert" className={css.error}>{t('view.abandoned')}: {run.error}</p>}
       <div className={css.facts}>
-        <div><span>{t('view.original')}</span><strong>{count(entry.originalChars)} {t('view.chars')} / {count(entry.originalTokens)} {t('view.tokens')}</strong></div>
-        <div><span>{t('view.result')}</span><strong>{notAdopted ? verdict : `${count(entry.distilledChars)} ${t('view.chars')} / ${count(entry.distilledTokens)} ${t('view.tokens')}`}</strong></div>
+        <div><span>{t('view.original')}</span><strong>{count(entry.originalChars)} {t('view.chars')} / {count(entry.originalTokens)} {t('view.tokens')} ({t('view.estimated')})</strong></div>
+        <div><span>{t('view.result')}</span><strong>{notAdopted ? verdict : `${count(entry.distilledChars)} ${t('view.chars')} / ${count(entry.distilledTokens)} ${t('view.tokens')} (${t('view.estimated')})`}</strong></div>
         <div><span>{t('view.session')}</span><code>{run.sessionId || (entry.sessionMissing === true ? t('view.sessionMissing') : t('view.noSession'))}</code></div>
         <div><span>{t('view.model')}</span><strong>{run.provider}/{run.model} · {run.effort}</strong></div>
-        <div><span>{t('view.input')} / {t('view.cache')} / {t('view.output')}</span><strong>{count(run.inputTokens)} / {count(run.cacheReadTokens)} / {count(run.outputTokens)} token</strong></div>
+        <div><span>{t('view.input')} / {t('view.cache')} / {t('view.output')}</span><strong>{count(run.inputTokens)} / {count(run.cacheReadTokens)} / {count(run.outputTokens)} token{estimated ? ` (${t('view.estimated')})` : ''}</strong></div>
         <div><span>{t('view.duration')}</span><strong>{count(run.durationMs)} ms</strong></div>
         <div><span>{t('view.cost')}</span><strong>{money(run.cost)}{estimated ? ` (${t('view.estimated')})` : ''}</strong></div>
         <div><span>{t('view.period')}</span><strong>{t(run.period === 'peak' ? 'view.peak' : 'view.off')}</strong></div>
@@ -124,7 +123,7 @@ function Entry({ entry, t, liveStockIds }: {
         {entry.handoff?.state === 'skipped' && <div><span>交接已跳过</span><strong>{entry.handoff.error ?? ''}</strong></div>}
         {entry.handoff?.state === 'failed' && <div><span>{t('view.branchFailed')}</span><strong className={css.error}>{entry.handoff.error ?? ''} · {t('view.branchKept')}</strong></div>}
         {entry.handoff?.state === 'created' && <div><span>{t('view.branchCreated')}</span><strong>{entry.handoff.branchId ?? ''}</strong></div>}
-        <div><span>{t('view.stock')}</span><strong>{count(stockOfEntry(entry, liveStockIds))} token</strong> · <strong>{signedCount(-entry.savedTokensPerRequest * entry.liveRequests)} {t('view.tokens')} {t('view.lifetime')}</strong></div>
+        <div><span>{t('view.stock')}</span><strong>{t('view.estimate')} {count(stockOfEntry(entry, liveStockIds))} token</strong> · <strong>{t('view.estimate')} {signedCount(-entry.savedTokensPerRequest * entry.liveRequests)} {t('view.tokens')} {t('view.lifetime')}</strong></div>
       </div>
       <TextBlock label={t('view.request')} value={run.requestText} />
       <TextBlock label={t('view.result')} value={run.responseText} />
@@ -416,7 +415,7 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
     {report && <>
       <div className={css.summary}>
         <div><span>{t('view.triggers')}</span><strong>{t('view.succeeded')} {count(report.succeeded)}</strong><small>{t('view.attempts')} {count(report.triggers)} · {t('view.estimate')} {signedCount(-lifetimeTokens)} {t('view.tokens')} {t('view.historical')}</small></div>
-        <div><span>{t('view.distillCost')}</span><strong>{signedMoney(report.distillCost)}</strong><small>{count(report.entries.reduce((sum, entry) => sum + entry.distill.inputTokens + entry.distill.cacheReadTokens + entry.distill.cacheWriteTokens + entry.distill.outputTokens, 0))} token</small></div>
+        <div><span>{t('view.distillCost')}</span><strong>{signedMoney(report.distillCost)}</strong><small>{report.entries.some(entry => entry.distill.estimated === true) ? `${t('view.estimate')} ` : ''}{count(report.entries.reduce((sum, entry) => sum + entry.distill.inputTokens + entry.distill.cacheReadTokens + entry.distill.cacheWriteTokens + entry.distill.outputTokens, 0))} token</small></div>
         <div><span>{t('view.stock')}</span><strong>{signedMoney(-stockSaved)}</strong><small>{t('view.estimate')} {signedCount(-stockTokens)} {t('view.tokens')} · {t('view.stockNote')}</small></div>
         <div><span>{t('view.savedTotal')}</span><strong>{signedMoney(-report.savedTotal)}</strong><small>{t('view.estimate')} {signedCount(-lifetimeTokens)} {t('view.tokens')} {t('view.lifetime')}</small></div>
         <div><span>{t('view.net')}</span><strong className={report.net < 0 ? css.negative : css.positive}>{signedMoney(-report.net)}</strong><small>{t('view.estimate')} {signedCount(-lifetimeTokens)} {t('view.tokens')} {t('view.lifetime')}</small></div>

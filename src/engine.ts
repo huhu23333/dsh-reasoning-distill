@@ -50,9 +50,16 @@ function optionalService<T>(ctx: Context, name: string): T | undefined {
   }
 }
 
-/** Estimated tokens for one string, matching the harness's chars-per-token estimate. */
-function estimateChars(chars: number): number {
-  return Math.ceil(chars / 4)
+/** User-supplied ratios: 0.6 tokens per CJK code point, 0.3 otherwise. */
+export function estimateTextTokens(text: string): number {
+  let units = 0
+  for (const char of text) {
+    const cp = char.codePointAt(0) ?? 0
+    units += (cp >= 0x3400 && cp <= 0x9fff) || (cp >= 0xf900 && cp <= 0xfaff)
+      || (cp >= 0x3040 && cp <= 0x30ff) || (cp >= 0xac00 && cp <= 0xd7af)
+      || (cp >= 0x20000 && cp <= 0x2fa1f) ? 2 : 1
+  }
+  return Math.round(units * 0.3)
 }
 
 /** Reasoning text of one assistant message, or an empty string. */
@@ -74,8 +81,8 @@ interface PendingTarget {
   model: string
   content: readonly ContentBlock[]
   rule: ModelRule
-  /** Estimated-size source for the live UI. */
-  reasoningChars: number
+  /** Estimated token count of the staged reasoning. */
+  reasoningTokens: number
   /** Index of the reasoning block inside the message, for the message-edit bridge. */
   reasoningBlockIndex: number
 }
@@ -1134,7 +1141,7 @@ export class ReasoningDistillEngine {
     if (!this.appliesTo(session, rule)) return model
     const reasoning = reasoningOf(message.content)
     if (reasoning.trim().length === 0) return model
-    const tokens = estimateChars(reasoning.length)
+    const tokens = estimateTextTokens(reasoning)
     if (tokens < rule.thresholdTokens) return model
     const hasToolCall = message.content.some(block => block.type === 'tool-call')
     if (!hasToolCall && !rule.includeFinalTurns) return model
@@ -1150,7 +1157,7 @@ export class ReasoningDistillEngine {
     this.pending.set(key, {
       sessionId: session.id,
       seq: event.seq,
-      reasoningChars: reasoning.length,
+      reasoningTokens: tokens,
       reasoningBlockIndex: reasoningBlockIndexOf(message.content),
       turn: data.turn ?? 0,
       step: data.step ?? 0,
@@ -1184,7 +1191,7 @@ export class ReasoningDistillEngine {
       provider: target.provider,
       model: target.model,
       distiller: `${target.rule.distiller.provider}/${target.rule.distiller.model}`,
-      originalTokens: estimateChars(target.reasoningChars),
+      originalTokens: target.reasoningTokens,
       startedAt: Date.now(),
     })
     const promise = this.compress(session, target).catch((error: unknown) => {
@@ -1610,7 +1617,7 @@ export class ReasoningDistillEngine {
           provider: target.provider,
           model: target.model,
           originalChars: reasoning.length,
-          originalTokens: estimateChars(reasoning.length),
+          originalTokens: estimateTextTokens(reasoning),
           distilledText: '',
           distilledChars: 0,
           distilledTokens: 0,
@@ -1632,8 +1639,8 @@ export class ReasoningDistillEngine {
     }
     const ceiling = target.rule.maxOutputChars
     const distilled = ceiling > 0 && outcome.text.length > ceiling ? outcome.text.slice(0, ceiling) : outcome.text
-    const originalTokens = estimateChars(reasoning.length)
-    const distilledTokens = estimateChars(distilled.length)
+    const originalTokens = estimateTextTokens(reasoning)
+    const distilledTokens = estimateTextTokens(distilled)
     const saved = originalTokens - distilledTokens
     if (saved < target.rule.minSavedTokens) {
       this.ctx.logger.info(
@@ -1825,7 +1832,7 @@ export class ReasoningDistillEngine {
       durationMs: 0,
     }
     let reported = false
-    let receivedChars = 0
+    let receivedText = ''
     try {
       const assembler = new BlockAssembler()
       const timeout = target.rule.timeoutMs
@@ -1845,7 +1852,7 @@ export class ReasoningDistillEngine {
         for await (const chunk of stream) {
           // Count as it arrives: a stream that throws part-way still generated
           // this much output, and the estimate must reflect the spend.
-          if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') receivedChars += chunk.text.length
+          if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') receivedText += chunk.text
           if (chunk.type === 'finish') sawFinish = true
           assembler.push(chunk)
         }
@@ -1911,8 +1918,8 @@ export class ReasoningDistillEngine {
       // An interrupted or failed call reports no usage, but it did send a prompt
       // and usually generated something. Estimate so the spending is visible
       // instead of silently reading as zero.
-      run.inputTokens = Math.ceil((prompt.length + userText.length) / 4)
-      run.outputTokens = Math.ceil(receivedChars / 4)
+      run.inputTokens = estimateTextTokens(prompt + userText)
+      run.outputTokens = estimateTextTokens(receivedText)
       run.estimated = true
     }
     const prices = priceAt(route.model, this.config.prices.get(), startedAt, this.config).bucket
@@ -1956,11 +1963,8 @@ export class ReasoningDistillEngine {
       // Claim the durable log writer BEFORE the first append: the backend routes
       // a published session's events to its writer by id, so events appended
       // earlier would never reach disk.
-      // A session whose durable writer did not attach is not an audit log: its
-      // events live only in memory and vanish on restart, so the entry must say
-      // so (`sessionMissing`) instead of promising a readable record. The
-      // compression itself still proceeds — the full text always lives on the
-      // entry, which is the real record.
+      // A backend write failure remains visible as `sessionMissing`, rather than
+      // claiming that an unpersisted session will survive a restart.
       if (this.attachWriter !== undefined) {
         try {
           await this.attachWriter(created)

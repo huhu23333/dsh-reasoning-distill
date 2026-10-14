@@ -43,12 +43,7 @@ export interface CompressionEntry {
   skipped?: true
   /** No auditable compression session could be opened; the rewrite still shipped. */
   sessionMissing?: true
-  /**
-   * Whether the linked compression session still exists in this process. Audit
-   * sessions are created outside the agent lifecycle, which is what attaches a
-   * session-log writer, so they are deliberately in-memory: after a restart the
-   * id no longer resolves, although the transcript below stays durable here.
-   */
+  /** Whether the linked compression session is live or still loadable from storage. */
   sessionLive?: boolean
   appliedAt: number
   turn: number

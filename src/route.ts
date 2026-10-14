@@ -51,7 +51,7 @@ export function registerRoutes(
     handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }>
   },
 ): void {
-  ctx.inject(['connection', 'sessions', 'llm'], (child) => {
+  ctx.inject(['connection', 'sessions', 'llm', 'sessionPersistence'], (child) => {
     const connection = child.get('connection') as { fetch?: FetchRouteRegistrar } | undefined
     const register = connection?.fetch?.register?.bind(connection.fetch)
     if (register === undefined) {
@@ -78,12 +78,16 @@ export function registerRoutes(
         if (sessions?.get(sessionId) === undefined) return json({ error: 'unknown session' }, 404)
         try {
           const record = await store.load(sessionId)
+          const persistence = child.get('sessionPersistence') as { stat(id: string): Promise<unknown> }
+          const linked = [...new Set(record.entries.map(entry => entry.distill.sessionId).filter(Boolean))]
+          const availability = new Map(await Promise.all(linked.map(async id =>
+            [id, sessions?.get(id) !== undefined || await persistence.stat(id) !== undefined] as const)))
           return json(buildReport(sessionId, record, config, {
             ...engine.snapshot(sessionId),
             // The engine alone can say which rewrites still replace reasoning in
             // the prompt a request would carry now.
             stock: engine.stock(sessionId),
-            isLive: (id: string) => sessions?.get(id) !== undefined,
+            isLive: (id: string) => availability.get(id) === true,
           }))
         } catch (error: unknown) {
           // A sidecar that cannot be read is reported, never overwritten: the

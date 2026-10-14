@@ -17,11 +17,12 @@ import { join } from 'node:path'
 const home = mkdtempSync(join(tmpdir(), 'rd-smoke-'))
 process.env['DSH_HOME'] = home
 
-const { ReasoningDistillEngine } = await import('../src/engine.ts')
+const { ReasoningDistillEngine, estimateTextTokens } = await import('../src/engine.ts')
+const { apply: applyPlugin, inject: requiredServices } = await import('../src/index.ts')
 const { SidecarStore, dshHome, legacySidecarPath, sidecarPath } = await import('../src/store.ts')
 const { buildReport } = await import('../src/report.ts')
 const { registerRoutes } = await import('../src/route.ts')
-const { HANDOFF_ROUTE } = await import('../src/shared.ts')
+const { HANDOFF_ROUTE, REPORT_ROUTE } = await import('../src/shared.ts')
 
 /** Minimal in-memory session. */
 class FakeSession {
@@ -186,6 +187,100 @@ function check(label: string, condition: boolean, detail = ''): void {
   }
 }
 
+check('Chinese- and English-heavy estimates use the supplied 0.6/0.3 token ratios',
+  estimateTextTokens('中文字符测试中文字符测试') === 7
+  && estimateTextTokens('english text example english text example') === 12)
+
+// The plugin's public startup and the real engine compression path must share
+// the same writer: a persisted audit log is not merely an in-memory session.
+const persisted = new Map<string, FakeSession['log']>()
+const auditSessions = new Map<string, FakeSession>()
+const auditWriters = new Map<string, { flush(): Promise<void> }>()
+const auditHandlers = new Map<string, Function[]>()
+const auditLlm = { ...fakeLlm, calls: 0 }
+const auditCtx = { ...ctx, llm: auditLlm,
+  on(name: string, fn: Function) {
+    const list = auditHandlers.get(name) ?? []
+    list.push(fn)
+    auditHandlers.set(name, list)
+    return () => undefined
+  },
+  get(name: string): unknown {
+    return name === 'sessionPersistence' ? this.sessionPersistence : name === 'webServer' || name === 'agents' ? Reflect.get(this, name) : undefined
+  },
+  effect() { return undefined },
+  sessionPersistence: {
+    async create(header: { id: string }) {
+      persisted.set(header.id, [])
+      const handle = {
+        async flush() {
+          const session = auditSessions.get(header.id)
+          if (session !== undefined) persisted.set(header.id, [...session.log])
+        },
+        async close() {},
+      }
+      auditWriters.set(header.id, handle)
+      return handle
+    },
+  },
+  sessions: { ...ctx.sessions,
+    list: () => [...auditSessions.values()],
+    get: (id: string) => auditSessions.get(id),
+    create: () => {
+      const id = `audit-compress-${auditSessions.size + 1}`
+      const session = new FakeSession(id, { id, cwd: '/tmp' })
+      auditSessions.set(session.id, session)
+      return session
+    },
+    async flush(session: FakeSession) {
+      await auditWriters.get(session.id)?.flush()
+      return true
+    },
+  },
+}
+let missingServiceError = ''
+try { applyPlugin({ ...auditCtx, sessionPersistence: undefined, get: () => undefined } as never, makeConfig()) }
+catch (error: unknown) { missingServiceError = String(error) }
+applyPlugin(auditCtx as never, makeConfig())
+const audited = new FakeSession('session-audit-regression')
+auditSessions.set(audited.id, audited)
+for (const fn of auditHandlers.get('session/created') ?? []) await fn(audited)
+audited.append('user/message', { id: 'audit-u', role: 'user', content: [{ type: 'text', text: 'audit me' }], source: { kind: 'user' } })
+const auditedSeq = audited.append('assistant/message', {
+  turn: 1, step: 1,
+  message: { id: 'audit-a', role: 'assistant', content: [{ type: 'reasoning', text: 'audit reasoning '.repeat(200) }, { type: 'tool-call', id: 'audit-t', name: 'tool', arguments: '{}' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } }, stream: [],
+}).seq
+audited.append('step/end', { turn: 1, step: 1 })
+for (const fn of auditHandlers.get('session/event') ?? []) await fn(audited, audited.eventAt(auditedSeq))
+for (const fn of auditHandlers.get('session/event') ?? []) await fn(audited, audited.eventAt(audited.log.length - 1))
+for (const fn of auditHandlers.get('agent/pre-step') ?? []) await fn({ agent: { session: audited } }, async () => undefined)
+const auditedEntry = (await new SidecarStore().load(audited.id)).entries[0]
+await settleFor(async () => persisted.get(auditedEntry?.distill.sessionId ?? '')?.some(event => event.type === 'assistant/message') === true)
+const persistedAudit = persisted.get(auditedEntry?.distill.sessionId ?? '')
+const reopenedAudit = persistedAudit === undefined ? undefined : new FakeSession(auditedEntry!.distill.sessionId, { id: auditedEntry!.distill.sessionId, cwd: '/tmp' })
+for (const event of persistedAudit ?? []) reopenedAudit!.append(event.type, event.data)
+let reportHandler: ((request: Request) => Promise<Response>) | undefined
+const coldSessions = new Map([[audited.id, audited]])
+const coldContext = {
+  ...auditCtx,
+  sessions: { ...auditCtx.sessions, get: (id: string) => coldSessions.get(id) },
+  get(name: string): unknown { return Reflect.get(this, name) },
+  sessionPersistence: { stat: async (id: string) => persisted.has(id) ? { header: { id } } : undefined },
+  inject: (_deps: string[], callback: (child: unknown) => void) => callback(coldContext),
+  connection: { fetch: { register: (route: { path: string; fetch: (request: Request) => Promise<Response> }) => {
+    if (route.path === REPORT_ROUTE) reportHandler = route.fetch
+    return async () => undefined
+  } } },
+  effect: (register: () => unknown) => { register() },
+}
+registerRoutes(coldContext as never, makeConfig(), new SidecarStore(), { snapshot: () => ({ active: [], blockingSince: null, blockingReason: null, pendingBranch: null, generation: 0 }), stock: () => undefined, handoff: async () => ({ ok: true, recorded: true }) })
+const coldReportResponse = await reportHandler?.(new Request('http://localhost/api/report', { method: 'POST', body: JSON.stringify({ sessionId: audited.id }) }))
+const coldReport = coldReportResponse === undefined ? undefined : await coldReportResponse.json() as { entries: Array<{ sessionLive?: boolean }> }
+check('audit startup requires persistence and compressed session loads durably without missing marker',
+  requiredServices.includes('sessionPersistence') && missingServiceError.includes('sessionPersistence')
+  && auditedEntry?.sessionMissing !== true && reopenedAudit?.log.some(event => event.type === 'assistant/message') === true
+  && coldReport?.entries[0]?.sessionLive === true,
+  JSON.stringify({ requiredServices, missingServiceError, id: auditedEntry?.distill.sessionId, missing: auditedEntry?.sessionMissing, eventTypes: persistedAudit?.map(event => event.type), reportStatus: coldReportResponse?.status, coldLive: coldReport?.entries[0]?.sessionLive, report: coldReportResponse?.status === 200 ? undefined : coldReport, auditSessions: [...auditSessions.keys()], persisted: [...persisted.keys()] }))
 const config = makeConfig()
 const store = new SidecarStore()
 const engine = new ReasoningDistillEngine(ctx as never, config as never, store)

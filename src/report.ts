@@ -37,7 +37,7 @@ export function buildReport(
     active: ActiveCompression[]
     blockingSince: number | null
     blockingReason: BlockingReason | null
-    /** Tells whether a compression session id still resolves in this process. */
+    /** Tells whether a compression session is live or remains in persistent storage. */
     isLive?: (sessionId: string) => boolean
     /**
      * The stock as the engine computed it from the prompt a request would carry

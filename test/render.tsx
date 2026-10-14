@@ -7,6 +7,7 @@
  */
 
 import type { ReactElement } from 'react'
+import { readFileSync } from 'node:fs'
 import { effectHarness } from './effect-harness.ts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, signedCount, signedMoney, stockOfEntry } from '../src/client/View.tsx'
@@ -125,6 +126,23 @@ check('the per-request figure is the stock', modern.includes('view.stock') && mo
 check('the lifetime figure says it is a lifetime', modern.includes('view.lifetime'))
 check('the cache-break card is gone',
   !modern.includes('view.cacheBreakCost') && !modern.includes('view.cacheBreakNote'))
+
+const positiveLedger = tryRender(<ReportBody report={{ ...modernReport(), entries: [{ ...modernReport().entries[0]!, distill: { ...modernReport().entries[0]!.distill, cost: 0.079344 }, cacheBreakCost: 0, liveSaved: 0.054102 }] }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
+const negativeLedger = tryRender(<ReportBody report={{ ...modernReport(), entries: [{ ...modernReport().entries[0]!, distill: { ...modernReport().entries[0]!.distill, cost: 0.001 }, cacheBreakCost: 0, liveSaved: 0.054102 }] }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
+const stylesheet = readFileSync('src/client/View.module.css', 'utf8')
+const ledgerClass = (html: string): string => html.match(/<span class="([^"]+)"[^>]*>\+¥[\d.]+ − ¥[\d.]+ = [^<]+<\/span>/)?.[1]?.split(' ').at(-1) ?? ''
+check('positive ledger net is red and negative ledger net is green',
+  positiveLedger.includes('+¥0.079344 − ¥0.054102 = +¥0.025242')
+  && /\.negative\{color:#b23636\}/.test(stylesheet)
+  && /\.positive\{color:#15816d\}/.test(stylesheet)
+  && ledgerClass(positiveLedger).endsWith('_negative') && ledgerClass(negativeLedger).endsWith('_positive')
+  && !/\.entry>summary>\.metric:last-child\{[^}]*color:#15816d/.test(stylesheet))
+
+const estimatedUsage = tryRender(<ReportBody report={{ ...modernReport(), entries: [{ ...modernReport().entries[0]!, distill: { ...modernReport().entries[0]!.distill, inputTokens: 7, cacheReadTokens: 2, outputTokens: 13, estimated: true } }] }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
+check('provider usage is shown verbatim and fallback token figures identify estimates',
+  modern.includes('100 / 0 / 20 token') && !modern.includes('100 / 0 / 20 token (view.estimated)')
+  && estimatedUsage.includes('7 / 2 / 13 token (view.estimated)')
+  && modern.includes('22,036 view.chars / 5,509 view.tokens') && modern.includes('5,509 view.tokens (view.estimated)'))
 
 console.log('client: the branch bridge speaks dsh-message-edit\'s contract')
 const bridge = messageEditRequest('session-1', { targetSeq: 12, targetBlockIndex: 1 }, 'short reasoning')

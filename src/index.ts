@@ -27,7 +27,7 @@ export type { Config as ReasoningDistillConfig } from './config.ts'
 export const name = 'reasoning-distill'
 
 /** Services required before the engine can observe sessions. */
-export const inject = ['sessions', 'llm']
+export const inject = ['sessions', 'llm', 'sessionPersistence']
 
 /**
  * Plugin body.
@@ -35,21 +35,20 @@ export const inject = ['sessions', 'llm']
  * @param config - validated {@link PluginConfig}.
  */
 export function apply(ctx: Context, config: PluginConfig): void {
+  // Static injection orders startup; this guard also gives direct callers an
+  // actionable error instead of silently leaving new audit sessions in RAM.
+  const persistence = ctx.get('sessionPersistence')
+  if (persistence === undefined) throw new Error('reasoning-distill requires the sessionPersistence service; install and enable a session-persistence backend before loading this plugin')
   const store = new SidecarStore()
   const engine = new ReasoningDistillEngine(ctx, config, store)
   engine.start()
   registerRoutes(ctx, config, store, engine)
-  // A separate scope so a profile without the JSONL backend simply keeps audit
-  // sessions in memory, instead of this plugin failing to load or waiting on a
-  // service that may never appear.
-  ctx.inject(['sessionPersistence'], (child) => {
-    // The handle owns this session's writer until it is released; dropping it
-    // would leak ownership for every audit session this plugin creates.
-    const handles: Array<{ release?: () => void }> = []
-    child.effect(() => () => { for (const handle of handles.splice(0)) handle.release?.() })
-    engine.usePersistence(async (session) => {
-      handles.push(await child.sessionPersistence.create(session.header) as { release?: () => void })
-    })
+  // The handle owns this session's writer until disposal; registering this
+  // callback synchronously prevents the first compression racing the writer.
+  const handles: Array<{ close?: () => Promise<void> }> = []
+  ctx.effect(() => async () => { for (const handle of handles.splice(0)) await handle.close?.() })
+  engine.usePersistence(async (session) => {
+    handles.push(await persistence.create(session.header))
   })
   // This plugin ships its own Settings page, so the generic schema form is off.
   // The settings service is part of the host shell and ships no standalone types
