@@ -715,6 +715,29 @@ export class ReasoningDistillEngine {
     })()
   }
 
+  /**
+   * Copy one session's ledger onto a branch cut from it.
+   *
+   * The branch continues the same conversation (the splice keeps every sequence
+   * number), so the same entries describe it. Best effort: a panel that cannot report
+   * the hand-off must never fail the hand-off itself.
+   * @param sourceId - session the branch was cut from.
+   * @param branchId - branch session that was just created.
+   */
+  private async carryLedgerToBranch(sourceId: string, branchId: string): Promise<void> {
+    try {
+      const source = await this.store.load(sourceId)
+      if (source.entries.length === 0) return
+      await this.store.update(branchId, (record) => {
+        record.epoch = source.epoch
+        record.countedThroughSeq = source.countedThroughSeq
+        record.entries = source.entries.map(entry => ({ ...entry }))
+      })
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: branch %s could not inherit the ledger: %o', branchId, error)
+    }
+  }
+
   /** POST one branch operation at idle; never retry ambiguous non-idempotent requests. */
   private async handOffToBranch(session: Session, signal?: AbortSignal): Promise<boolean> {
     const generation = this.generation.get(session.id) ?? 0
@@ -778,6 +801,10 @@ export class ReasoningDistillEngine {
         return false
       }
       this.ctx.logger.info('reasoning-distill: handed %s over to branch %s', session.id, created)
+      // The branch is this conversation with the rewrite in force, so it inherits the
+      // ledger: without it the branch's panel reports nothing and loses the accounting
+      // for the compression that created it.
+      await this.carryLedgerToBranch(session.id, created)
       // Only the generation that asked for this hand-off may have its turn ended:
       // a disposed one is already gone.
       return (this.generation.get(session.id) ?? 0) === generation

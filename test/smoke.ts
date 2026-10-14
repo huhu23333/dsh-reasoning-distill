@@ -1116,6 +1116,10 @@ check('the branch is created during pre-step without waiting for idle',
   posts37a === 1 && (await store37a.load(s37a.id)).entries[0]?.handoff?.branchId === 'session-idle-branch',
   JSON.stringify({ posts37a, handoff: (await store37a.load(s37a.id)).entries[0]?.handoff }))
 check('a created branch ends the original turn', (decision37a as { kind?: string }).kind === 'reject', JSON.stringify(decision37a))
+const branchRecord37a = await store37a.load('session-idle-branch')
+check('the branch inherits the ledger so its panel reports the compression it was cut from',
+  branchRecord37a.entries.length === 1 && branchRecord37a.entries[0]?.id === (await store37a.load(s37a.id)).entries[0]?.id,
+  JSON.stringify({ branchEntries: branchRecord37a.entries.length }))
 await fire('agent/pre-step', { agent: agent37a }, async () => ({ kind: 'enter', messages: [] }))
 check('a created hand-off is never POSTed again', posts37a === 1, String(posts37a))
 await new Promise<void>(resolve => activeBackend37a.close(() => resolve()))
