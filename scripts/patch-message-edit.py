@@ -193,9 +193,12 @@ async function lineageVersions(ctx, sessionId) {
 \t\tconst rootId = target.complete === true ? target.root?.header?.id : target.ancestors?.at?.(-1)?.header?.id ?? sessionId;
 \t\tconst tree = rootId !== void 0 && rootId !== sessionId ? await ctx.sessionQuery.traceSession(rootId) : target;
 \t\tconst lineage = flattenLineage(tree?.target ?? target.target, tree?.descendants ?? []);
+\t\t// A subagent session shares the fork lineage but is not a version of this
+\t\t// conversation; listing it would put unrelated work in the Timeline.
+\t\tconst family = lineage.filter(({ record }) => record.header.id === sessionId || record.header.origin !== "subagent");
 \t\tconst onPath = new Set([sessionId]);
 \t\tfor (const ancestor of target.ancestors ?? []) if (ancestor?.header?.id !== void 0) onPath.add(ancestor.header.id);
-\t\tconst versions = lineage.map(({ record, depth }) => {
+\t\tconst versions = family.map(({ record, depth }) => {
 \t\t\tconst id = record.header.id;
 \t\t\tconst event = loadedVersionEvent(ctx, record);
 \t\t\tconst effect = event?.data?.effect;

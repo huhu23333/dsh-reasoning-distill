@@ -48,9 +48,12 @@ const live = {
 };
 const rootRecord = { header: { id: ROOT_ID, createdAt: header.createdAt - 1, isSeeded: false }, live: false, persisted: true };
 const childRecord = { header: { id: header.id, createdAt: header.createdAt, parentSession: ROOT_ID, isSeeded: true }, live: true, persisted: true };
+// A subagent session shares the fork lineage but is not a version: it must not appear
+// in the version list, or unrelated work shows up as a branch of the conversation.
+const subagentRecord = { header: { id: 'session-subagent-fixture', createdAt: header.createdAt + 1, parentSession: ROOT_ID, origin: 'subagent', isSeeded: true }, live: false, persisted: true };
 const lineageTrace = id => (id === ROOT_ID
-  ? { complete: true, root: rootRecord, target: rootRecord, ancestors: [], descendants: [{ session: childRecord, descendants: [] }] }
-  : { complete: true, root: rootRecord, target: childRecord, ancestors: [rootRecord], descendants: [] });
+  ? { complete: true, root: rootRecord, target: rootRecord, ancestors: [], descendants: [{ session: childRecord, descendants: [] }, { session: subagentRecord, descendants: [] }] }
+  : { complete: true, root: rootRecord, target: childRecord, ancestors: [rootRecord], descendants: [{ session: subagentRecord, descendants: [] }] });
 
 
 const plugin = await import(`${pathToFileURL(bundle).href}?t=${Date.now()}`);
@@ -94,6 +97,7 @@ try {
   assert(loaded.body.messages.length > 0, 'a session with closed turns must expose editable messages');
   // The family tree is header-only: the branch must register as a version of the root.
   assert.equal(loaded.body.versions.length, 2, 'a branch child must appear beside its root');
+  assert(!loaded.body.versions.some(version => version.sessionId === 'session-subagent-fixture'), 'a subagent session must not be listed as a version');
   const [root, current] = loaded.body.versions;
   assert.equal(root.sessionId, ROOT_ID);
   assert.equal(root.depth, 0);
