@@ -24,7 +24,7 @@ import type {} from '@deepseek-ai/dsh-subagent'
 import { backendById, rewriteRequest } from './backends.ts'
 import { resolveRule, type Config, type ModelRule } from './config.ts'
 import { priceAt } from './peak.ts'
-import { DEFAULT_PROMPT } from './prompt.ts'
+import { DEFAULT_PROMPT, encloseDistillationData, looksLikeFinalReply } from './prompt.ts'
 import type { SessionRecord, SidecarStore, StoredEntry } from './store.ts'
 import type { ActiveCompression, BlockingReason, DistillRun } from './shared.ts'
 
@@ -115,9 +115,11 @@ export class ReasoningDistillEngine {
   /**
    * The rewrite awaiting a hand-off, per session: the entry whose distilled text
    * some backend should write into the history. The panel picks it up, asks the
-   * backend, then stops the original turn through {@link ReasoningDistillEngine.handoff}.
+   * backend after the original turn reaches idle; it never rejects that turn.
    */
   private readonly pendingBranch = new Map<string, string>()
+  /** An existing turn finishing before its one idle-phase branch attempt. */
+  private readonly deferredBranch = new Set<string>()
   /** One derivation per agent/request boundary may own request accounting. */
   private readonly expectRequest = new Set<string>()
   /** Deadline belongs to the current pending read, not the session's lifetime. */
@@ -257,11 +259,15 @@ export class ReasoningDistillEngine {
           if (!await this.settle(session, signal)) return true
           // The wait is even longer than the read: check again before acting for it.
           if (this.replaced(session)) return true
-          // A successful compression with a branch backend ends this turn *before* any
-          // request goes out: the conversation continues on the branch instead.
-          if (!signal?.aborted && await this.handOffToBranch(session, signal)) return false
-          // The hand-off can wait for a backend: the id can be replaced underneath it
-          // too, and then this obsolete pre-step must not arm the successor.
+          // The source agent is running throughout pre-step; message-edit acquires
+          // runMaintenance only after it becomes idle. Queue the one branch POST
+          // after this turn, without rejecting/claiming additional user input.
+          if (!signal?.aborted) {
+            if (typeof payload.agent.whenIdle === 'function') this.scheduleBranchAtIdle(payload.agent, session)
+            else await this.failMissingIdleAgent(session, signal)
+          }
+          // The failure note for a host without whenIdle may await storage;
+          // a replaced id must not arm its successor.
           if (this.replaced(session)) return true
           return true
         })()
@@ -626,18 +632,76 @@ export class ReasoningDistillEngine {
     return { tokens, saved, ids: [...applied.keys()] }
   }
 
+  /** Do not POST from pre-step when an old host lacks the idle API. */
+  private async failMissingIdleAgent(session: Session, signal?: AbortSignal): Promise<void> {
+    const entryId = this.pendingBranch.get(session.id)
+    if (entryId === undefined || backendById(this.config.rewriteBackend.get())?.kind !== 'branch') return
+    const generation = this.generation.get(session.id) ?? 0
+    await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, {
+      state: 'failed', error: 'host agent exposes no whenIdle; branch POST was not sent', at: Date.now(),
+    }, generation), signal)
+    if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
+  }
+
   /**
-   * Hand a turn over to a branch the moment a compression succeeded.
-   *
-   * Only a *branch* backend can be driven from here: its endpoint lives on the
-   * web server and needs no browser session, so the branch is ready before the
-   * pre-step would assemble a request — the original conversation then ends
-   * without spending a single call. An in-place backend is applied by the panel
-   * instead (its `/api/*` routes require the browser's credentials), and the
-   * request it would have sent is already short thanks to the replay rewrite.
-   * @param session - session whose pre-step is running.
-   * @returns true when the turn should be rejected in favour of the branch.
+   * The backend's source-agent maintenance requires true idle. A pre-step always
+   * runs inside a turn, so rejecting it before the POST would strand its claimed
+   * input; instead complete that turn and create the branch at the first idle
+   * boundary. This is a host lifecycle boundary, not an intermittent HTTP error.
    */
+  private scheduleBranchAtIdle(agent: { whenIdle(): Promise<void>; status?: string }, session: Session): void {
+    if (typeof agent.whenIdle !== 'function') return
+    const entryId = this.pendingBranch.get(session.id)
+    if (entryId === undefined || this.deferredBranch.has(session.id)) return
+    if (backendById(this.config.rewriteBackend.get())?.kind !== 'branch') return
+    this.deferredBranch.add(session.id)
+    const generation = this.generation.get(session.id) ?? 0
+    const begun = Date.now()
+    const timeout = this.config.branchTimeoutMs.get()
+    void (async () => {
+      try {
+        // whenIdle follows a newly claimed driver too. Never POST while the
+        // source is active or once the hand-off deadline has passed.
+        let idle = false
+        if (timeout > 0) {
+          let timer: ReturnType<typeof setTimeout> | undefined
+          try {
+            idle = await Promise.race([
+              agent.whenIdle().then(() => true),
+              new Promise<false>(resolve => {
+                timer = setTimeout(() => resolve(false), timeout)
+                timer.unref?.()
+              }),
+            ])
+          } finally { if (timer !== undefined) clearTimeout(timer) }
+        } else { await agent.whenIdle(); idle = true }
+        if (!this.active || this.replaced(session) || (this.generation.get(session.id) ?? 0) !== generation
+          || this.pendingBranch.get(session.id) !== entryId) return
+        if (!idle || (agent.status !== undefined && agent.status !== 'idle') || (timeout > 0 && Date.now() - begun >= timeout)) {
+          await this.recordHandoffOrOwe(session.id, entryId, {
+            state: 'skipped', error: 'branch hand-off skipped after the idle wait deadline', at: Date.now(),
+          }, generation)
+          this.pendingBranch.delete(session.id)
+          return
+        }
+        // idle→maintenance Stop is a host no-op; the backend itself acquires
+        // runMaintenance and checks its abort signal once it owns the phase.
+        // A second maintenance claim here would make the backend reject.
+        await this.handOffToBranch(session)
+      } catch (error: unknown) {
+        const detail = error instanceof Error ? error.message : String(error)
+        await this.recordHandoffOrOwe(session.id, entryId, {
+          state: 'failed', error: `idle branch operation failed (${detail}); no retry`, at: Date.now(),
+        }, generation)
+        if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
+        this.ctx.logger.warn('reasoning-distill: deferred branch failed for %s: %o', session.id, error)
+      } finally {
+        this.deferredBranch.delete(session.id)
+      }
+    })()
+  }
+
+  /** POST one branch operation at idle; never retry ambiguous non-idempotent requests. */
   private async handOffToBranch(session: Session, signal?: AbortSignal): Promise<boolean> {
     const generation = this.generation.get(session.id) ?? 0
     const entryId = this.pendingBranch.get(session.id)
@@ -1734,7 +1798,7 @@ export class ReasoningDistillEngine {
         }
       }
     }
-    return parts.join('\n\n')
+    return encloseDistillationData(parts.join('\n\n'))
   }
 
   /** Ask the configured distiller for the rewritten reasoning. */
@@ -1862,6 +1926,10 @@ export class ReasoningDistillEngine {
     ) / 1_000_000
     run.durationMs = Date.now() - startedAt
     if (run.error !== undefined || run.responseText.length === 0) return { run, failed: true }
+    if (looksLikeFinalReply(run.responseText)) {
+      run.error = 'distiller produced a user-facing reply instead of private reasoning'
+      return { run, failed: true }
+    }
     return { text: run.responseText, run, failed: false }
   }
 

@@ -25,7 +25,7 @@
 
 | id | 前置插件 | 请求 | 语义 | 谁来调用 |
 |---|---|---|---|---|
-| `message-edit` | `dsh-message-edit`（或 `@yunyv/dsh-message-edit`） | `POST /message-edit {action:'edit', sessionId, eventSeq, blockIndex, text, cascade:'truncate'}` | **另开分支会话**（新版本，原会话不动） | **宿主**（`127.0.0.1:<webServer.port>`，无需浏览器凭据）→ 能在请求发出前完成 |
+| `message-edit` | `dsh-message-edit`（或 `@yunyv/dsh-message-edit`） | `POST /message-edit {action:'edit', sessionId, eventSeq, blockIndex, text, cascade:'truncate'}` | **另开分支会话**（新版本，原会话不动） | **宿主**（`127.0.0.1:<webServer.port>`，无需浏览器凭据）→ 源 Agent 完成当前回合进入 idle 后才能调用；原回合正常答复 |
 | `msg-edit` | `@moton16/dsh-msg-edit` | `POST /api/msg-edit/rewrite-message {sessionId, messageId, reasoning}` | **就地**改写模型可见历史（不截断后续） | **面板**（该路径需浏览器凭据） |
 | `context-shaping` | `zeranhub/dsh-context-shaping` | `POST /api/dsh-context-shaping/edit {sessionId, messageId, part:'thinking', role:'assistant', text}` | **就地只改思考部分** | **面板** |
 
@@ -149,12 +149,13 @@
 4. **精确口径**：一次性节省**跟随那次冻结请求实际携带的字节** ✓ —— 请求组装**之后**才发生的投影（就地改写等）**不追溯撤销**已发生的节省 ✓（它只影响**下一次**请求的判定与**存量/显示** ✓）。这样规范与"请求即事实"的计费一致 ✓，也避免把真实发生过的节省误判为 0 ✗。
 5. **内容指纹**：条目另记**蒸馏来源思考的指纹**（`originalHash` ✓）；同 id、同 seq 下思考被**编辑**后 ✓，该条目**不再替换** ✓（不改写用户的编辑 ✓），下一次请求的判定直接反映出来 ✓。
 
-### E. 请求前：卡住 → 交接 → 继续或终止（`agent/pre-step`）
+### E. 请求前等待与空闲时分支交接（`agent/pre-step`）
 1. `await ensureLoaded()`：确保记录可读（读不到则本步不压缩）；有限规则的等待亦有 `timeoutMs + 30 秒` 截止，重入不重新计时，过期后放行原请求并禁止同一挂起门闩迟到启动。
-2. `await settle()`：**等这次蒸馏彻底结束**（原分支在此期间卡住；活动指示器显示原因与已等待时间）。
-3. **分支型后端**：若上一步压缩成功 → 宿主在**发出任何请求之前**调用后端建分支（时限 = `branchTimeoutMs`，0=永不超时）：
-   - **成功** → 记录 `handoff: created`，返回 `{kind:'reject'}` **终止本回合**（原会话 0 次 API 调用），面板看到后**自动打开新分支**；
-   - **失败/拒绝/超时** → 记录 `handoff: failed`（仅此痕迹），**当作无事发生**继续原会话。
+2. `await settle()`：**等这次蒸馏彻底结束**（原回合在此期间等待；活动指示器显示原因与已等待时间）。
+3. **分支型后端**：压缩成功后，当前回合不 reject，原请求正常执行并回复用户；等源 Agent `whenIdle()` 后才向后端提交一次非幂等 POST（等待上限 = `branchTimeoutMs`，0=永不超时），历史仍按原目标 `cascade:'truncate'` 截断；下一次请求的 `deriveMessages` 替换与建分支成功与否无关：
+   - **成功** → 记录 `handoff: created` + `branchId`，面板轮询后**自动打开新分支**；原回合既不重排输入，也不追加合成消息。
+   - **失败/拒绝/超时** → 如实记录 `handoff: failed`（或尚未 POST 前等待耗尽时 `skipped`）；不唤醒、不重发用户输入，原会话继续；历史重放替换仍生效。宿主若不暴露 `whenIdle`，**不 POST**，记录 `host agent exposes no whenIdle` 失败原因并清理待办。
+   - **宿主边界，非插件缺陷**：分支 POST 的后端在源 Agent `idle` 时才能调用 `runMaintenance`（`/home/huhu233/otherProject/deepseek-harness/packages/core/agent-loop/src/agent.ts:183-185`），但 `agent/pre-step` 前已 claim 输入（同文件 `:267-277`），期间必然非 idle；`reject` 会封闭当前 turn（`:317-319`），新的驱动必定建立新 turn（`:295-326`）。故旧设计的“先停回合再建分支”不可达；若失败后试图续行，就必然是新 turn 且可能落一条额外用户消息。本方案完全不 reject、重排 inbox 或合成消息，避免这些副作用。idle 到领取 maintenance 之间的 Stop 在宿主层是 no-op（`packages/core/agent/src/runtime-types.ts:176-179`），属于已知宿主边界，非本插件能修复。
 4. **就地型后端**：宿主不调（这些端点需要浏览器凭据）→ 由面板在轮询中应用，随后调用 `handoff {cancel:false}` 清标记，**不打断你的回合**（它要发的那次请求已因重放替换而变短）。
 5. 无待办 → `next()` 正常进入模型调用。
 
@@ -182,7 +183,7 @@
 
 ## 五、第 2 轮评审后的补充契约
 
-**取消优先于等待**：`agent/pre-step` 里的每一段等待（读记录 `ensureLoaded`、等蒸馏 `settle`、建分支）**都并入了宿主的中止信号**——你按下停止，等待立刻结束、回合随即终止 ✓。宿主的信号只在 `agent/pre-step` 返回后才检查，所以插件必须自己把信号并进等待，否则"停止"会排在压缩后面 ✗（第 2 轮评审 high 级发现，已修）。
+**取消优先于请求前等待**：`agent/pre-step` 里的读记录 `ensureLoaded`、等蒸馏 `settle` 都并入宿主中止信号；空闲分支 POST 在当前回合正常结束之后另行进行，绝不把待答用户输入丢在 blocked turn。宿主的信号只在 `agent/pre-step` 返回后才检查，所以插件必须自己把信号并进等待，否则"停止"会排在压缩后面 ✗（第 2 轮评审 high 级发现，已修）。
 
 **"卡住"的上限从哪来**：由**该次压缩自己的规则**决定——`timeoutMs > 0` 时蒸馏调用本身在该值处中止，等待再多 30 秒作为"适配器不理会 abort"的兜底；`timeoutMs = 0`（文档语义为"不限"）时**没有自动上限**，但**停止依然随时有效** ✓。
 
