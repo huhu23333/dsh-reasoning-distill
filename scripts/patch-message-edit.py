@@ -34,49 +34,126 @@ NEW_EVENT_MATCH = '''\t\t\t\t\t\tconst seat = row.closest("[data-chat-flow-kind]
 ACTION_REPLACEMENTS = ((OLD_ACTION_MATCH, NEW_ACTION_MATCH), (OLD_EVENT_MATCH, NEW_EVENT_MATCH))
 OLD_TIMELINE_FUNCTION = '''async function timeline(ctx, sessionId) {
 \tconst targetTrace = await ctx.sessionQuery.traceSession(sessionId);'''
-NEW_TIMELINE_FUNCTION = '''const TIMELINE_MESSAGE_LIMIT = 200;
-const TIMELINE_JSON_LIMIT = 128 * 1024;
-const timelineCache = /* @__PURE__ */ new Map();
-function timelineRevision(ctx, sessionId) {
-\tconst events = ctx.sessions.get(sessionId)?.events;
-\treturn events === void 0 ? "persisted" : `${String(events.length)}:${String(events.at(-1)?.seq ?? 0)}`;
+NEW_TIMELINE_FUNCTION = '''function boundedInteger(name, fallback, maximum) {
+\tconst parsed = Number.parseInt(process.env[name] ?? "", 10);
+\treturn Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
 }
-function boundedTimeline(value) {
-\tlet messages = value.messages.slice(-TIMELINE_MESSAGE_LIMIT);
-\tlet result = { ...value, messages };
-\twhile (messages.length > 0 && Buffer.byteLength(JSON.stringify(result), "utf8") > TIMELINE_JSON_LIMIT) {
-\t\tmessages = messages.slice(Math.max(1, Math.ceil(messages.length / 4)));
-\t\tresult = { ...value, messages };
+// Hard ceilings are deliberately small: this route shares the host process heap.
+const TIMELINE_EVENT_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_EVENT_LIMIT", 800, 2e3);
+const TIMELINE_INPUT_BYTE_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_INPUT_BYTE_LIMIT", 1024 * 1024, 4 * 1024 * 1024);
+const TIMELINE_MESSAGE_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_MESSAGE_LIMIT", 200, 500);
+const TIMELINE_JSON_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_JSON_LIMIT", 128 * 1024, 512 * 1024);
+const TIMELINE_CACHE_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_CACHE_LIMIT", 16, 64);
+const timelineCache = /* @__PURE__ */ new Map();
+class TimelineTooLargeError extends Error {}
+function timelineRevision(events) {
+\treturn `${String(events.length)}:${String(events.at(-1)?.seq ?? 0)}`;
+}
+// Conservative, early-exit byte accounting; unlike JSON.stringify it never creates
+// a second giant string merely to decide that an event is too large.
+function bytesWithin(value, limit) {
+\tlet bytes = 0;
+\tconst stack = [value];
+\tconst seen = /* @__PURE__ */ new Set();
+\twhile (stack.length > 0 && bytes <= limit) {
+\t\tconst item = stack.pop();
+\t\tif (typeof item === "string") bytes += Buffer.byteLength(item, "utf8") + 2;
+\t\telse if (typeof item === "number" || typeof item === "boolean" || item === null || item === void 0) bytes += 16;
+\t\telse if (typeof item === "object") {
+\t\t\tif (seen.has(item)) continue;
+\t\t\tseen.add(item);
+\t\t\tconst entries = Array.isArray(item) ? item.map((entry, index) => [String(index), entry]) : Object.entries(item);
+\t\t\tbytes += 2 + entries.length;
+\t\t\tfor (const [key, entry] of entries) {
+\t\t\t\tbytes += Buffer.byteLength(key, "utf8") + 3;
+\t\t\t\tstack.push(entry);
+\t\t\t}
+\t\t} else bytes += 16;
 \t}
-\tif (Buffer.byteLength(JSON.stringify(result), "utf8") > TIMELINE_JSON_LIMIT) throw new Error("Timeline 版本元数据超过 128 KiB 限制。");
+\treturn bytes;
+}
+function recentEventWindow(events) {
+\tconst selected = [];
+\tlet bytes = 0;
+\tfor (let index = events.length - 1; index >= 0 && selected.length < TIMELINE_EVENT_LIMIT; index -= 1) {
+\t\tconst remaining = TIMELINE_INPUT_BYTE_LIMIT - bytes;
+\t\tconst eventBytes = bytesWithin(events[index], remaining);
+\t\tif (eventBytes > remaining) break;
+\t\tbytes += eventBytes;
+\t\tselected.push(events[index]);
+\t}
+\tselected.reverse();
+\treturn selected;
+}
+function boundedMessages(turns) {
+\tconst candidates = editableMessages(turns);
+\tconst result = [];
+\tlet bytes = 0;
+\tfor (let index = candidates.length - 1; index >= 0 && result.length < TIMELINE_MESSAGE_LIMIT; index -= 1) {
+\t\tconst remaining = TIMELINE_JSON_LIMIT - bytes;
+\t\tconst itemBytes = bytesWithin(candidates[index], remaining);
+\t\tif (itemBytes > remaining) continue;
+\t\tbytes += itemBytes;
+\t\tresult.push(candidates[index]);
+\t}
+\tresult.reverse();
 \treturn result;
 }
+function boundedRetryableTurns(turns) {
+\treturn retryableTurns(turns).slice(-TIMELINE_MESSAGE_LIMIT).map((item) => ({ ...item, preview: item.preview.slice(0, 512) }));
+}
+function boundedTimeline(value) {
+\tconst encoded = JSON.stringify(value);
+\tif (Buffer.byteLength(encoded, "utf8") > TIMELINE_JSON_LIMIT) throw new TimelineTooLargeError(`message-edit 响应超过 ${String(TIMELINE_JSON_LIMIT)} 字节硬上限。`);
+\treturn value;
+}
+function cacheTimeline(sessionId, revision, value) {
+\tif (timelineCache.has(sessionId)) timelineCache.delete(sessionId);
+\ttimelineCache.set(sessionId, { revision, value });
+\twhile (timelineCache.size > TIMELINE_CACHE_LIMIT) timelineCache.delete(timelineCache.keys().next().value);
+}
 async function timeline(ctx, sessionId) {
-\tconst revision = timelineRevision(ctx, sessionId);
+\tconst live = ctx.sessions.get(sessionId);
+\tif (live === void 0) throw new TimelineTooLargeError("为保护宿主内存，message-edit 仅处理当前已加载会话；请先打开会话后重试。");
+\tconst revision = timelineRevision(live.events);
 \tconst cached = timelineCache.get(sessionId);
 \tif (cached?.revision === revision) return cached.value;
-\tconst targetTrace = await ctx.sessionQuery.traceSession(sessionId);'''
-OLD_TIMELINE_RETURN = '''\treturn {
+\tconst turns = closedTurns(recentEventWindow(live.events));
+\tconst value = boundedTimeline({
 \t\tsessionId,
-\t\tmessages: editableMessages(turns),
-\t\tretryableTurns: retryableTurns(turns),
-\t\tversions,
-\t\tundoStack,
-\t\tredoSessionIds
-\t};
-}'''
-NEW_TIMELINE_RETURN = '''\tconst value = boundedTimeline({
-\t\tsessionId,
-\t\tmessages: editableMessages(turns),
-\t\tretryableTurns: retryableTurns(turns),
-\t\tversions,
-\t\tundoStack,
-\t\tredoSessionIds
+\t\tmessages: boundedMessages(turns),
+\t\tretryableTurns: boundedRetryableTurns(turns),
+\t\tversions: [{ sessionId, createdAt: live.header?.createdAt ?? 0, depth: 0, current: true, onCurrentEffectPath: true }],
+\t\tundoStack: [],
+\t\tredoSessionIds: []
 \t});
-\ttimelineCache.set(sessionId, { revision, value });
+\tcacheTimeline(sessionId, revision, value);
 \treturn value;
 }'''
-SERVER_BOUNDS = ((OLD_TIMELINE_FUNCTION, NEW_TIMELINE_FUNCTION), (OLD_TIMELINE_RETURN, NEW_TIMELINE_RETURN))
+SERVER_BOUNDS = ()
+
+
+def patch_server_timeline(source: str) -> str:
+    """Replace the complete projection region, including earlier patched variants."""
+    if source.count(NEW_TIMELINE_FUNCTION) == 1:
+        return source
+    end_marker = 'function objectValue(value) {'
+    if source.count(end_marker) != 1:
+        raise ValueError('unexpected server timeline end marker')
+    candidates = [
+        source.find('function flattenLineage(root, descendants) {'),
+        source.find('async function timeline(ctx, sessionId) {'),
+        source.find('const TIMELINE_MESSAGE_LIMIT = 200;'),
+        source.find('function boundedInteger(name, fallback, maximum) {'),
+    ]
+    starts = [candidate for candidate in candidates if candidate >= 0]
+    if not starts:
+        raise ValueError('unexpected server timeline start marker')
+    start = min(starts)
+    end = source.index(end_marker)
+    if start >= end:
+        raise ValueError('invalid server timeline region')
+    return source[:start] + NEW_TIMELINE_FUNCTION + '\n' + source[end:]
 SERVER_REPLACEMENTS = (
     ('if (persistence !== void 0) return (await persistence.inspect(sessionId)).events;',
      'if (typeof persistence?.inspect === "function") return (await persistence.inspect(sessionId)).events;'),
@@ -224,7 +301,7 @@ def patch(target: pathlib.Path) -> int:
         print("install the plugin first: dsh plugin --profile web add dsh-message-edit")
         return 1
     source = target.read_text(encoding="utf8")
-    replacements = SERVER_REPLACEMENTS + SERVER_BOUNDS if target.name == 'index.mjs' else ((DRIFTED, FIXED), (OLD_REVISION, NEW_REVISION), (OLD_BINDING, NEW_BINDING)) + ACTION_REPLACEMENTS + CLIENT_BOUNDS
+    replacements = SERVER_REPLACEMENTS if target.name == 'index.mjs' else ((DRIFTED, FIXED), (OLD_REVISION, NEW_REVISION), (OLD_BINDING, NEW_BINDING)) + ACTION_REPLACEMENTS + CLIENT_BOUNDS
     for before, after in replacements:
         if source.count(after) == 1:
             continue
@@ -235,6 +312,12 @@ def patch(target: pathlib.Path) -> int:
     for before, after in replacements:
         if patched.count(after) == 0:
             patched = patched.replace(before, after, 1)
+    if target.name == 'index.mjs':
+        try:
+            patched = patch_server_timeline(patched)
+        except ValueError as error:
+            print(f"nothing to patch ({error}): {target}")
+            return 1
     if patched == source:
         print(f"already patched: {target}")
         return 0
