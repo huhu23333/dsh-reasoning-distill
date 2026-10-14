@@ -470,6 +470,14 @@ SERVER_REPLACEMENTS = (
      '''\tswitch (operation.action) {
 \t\tcase "edit": return editPlan(operation, turns);
 \t\tcase "splice": return splicePlan(operation, events);'''),
+    # Keeping the head can keep the edited turn too; its closers end that turn, so the
+    # replacement conversation must open the next one instead of repeating the number.
+    ('''\tif (plan.manualTurn !== void 0) appendManualTurn(events, plan.manualTurn);''',
+     '''\tif (plan.manualTurn !== void 0) {
+\t\tconst lastTurn = events.reduce((highest, event) => event.type === \"turn/start\" && event.data.turn > highest ? event.data.turn : highest, 0);
+\t\tappendManualTurn(events, { ...plan.manualTurn, turn: Math.max(plan.manualTurn.turn, lastTurn + 1) });
+\t}'''),
+
     # A plugin-owned event type is unknown to the harness; the persistence contract
     # refuses to interpret the whole log unless the envelope marks it ignorable
     # (session-persistence/src/storage-contract.ts), which also drops the session from
@@ -565,6 +573,18 @@ SERVER_REPLACEMENTS = (
 \tconst events = sessionLog(session);
 \tfor (let index = events.length - 1; index >= 0; index -= 1) {
 \t\tconst event = events[index];'''),
+    # The inherited prefix must keep the source's protected surface head. The harness
+    # appends a system/message to a conversation whose system prompt changes, and a log
+    # whose surface opens with a user message cannot accept it
+    # ("system/message requires a protected first surface head", relationships.ts).
+    ('''function versionSeed(source, plan) {
+\tconst events = inheritedSeed(source, plan.boundary);''',
+     '''function versionSeed(source, plan) {
+\tconst log = sessionLog(source);
+\tconst head = log.find((event) => event.surfaceOp !== void 0);
+\tconst boundary = head !== void 0 && head.type === \"system/message\" && head.seq > plan.boundary ? head.seq : plan.boundary;
+\tconst events = inheritedSeed(source, boundary);'''),
+
 )
 OLD_RESPONSE_VALUE = '''\t\tasync function responseValue(response) {
 \t\t\tconst value = await response.json();

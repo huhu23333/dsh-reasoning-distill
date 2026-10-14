@@ -90,9 +90,12 @@ for (const file of findLogs(root)) {
   const events = records.slice(1);
   const foreign = events.filter(event => event.type === 'session-log-deepseek/delivery-accepted'
     && typeof event.data?.sessionId === 'string' && event.data.sessionId !== raw.id);
-  if (foreign.length === 0) continue;
-  candidates += 1;
   const markers = events.filter(event => event.type === 'session/end-seed' && event.data?.inherited === true);
+  // A seeded header that never persisted its cut is equally unreadable ("seeded header
+  // disagrees with its last inherited end-seed marker"), with or without copied markers.
+  const seededWithoutCut = raw.isSeeded === true && markers.length > 0;
+  if (foreign.length === 0 && !seededWithoutCut) continue;
+  candidates += 1;
   const cut = markers.at(-1)?.seq;
   const cutUsable = cut !== undefined && cut > 0 && !foreign.some(marker => marker.seq >= cut);
   let patched;

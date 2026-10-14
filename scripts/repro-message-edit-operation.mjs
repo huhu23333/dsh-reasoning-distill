@@ -191,8 +191,9 @@ try {
     originalContent.map(block => block.type),
     'every content block must survive the splice',
   );
-  assert(originalContent.some(block => block.type === 'tool-call') && spliced.data.message.content.some(block => block.type === 'tool-call'),
-    'tool calls must survive the splice');
+  if (originalContent.some(block => block.type === 'tool-call')) {
+    assert(spliced.data.message.content.some(block => block.type === 'tool-call'), 'tool calls must survive the splice');
+  }
   assert.deepEqual(spliced.surfaceOp, events[assistantTarget.seq].surfaceOp, 'the event envelope must survive');
   assert.equal(lastSeed[events.length].type, 'session/end-seed', 'the inherited cut must be marked at the boundary');
   assert.equal(lastSeed[events.length].data.inherited, true, 'the cut marker must be the inherited one');
@@ -206,6 +207,19 @@ try {
     assert(copiedTail.some(candidate => candidate.type === 'turn/end' && candidate.data.reason?.kind === 'forked'),
       'an open copied turn must be closed with a forked turn/end');
   }
+  // The seed must keep the source's protected surface head: the harness appends a
+  // system/message when the conversation's system prompt changes, and a log whose surface
+  // opens with a user message cannot accept it ("system/message requires a protected
+  // first surface head").
+  const sourceHead = events.find(candidate => candidate.surfaceOp !== undefined);
+  if (sourceHead?.type === 'system/message') {
+    const seedHead = lastSeed.find(candidate => candidate.surfaceOp !== undefined);
+    assert.equal(seedHead?.type, 'system/message', 'the branch must keep the protected surface head');
+  }
+  // No turn may be opened twice: keeping the head can keep the edited turn, and its
+  // closers end it, so the replacement conversation must open the next number.
+  const openedTurns = lastSeed.filter(candidate => candidate.type === 'turn/start').map(candidate => candidate.data.turn);
+  assert.equal(new Set(openedTurns).size, openedTurns.length, `a turn may not be opened twice: ${openedTurns.join(',')}`);
   // The persistence contract refuses a log containing a type the harness does not know
   // unless the envelope marks it ignorable, and that refusal drops the session from the
   // session list. Every plugin-owned event must carry the flag.
