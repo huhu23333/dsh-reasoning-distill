@@ -57,6 +57,9 @@ try {
 
 const archived = [];
 let lastSeed;
+let lastMeta;
+let lastChildId;
+let lastInherited;
 
 const plugin = await import(`${pathToFileURL(bundle).href}?t=${Date.now()}`);
 let handler;
@@ -72,8 +75,24 @@ const ctx = {
     get: id => (id === header.id ? agent : undefined),
     create: async options => {
       lastSeed = options.seed;
+      lastMeta = options.meta;
+      lastChildId = options.sessionId;
+      lastInherited = Number(options.inheritedEventCount ?? 0);
       if (SessionApi !== undefined) {
-        SessionApi.Session.create(SessionApi.SessionId(options.sessionId), options.seed);
+        // Same header the persistence writer keys off: without isSeeded the stored
+        // log records no fork cut and a reload rejects the copied markers.
+        SessionApi.Session.create(
+          SessionApi.SessionId(options.sessionId),
+          options.seed,
+          {
+            version: SessionApi.SESSION_FORMAT_VERSION,
+            id: SessionApi.SessionId(options.sessionId),
+            createdAt: Date.now(),
+            isSeeded: options.meta?.isSeeded === true,
+            ...(options.meta?.parentSession === undefined ? {} : { parentSession: SessionApi.SessionId(options.meta.parentSession) }),
+          },
+          SessionApi.SessionLogOffset(lastInherited),
+        );
       }
       return { agent: { followup: message => { followups.push(message); } }, dispose: async () => {} };
     },
@@ -172,7 +191,21 @@ try {
   assert(originalContent.some(block => block.type === 'tool-call') && spliced.data.message.content.some(block => block.type === 'tool-call'),
     'tool calls must survive the splice');
   assert.deepEqual(spliced.surfaceOp, events[assistantTarget.seq].surfaceOp, 'the event envelope must survive');
-  assert.equal(lastSeed[events.length].type, 'message-edit/version', 'the version record must follow the copied log');
+  assert.equal(lastSeed[events.length].type, 'session/end-seed', 'the inherited cut must be marked at the boundary');
+  assert.equal(lastSeed[events.length].data.inherited, true, 'the cut marker must be the inherited one');
+  assert.equal(lastSeed[events.length + 1].type, 'message-edit/version', 'the version record must follow the copied log');
+  // The host rejects a reloaded log whose delivery marker names another session
+  // unless the marker sits inside the recorded inherited prefix. Reproduce that rule:
+  // the branch must be created with the fork marker and a cut past every copied marker.
+  assert.equal(lastMeta?.isSeeded, true, 'the branch must carry the fork marker');
+  assert.equal(lastInherited, events.length, 'the recorded cut must cover the whole copied log');
+  const copiedMarkers = lastSeed.filter(event => event.type === 'session-log-deepseek/delivery-accepted'
+    && event.data?.sessionId !== undefined && event.data.sessionId !== lastChildId);
+  assert(copiedMarkers.length > 0, 'the fixture log must carry a copied delivery marker');
+  for (const marker of copiedMarkers) {
+    assert(marker.seq < lastInherited, 'a copied delivery marker must stay inside the inherited prefix');
+  }
+  console.log(`OPERATION ok   reload    copiedMarkers=${String(copiedMarkers.length)} cut=${String(lastInherited)} (host reload rule satisfied)`);
   // The branch continues the interrupted turn from an empty user input: the LLM
   // layer drops empty user content, so the model resumes from the copied history
   // instead of replaying the request.

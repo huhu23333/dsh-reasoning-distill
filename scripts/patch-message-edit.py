@@ -440,6 +440,26 @@ SERVER_REPLACEMENTS = (
      '''\tswitch (operation.action) {
 \t\tcase "edit": return editPlan(operation, turns);
 \t\tcase "splice": return splicePlan(operation, events);'''),
+    # A fork child must persist its inherited prefix: the modern agent API takes the
+    # fork marker in meta and the exact cut as a top-level option, and the Session
+    # header rejects the obsolete `seedLength` field. Without it the stored log
+    # records no cut, and a copied delivery marker names the wrong session on reload.
+    ('''\t\tmeta: {
+\t\t\t...source.header.cwd === void 0 ? {} : { cwd: source.header.cwd },
+\t\t\tparentSession: source.id,
+\t\t\tseedLength: seed.inheritedLength,
+\t\t\t...agentPreset === void 0 ? {} : { agentPreset }
+\t\t},
+\t\tagentOptions: options,''',
+     '''\t\tmeta: {
+\t\t\t...source.header.cwd === void 0 ? {} : { cwd: source.header.cwd },
+\t\t\tparentSession: source.id,
+\t\t\tisSeeded: true,
+\t\t\t...agentPreset === void 0 ? {} : { agentPreset }
+\t\t},
+\t\tinheritedEventCount: seed.inheritedLength,
+\t\tagentOptions: options,'''),
+
     # A compression hand-off runs while the source turn is still live, and this
     # route never writes to the source: it only reads its log. Demanding the source
     # agent's maintenance phase would require true idle, which a pre-step hand-off
@@ -454,6 +474,19 @@ SERVER_REPLACEMENTS = (
 \tconst inheritedLength = events.length;
 \tif (plan.splice !== void 0) events[plan.splice.seq] = splicedAssistantEvent(events[plan.splice.seq], plan.splice.blockIndex, plan.splice.text);
 \tappendLogSeedEvent(events, \"message-edit/version\", plan.version);'''),
+    # buildForkSeed's contract: a seed longer than its inherited prefix must mark the
+    # cut with `session/end-seed`, or Session construction rejects it and the stored
+    # log records no inherited prefix at all.
+    ('''\tconst events = inheritedSeed(source, plan.boundary);
+\tconst inheritedLength = events.length;
+\tif (plan.splice !== void 0) events[plan.splice.seq] = splicedAssistantEvent(events[plan.splice.seq], plan.splice.blockIndex, plan.splice.text);
+\tappendLogSeedEvent(events, \"message-edit/version\", plan.version);''',
+     '''\tconst events = inheritedSeed(source, plan.boundary);
+\tconst inheritedLength = events.length;
+\tevents.push({ type: \"session/end-seed\", seq: events.length, time: events.at(-1)?.time ?? Date.now(), data: { inherited: true } });
+\tif (plan.splice !== void 0) events[plan.splice.seq] = splicedAssistantEvent(events[plan.splice.seq], plan.splice.blockIndex, plan.splice.text);
+\tappendLogSeedEvent(events, \"message-edit/version\", plan.version);'''),
+
     # The branch-mutation route reads the same live Session log. It must not read
     # the removed `.events` array either, or every branch creation answers
     # 400 "events is not iterable" and the compression hand-off falls back in place.

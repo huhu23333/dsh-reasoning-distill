@@ -1956,9 +1956,11 @@ export class ReasoningDistillEngine {
     let id = ''
     let durable = false
     try {
+      // No parentSession: this is a sidecar conversation, not a fork of the source.
+      // Claiming the source as parent put it into the session lineage, where the
+      // message-edit Timeline then listed it as a branch version of the conversation.
       const created = this.ctx.sessions.create(undefined, {
         meta: {
-          parentSession: parent.id as SessionId,
           createdAt: Date.now(),
           ...parent.header.cwd === undefined ? {} : { cwd: parent.header.cwd },
         },
