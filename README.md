@@ -239,6 +239,9 @@
 
 ## 验证状态
 
+> **只验证过一种组合**：当前宿主版本 + 当前版本的 `message-edit` 后端（`vendor/dsh-message-edit-0.2.3-patched4.tgz`，即 `v1.0.0` 产物）。
+> 另外两个可选后端（`msg-edit`、`context-shaping`）**完全未经验证、极可能完全不能用** —— 见「助手消息改写后端」→「后端支持状态」。
+
 已做：
 - **客户端测试** 55 项（渲染 48 + 设置写入规划 7）（`npm run test:render`）：用 `react-dom/server` 真渲染三个客户端组件，覆盖现代报告、**旧宿主报告（版本错配）**、失败条目、空会话、加载/错误态。这条是补出来的——"渲染期抛错 → 整页空白"已经发生过两次（一次是配置表单绑定丢了 `this`，一次是我在 `report` 声明之前引用它，TDZ 抛错），所以现在渲染路径有测试兜着；我还临时把那个 TDZ 放回去验证过：测试确实会崩。
 - 宿主端**离线冒烟测试** 184 项全通过、**`npm run typecheck` 0 错误**（阈值触发、蒸馏调用、压缩会话、`deriveMessages()` 返回蒸馏版而日志保持原文、工具调用块不被破坏、逐步记账、compaction 纪元重置后总量不丢、报表合计、峰谷归属四条、工具调用恒定附带、超时放弃并计费、工具调用恒定附带、失败写入回滚、旧文件名同址隔离、恢复会话首轮即带改写、首轮按未命中价计节省）。
@@ -309,11 +312,13 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 
 **安装方式（任选其一）**：
 
-1. **用打好补丁的包**：`vendor/dsh-message-edit-0.2.3-patched1.tgz`（**保持包名 `dsh-message-edit`**，只把版本标为 `0.2.3-patched1`）：
+1. **用打好补丁的包**：`vendor/dsh-message-edit-0.2.3-patched4.tgz`（**保持包名 `dsh-message-edit`**，只把版本标为 `0.2.3-patched4`）：
    ```bash
    cd /home/huhu233/otherProject/deepseek-harness
-   pnpm dsh plugin --profile web add /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill/vendor/dsh-message-edit-0.2.3-patched1.tgz
+   pnpm dsh plugin --profile web add /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill/vendor/dsh-message-edit-0.2.3-patched4.tgz
    ```
+
+   ⚠️ 要装 **patched4**：`patched1`~`patched3` 只含客户端补丁，**不含任何会话格式修复**，用它建出来的分支会在重启后加载失败（详见「后端支持状态」与「安装与修补 `message-edit` 后端的完整流程」）。
 
    ⚠️ **不要给这个包改名**：它的客户端 bundle 里写死了 `id: "dsh-message-edit"`，一旦把 npm 包名改成别的（例如 `dsh-message-edit-patched`），DSH 就无法把 bundle 与插件行配对，**客户端半边（Timeline 标签页等）不会激活**——这正是"装了却看不到 Timeline"的原因。
 2. **装原版再打补丁**：`dsh plugin --profile web add dsh-message-edit`，
@@ -348,6 +353,121 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 | `msg-edit` | `@moton16/dsh-msg-edit` | `POST /api/msg-edit/rewrite-message` `{sessionId, messageId, reasoning}` | **就地改写模型可见历史**（不截断后续） |
 | `context-shaping` | `zeranhub/dsh-context-shaping` | `POST /api/dsh-context-shaping/edit` `{sessionId, messageId, part:'thinking', role:'assistant', text}` | **就地只改思考部分**（该插件对含工具调用的消息默认拒绝整条重写） |
 
+### 后端支持状态（先读这一段）
+
+**本仓库只验证过一种组合**：**当前宿主版本** + **当前版本的 `dsh-message-edit` 后端**（即 `vendor/dsh-message-edit-0.2.3-patched4.tgz`，或原版包经 `scripts/patch-message-edit.py` 修补后的安装件）。参考产物为 `v1.0.0`：
+
+| 产物 | sha256 |
+|---|---|
+| `vendor/dsh-message-edit-0.2.3-patched4.tgz` | `f17cfc9bc654b7ca12663528c568c41022b6dce86db313548d31570051db7b5d` |
+| profile 里的 `index.mjs` | `c3f19d1e417fab28087a7e6cc12ed7bbc9c3427fa3d998e7e19ad03369fca2ef` |
+| profile 里的 `client.js` | `11cca125ecc372106a0d2d9e13fe75c9e5bb7d5d7c1e5f72e03dcc747d43f1b8` |
+
+| 后端 id | 前置插件 | 验证状态 |
+|---|---|---|
+| `message-edit` | `dsh-message-edit` / `@yunyv/dsh-message-edit` | ✅ **唯一验证过的后端**：建分支、压缩自动交接、重启后仍能加载、跨回合交接不丢用户消息，全都只在它上面真实跑过 |
+| `msg-edit` | `@moton16/dsh-msg-edit` | ❌ **完全未验证** |
+| `context-shaping` | `zeranhub/dsh-context-shaping` | ❌ **完全未验证** |
+
+**"完全未验证"的具体含义**（不是"可能有点小问题"，而是**极可能完全不能用**）：
+
+- 这两个插件在本仓库里**从未被安装、从未被修补、从未被探测、从未发起过任何一次真实调用**；
+- 它们的**安装形态未知**：能否 `dsh plugin add`、真实包名与版本、是否也有 build-time externals 漂移需要打补丁，全部未确认；
+- 它们的**端点契约未知**：路径、字段名、`messageId` 的取值口径、错误信封、是否要求浏览器凭据——上表里那些请求体只是按第三方接口**假定**写下的，**没有任何一次真实往返验证过**；
+- 本仓库的补丁脚本**只认** `dsh-message-edit` 与 `@yunyv/dsh-message-edit` 两个包，对它们**不做任何处理**（那些 `SERVER_REPLACEMENTS` 全是 `message-edit` 专用的锚点，套到别的包上只会报 `unexpected server bundle shape`）。
+
+因此：**请只选 `message-edit`**。即使探针显示 `msg-edit` / `context-shaping`"已安装"，也只说明那个路径回了 JSON，**不代表本插件能驱动它**。想要支持它们，需要先做完整的接口核对与补丁适配，那属于尚未开始的工作。
+
+### 安装与修补 `message-edit` 后端的完整流程（唯一验证过的路径）
+
+以 `web` profile 为例，`$DSH_HOME` 默认 `~/.dsh`。
+
+**0. 确认目标路径**
+
+```bash
+cd /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill
+ls "$DSH_HOME/profiles/web/node_modules/dsh-message-edit" 2>/dev/null || echo "尚未安装"
+```
+
+**1. 安装前置插件**（二选一）
+
+- **方式 A（推荐，直接用已打好补丁的包）**：
+
+  ```bash
+  cd /home/huhu233/otherProject/deepseek-harness
+  pnpm dsh plugin --profile web add \
+    /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill/vendor/dsh-message-edit-0.2.3-patched4.tgz
+  ```
+
+- **方式 B（装原版再打补丁）**：
+
+  ```bash
+  cd /home/huhu233/otherProject/deepseek-harness
+  pnpm dsh plugin --profile web add dsh-message-edit     # 或 @yunyv/dsh-message-edit
+  ```
+
+> `vendor/` 里的 `patched1`/`patched2`/`patched3` 是**历史产物，已被 `patched4` 取代**：`patched1` 只修了客户端 require 漂移，**不含任何会话格式修复**，用它建出来的分支会在重启后加载失败。要装就装 `patched4`。
+>
+> ⚠️ **不要给这个包改名**：它的客户端 bundle 里写死了 `id: "dsh-message-edit"`；改成别的 npm 包名后 DSH 无法把 bundle 与插件行配对，**客户端半边（Timeline 页签等）不会激活**。
+
+**2. 打补丁**（方式 B 必做；方式 A 已含，但重跑无副作用）
+
+```bash
+cd /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill
+python3 scripts/patch-message-edit.py            # 自动发现已安装的 dsh-message-edit / @yunyv/dsh-message-edit
+```
+
+脚本是**幂等**的：写前先 `node --check`，失败就**不落盘**；改动前留 `*.orig-<时间戳>` 备份；已在补丁态会打印 `already patched`。可用参数：
+
+```bash
+DSH_PLUGIN_ROOTS=/some/other/profile python3 scripts/patch-message-edit.py   # 指定别的 profile
+python3 scripts/patch-message-edit.py <client.js 或 index.mjs 路径>          # 只处理一个文件
+```
+
+它改的东西（客户端 + 服务端两半）：
+
+1. 客户端 require 漂移：`@deepseek-ai/dsh-client-runtime/client` → `@deepseek-ai/dsh-client-store`（否则整个 `dsh web` 启动失败）；
+2. 子会话记录继承前缀：`meta.isSeeded: true` + `inheritedEventCount`，并在 seed 的切点插 `session/end-seed {inherited:true}`；
+3. 拷贝过来的**未结束回合先收尾**（`openTurnClosers(..., "forked")`），否则分支自己的回合打不开；
+4. 插件自有事件补 `ignorable: true`（否则持久化契约拒绝整份日志，会话从列表消失）；
+5. 分支保留源的 **protected surface head**（否则后续 `system/message` 非法）；
+6. 延迟交接把**触发它的用户消息**带进分支（否则那句话丢失）；
+7. Timeline 不把 `origin: "subagent"` 的子代理会话列为版本；审计会话不进会话 lineage。
+
+**3. 校验安装结果**
+
+```bash
+cd /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill
+python3 scripts/patch-message-edit.py            # 期望：already patched ×2
+tmp=$(mktemp -d) && tar -xzf vendor/dsh-message-edit-0.2.3-patched4.tgz -C "$tmp" \
+  && cmp "$tmp/package/index.mjs" "$DSH_HOME/profiles/web/node_modules/dsh-message-edit/index.mjs" \
+  && cmp "$tmp/package/client.js" "$DSH_HOME/profiles/web/node_modules/dsh-message-edit/client.js" \
+  && echo "安装件与 vendor 逐字节相同 ✓"; rm -rf "$tmp"
+node scripts/scan-session-logs.mjs               # 期望：VALID 全部、INVALID 0
+```
+
+**4. 重启 `dsh web`**
+
+服务端模块（`index.mjs`）**只在宿主启动时加载**：补丁后必须重启才生效（客户端半边硬刷新即可，但重启最保险）。
+
+**5. 在设置里启用**
+
+设置 → 推理蒸馏 →「助手消息改写后端」选 `message-edit`（不选后端时「启用思考压缩」会保持关闭并锁定，这是有意的闸门）→ 再打开总开关。
+
+**6. 重装/升级前置插件后必须重跑第 2 步**
+
+`dsh plugin add` 会覆盖安装件，补丁随之丢失；重跑 `patch-message-edit.py` 即可（幂等）。
+
+### 若一定要尝试另外两个后端（未验证，失败概率极高）
+
+**本仓库没有它们的可用流程**：既没有验证过的版本，也没有适配过的补丁。只能按下面的思路自行探索，**每一步都可能失败**，而且失败可能是**静默**的（探针通过、实际改写不生效，或写坏会话日志）：
+
+1. 安装候选包并记录**确切包名与版本**（`pnpm dsh plugin --profile web add <包名>`）；
+2. **不要**直接跑本仓库的补丁脚本——它的替换锚点是 `message-edit` 专用的；只能**照着** `scripts/patch-message-edit.py` 的做法，先检查它的 bundle 是否也有 require 漂移（`@deepseek-ai/dsh-client-runtime/` / 未登记的说明符），有就按同样的方式改；
+3. 用探针确认端点：`POST /api/msg-edit/get-message`、`POST /api/dsh-context-shaping/edit`——**回 JSON 不等于能用**，还要逐字段核对请求体；
+4. 先在一个**可丢弃的会话**上试一次，然后**立刻重启 `dsh web`**，确认该会话仍能加载（用 `node scripts/scan-session-logs.mjs` 复检）；
+5. 任一环节与假定不符，就当作**不支持**。
+
 **探测规则**：插件页挂载时对每个后端发一次探针请求；**`404` 且响应不是 JSON** 才算"未安装"——因为已安装的后端连自己的错误（会话不存在、请求体不合法）也是用它自己的 JSON 信封回答 `404`，单看状态码会误判成没装。
 
 **已知不能接入的**：`yumiao-dev/dsh-chat-thinking-editor` 只通过浏览器的 `assistantEdit/replace` **Remote**（RPC 通道）暴露能力，没有 HTTP 面，我们的客户端无法直接调用 → 记入不支持。
@@ -362,6 +482,8 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 - ⚠️ **升级提示**：该配置项默认为空，所以**升级后需要先在设置里选一个后端**，否则思考压缩会保持关闭（这正是上面的规则所要求的）。
 
 ## 可选前置：`dsh-message-edit`（"以蒸馏版开分支"）
+
+> 它是**唯一验证过的后端**；安装、修补、启用与自检的完整流程见「助手消息改写后端」→「安装与修补 `message-edit` 后端的完整流程」。
 
 插件页每条记录的展开区有一个 **「以蒸馏版开分支」** 按钮。它**不自己实现分支**，而是调用同源端点：
 
