@@ -43,9 +43,17 @@ const eventSource = { getSnapshot: () => ({ revision: eventRevision }), subscrib
 let listSnapshot = { byId: { s1: {} } };
 let listListener;
 const opened = [];
+const archived = [];
 const ctx = {
-  get: key => { assert.equal(key, 'sessions'); return ctx.sessions; },
-  sessions: { list: { getSnapshot: () => listSnapshot, subscribe: fn => { listListener = fn; return () => { listListener = undefined; }; } }, binding: () => ({ session: sourceStore, eventSource }), open: id => opened.push(id) },
+  get: key => {
+    if (key === 'sessions') return ctx.sessions;
+    if (key === 'uiWorkspace') return ctx.uiWorkspace;
+    throw new Error(`unexpected service ${key}`);
+  },
+  // The catalog layer has no open(); selection belongs to uiWorkspace. Leaving
+  // sessions.open out proves the bundle no longer depends on it.
+  sessions: { list: { getSnapshot: () => listSnapshot, subscribe: fn => { listListener = fn; return () => { listListener = undefined; }; } }, binding: () => ({ session: sourceStore, eventSource }) },
+  uiWorkspace: { openSession: id => opened.push(id), archiveSession: async id => { archived.push(id); } },
   effect: fn => fn(), on: () => {}, slots: { register: (declaration) => slots.push(declaration) },
 };
 plugin.apply(ctx);
@@ -146,6 +154,20 @@ if (expectFailure) {
       await published;
       assert.deepEqual(opened, ['new-session']);
       console.log('AFTER: absent navigation finishes; published session opens');
+      // An edit creates a branch: it becomes the visible conversation and the one
+      // it replaced is archived (hidden), both through uiWorkspace.
+      fetchResponse = async () => ({ ok: true, json: async () => ({ sessionId: 'branch-1', queuedTurns: 1 }) });
+      listSnapshot = { byId: { s1: {}, 'new-session': {}, 'branch-1': {} } };
+      const applied = await face.edit(
+        { key: '1:0', turn: 1, eventSeq: 1, blockIndex: 0, kind: 'user', text: 'hello', time: 1 },
+        'edited text',
+        'truncate',
+      );
+      assert.equal(applied, true, 'the edit must report success');
+      await delay(30);
+      assert.deepEqual(opened, ['new-session', 'branch-1'], 'the branch must become the visible conversation');
+      assert.deepEqual(archived, ['s1'], 'the replaced conversation must be archived');
+      console.log('AFTER: an edit switches to the branch and archives the conversation it replaced');
     }
   })().catch(error => { console.error(error); process.exitCode = 1; });
 }

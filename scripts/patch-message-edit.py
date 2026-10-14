@@ -157,6 +157,7 @@ function liveTail(live) {
 function sessionLog(session) {
 \treturn typeof session?.snapshotEvents === "function" ? session.snapshotEvents() : session?.events ?? [];
 }
+
 /** One version's own effect event. Only a loaded session can be read in O(1);
 * a persisted branch holds a full copy of its parent's log, which this route must
 * never load merely to label a row. */
@@ -330,6 +331,15 @@ SERVER_REPLACEMENTS = (
      '// sessionPersistence no longer exposes readFrom; sessionQuery reads the full actual log.\n\treturn (await ctx.sessionQuery.readSession(record.header.id)).events.slice(inherited);'),
     ('const lineage = flattenLineage(rootTrace.target, rootTrace.descendants);',
      'const lineage = flattenLineage(rootTrace.target, rootTrace.descendants);\n\t// A concurrently created branch may be absent from the separate root observation.\n\tif (!lineage.some(({ record }) => record.header.id === sessionId)) lineage.push({ record: targetTrace.target, depth: targetTrace.ancestors.length });'),
+    # An earlier revision archived the superseded source inside the route; the
+    # client owns that step now (it must follow the UI switch), so undo it here.
+    ('''\t\t\tinverses.length = 0;
+\t\t\t// The branch supersedes its source: keep the original reachable through the
+\t\t\t// Timeline's version list instead of the conversation list.
+\t\t\tawait archiveSupersededSource(ctx, sourceId);
+\t\t\treturn {''',
+     '''\t\t\tinverses.length = 0;
+\t\t\treturn {'''),
     # The branch-mutation route reads the same live Session log. It must not read
     # the removed `.events` array either, or every branch creation answers
     # 400 "events is not iterable" and the compression hand-off falls back in place.
@@ -437,6 +447,45 @@ NEW_NOTICE_RENDER = '''\t\t\t\t\tstate.error === null ? null : /* @__PURE__ */ (
 \t\t\t\t\t}),
 \t\t\t\t\tstate.status === "loading" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {'''
 CLIENT_NOTICE = ((OLD_NOTICE_DECODE, NEW_NOTICE_DECODE), (OLD_NOTICE_RENDER, NEW_NOTICE_RENDER))
+# The visible conversation is a UI-layer selection: ISessions owns the catalog, not
+# the selection. Replace the stale sessions.open call with uiWorkspace.openSession,
+# and let a created branch hide the conversation it replaced once it is on screen.
+OLD_OPEN_LISTED = '''\t\t\t\tif (this.sessions.list.getSnapshot().byId[sessionId] !== void 0) {
+\t\t\t\t\tthis.sessions.open(sessionId);
+\t\t\t\t\treturn Promise.resolve();
+\t\t\t\t}'''
+NEW_OPEN_LISTED = '''\t\t\t\tif (this.sessions.list.getSnapshot().byId[sessionId] !== void 0) {
+\t\t\t\t\tthis.openConversation(sessionId);
+\t\t\t\t\treturn Promise.resolve(true);
+\t\t\t\t}'''
+OLD_OPEN_FINISH = '''\t\t\t\t\t\tif (open) this.sessions.open(sessionId);
+\t\t\t\t\t\tresolve();'''
+NEW_OPEN_FINISH = '''\t\t\t\t\t\tif (open) this.openConversation(sessionId);
+\t\t\t\t\t\tresolve(open);'''
+OLD_NAV_COMMENT = '''\t\t\t/** Session-list publication is the reactive dependency for navigation. */'''
+NEW_NAV_COMMENT = '''\t\t\t/** Select one conversation through the UI navigation service. */
+\t\t\topenConversation(sessionId) {
+\t\t\t\tconst ui = this.ctx.get("uiWorkspace");
+\t\t\t\tif (ui !== void 0 && typeof ui.openSession === "function") ui.openSession(sessionId);
+\t\t\t}
+\t\t\t/** Hide the conversation a branch replaced, once the branch is on screen.
+\t\t\t* Best effort: an active source refuses and stays exactly as it was. */
+\t\t\tasync archiveSuperseded(sourceSessionId, branchSessionId) {
+\t\t\t\tif (sourceSessionId === branchSessionId) return;
+\t\t\t\tconst ui = this.ctx.get("uiWorkspace");
+\t\t\t\tif (ui === void 0 || typeof ui.archiveSession !== "function") return;
+\t\t\t\ttry {
+\t\t\t\t\tawait ui.archiveSession(sourceSessionId);
+\t\t\t\t} catch {
+\t\t\t\t\t// An active source refuses; nothing was written.
+\t\t\t\t}
+\t\t\t}
+\t\t\t/** Session-list publication is the reactive dependency for navigation. */'''
+OLD_MUTATE_OPEN = '''\t\t\t\t\tawait this.openWhenListed(result.sessionId);
+\t\t\t\t\treturn true;'''
+NEW_MUTATE_OPEN = '''\t\t\t\t\tif (await this.openWhenListed(result.sessionId)) await this.archiveSuperseded(this.sessionId, result.sessionId);
+\t\t\t\t\treturn true;'''
+CLIENT_HANDOFF = ((OLD_OPEN_LISTED, NEW_OPEN_LISTED), (OLD_OPEN_FINISH, NEW_OPEN_FINISH), (OLD_NAV_COMMENT, NEW_NAV_COMMENT), (OLD_MUTATE_OPEN, NEW_MUTATE_OPEN))
 OLD_REVISION = '''\t\tfunction conversationRevision(snapshot) {
 \t\t\tconst turnEnds = [...snapshot.turnEnds.entries()].map(([turn, seq]) => `${String(turn)}:${String(seq)}`).join(",");
 \t\t\treturn [
@@ -519,7 +568,7 @@ def patch(target: pathlib.Path) -> int:
         print("install the plugin first: dsh plugin --profile web add dsh-message-edit")
         return 1
     source = target.read_text(encoding="utf8")
-    replacements = SERVER_REPLACEMENTS if target.name == 'index.mjs' else ((DRIFTED, FIXED), (OLD_REVISION, NEW_REVISION), (OLD_BINDING, NEW_BINDING)) + ACTION_REPLACEMENTS + CLIENT_BOUNDS + CLIENT_NOTICE
+    replacements = SERVER_REPLACEMENTS if target.name == 'index.mjs' else ((DRIFTED, FIXED), (OLD_REVISION, NEW_REVISION), (OLD_BINDING, NEW_BINDING)) + ACTION_REPLACEMENTS + CLIENT_BOUNDS + CLIENT_NOTICE + CLIENT_HANDOFF
     for before, after in replacements:
         before_count = source.count(before)
         after_count = source.count(after)

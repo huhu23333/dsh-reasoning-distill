@@ -52,6 +52,8 @@ try {
   console.error('note: host Session package not found; seed validation is skipped');
 }
 
+const archived = [];
+
 const plugin = await import(`${pathToFileURL(bundle).href}?t=${Date.now()}`);
 let handler;
 const ctx = {
@@ -71,7 +73,12 @@ const ctx = {
       return { agent: { followup: () => {} }, dispose: async () => {} };
     },
   },
-  workspaceRegistry: { list: () => [] },
+  workspaceRegistry: {
+    list: () => [],
+    archiveSession: async id => {
+      archived.push(id);
+    },
+  },
   get: () => undefined,
 };
 plugin.apply(ctx);
@@ -137,6 +144,10 @@ try {
     action: 'edit', sessionId: header.id, eventSeq: assistantTarget.seq, blockIndex: assistantTarget.blockIndex,
     text: 'edited assistant block by the offline acceptance harness', cascade: 'truncate',
   }, 0);
+  // Hiding the replaced conversation belongs to the client UI step (it must follow
+  // the visible-conversation switch); the route must not archive anything itself.
+  assert.equal(archived.length, 0, 'the mutation route must not archive the source');
+  console.log('OPERATION ok   archive  the route leaves archiving to the client UI step');
   console.log('OPERATION ACCEPTANCE PASSED (offline, real handler + real log)');
 } finally {
   server.close();
