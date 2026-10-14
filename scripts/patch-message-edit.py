@@ -153,6 +153,10 @@ function liveTail(live) {
 \t}
 \treturn live.events ?? [];
 }
+/** Full event log of a live Session, across host API generations. */
+function sessionLog(session) {
+\treturn typeof session?.snapshotEvents === "function" ? session.snapshotEvents() : session?.events ?? [];
+}
 async function timeline(ctx, sessionId) {
 \tconst live = ctx.sessions.get(sessionId);
 \tif (live === void 0) return {
@@ -211,6 +215,31 @@ SERVER_REPLACEMENTS = (
      '// sessionPersistence no longer exposes readFrom; sessionQuery reads the full actual log.\n\treturn (await ctx.sessionQuery.readSession(record.header.id)).events.slice(inherited);'),
     ('const lineage = flattenLineage(rootTrace.target, rootTrace.descendants);',
      'const lineage = flattenLineage(rootTrace.target, rootTrace.descendants);\n\t// A concurrently created branch may be absent from the separate root observation.\n\tif (!lineage.some(({ record }) => record.header.id === sessionId)) lineage.push({ record: targetTrace.target, depth: targetTrace.ancestors.length });'),
+    # The branch-mutation route reads the same live Session log. It must not read
+    # the removed `.events` array either, or every branch creation answers
+    # 400 "events is not iterable" and the compression hand-off falls back in place.
+    ('const events = source.session.events;',
+     'const events = sessionLog(source.session);'),
+    ('''function inheritedSeed(source, boundary) {
+\tif (boundary === -1) return [];
+\tconst boundaryEvent = source.events[boundary];
+\tif (boundary < 0 || boundaryEvent === void 0 || boundaryEvent.seq !== boundary) throw new Error("分支边界不是连续会话事件。");
+\treturn source.events.slice(0, boundary + 1);
+}''',
+     '''function inheritedSeed(source, boundary) {
+\tif (boundary === -1) return [];
+\tconst events = sessionLog(source);
+\tconst boundaryEvent = events[boundary];
+\tif (boundary < 0 || boundaryEvent === void 0 || boundaryEvent.seq !== boundary) throw new Error("分支边界不是连续会话事件。");
+\treturn events.slice(0, boundary + 1);
+}'''),
+    ('''function sessionPreset(session) {
+\tfor (let index = session.events.length - 1; index >= 0; index -= 1) {
+\t\tconst event = session.events[index];''',
+     '''function sessionPreset(session) {
+\tconst events = sessionLog(session);
+\tfor (let index = events.length - 1; index >= 0; index -= 1) {
+\t\tconst event = events[index];'''),
 )
 OLD_RESPONSE_VALUE = '''\t\tasync function responseValue(response) {
 \t\t\tconst value = await response.json();
