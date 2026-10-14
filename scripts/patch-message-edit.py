@@ -42,8 +42,11 @@ NEW_TIMELINE_FUNCTION = '''function boundedInteger(name, fallback, maximum) {
 \treturn Number.isSafeInteger(parsed) && parsed > 0 ? Math.min(parsed, maximum) : fallback;
 }
 // Hard ceilings are deliberately small: this route shares the host process heap.
-const TIMELINE_EVENT_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_EVENT_LIMIT", 800, 2e3);
-const TIMELINE_INPUT_BYTE_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_INPUT_BYTE_LIMIT", 1024 * 1024, 4 * 1024 * 1024);
+// The window is a suffix of the live log: wide enough to contain whole closed
+// turns (a 1 MB window starved a 2.5 MB session down to its open turn alone),
+// yet small enough that one request never materializes a huge projection.
+const TIMELINE_EVENT_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_EVENT_LIMIT", 2e3, 4e3);
+const TIMELINE_INPUT_BYTE_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_INPUT_BYTE_LIMIT", 4 * 1024 * 1024, 8 * 1024 * 1024);
 const TIMELINE_MESSAGE_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_MESSAGE_LIMIT", 200, 500);
 const TIMELINE_JSON_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_JSON_LIMIT", 128 * 1024, 512 * 1024);
 const TIMELINE_CACHE_LIMIT = boundedInteger("DSH_MESSAGE_EDIT_CACHE_LIMIT", 16, 64);
@@ -75,18 +78,36 @@ function bytesWithin(value, limit) {
 \t}
 \treturn bytes;
 }
+/** Whole closed turns counted back from the log end, oldest first.
+* A raw event suffix can end inside the open turn and fold to nothing at all;
+* the editable projection only ever consumes complete turn brackets. */
 function recentEventWindow(events) {
-\tconst selected = [];
-\tlet bytes = 0;
-\tfor (let index = events.length - 1; index >= 0 && selected.length < TIMELINE_EVENT_LIMIT; index -= 1) {
-\t\tconst remaining = TIMELINE_INPUT_BYTE_LIMIT - bytes;
-\t\tconst eventBytes = bytesWithin(events[index], remaining);
-\t\tif (eventBytes > remaining) break;
-\t\tbytes += eventBytes;
-\t\tselected.push(events[index]);
+\tconst turns = [];
+\tlet current;
+\tfor (const event of events) {
+\t\tif (event.type === "turn/start") {
+\t\t\tcurrent = [event];
+\t\t\tcontinue;
+\t\t}
+\t\tif (current === void 0) continue;
+\t\tcurrent.push(event);
+\t\tif (event.type === "turn/end") {
+\t\t\tturns.push(current);
+\t\t\tcurrent = void 0;
+\t\t}
 \t}
-\tselected.reverse();
-\treturn selected;
+\tconst picked = [];
+\tlet bytes = 0;
+\tfor (let index = turns.length - 1; index >= 0; index -= 1) {
+\t\tconst turn = turns[index];
+\t\tif (picked.reduce((total, entry) => total + entry.length, 0) + turn.length > TIMELINE_EVENT_LIMIT) break;
+\t\tconst remaining = TIMELINE_INPUT_BYTE_LIMIT - bytes;
+\t\tconst turnBytes = bytesWithin(turn, remaining);
+\t\tif (turnBytes > remaining) break;
+\t\tbytes += turnBytes;
+\t\tpicked.unshift(turn);
+\t}
+\treturn picked.flat();
 }
 function boundedMessages(turns) {
 \tconst candidates = editableMessages(turns);
@@ -105,15 +126,32 @@ function boundedMessages(turns) {
 function boundedRetryableTurns(turns) {
 \treturn retryableTurns(turns).slice(-TIMELINE_MESSAGE_LIMIT).map((item) => ({ ...item, preview: item.preview.slice(0, 512) }));
 }
+/** Final byte bound: trim the oldest entries until the real JSON fits, so a
+* large turn degrades to fewer editable messages instead of an error page. */
 function boundedTimeline(value) {
-\tconst encoded = JSON.stringify(value);
-\tif (Buffer.byteLength(encoded, "utf8") > TIMELINE_JSON_LIMIT) throw new TimelineTooLargeError(`message-edit 响应超过 ${String(TIMELINE_JSON_LIMIT)} 字节硬上限。`);
-\treturn value;
+\tconst messages = [...value.messages];
+\tconst retryableTurns = [...value.retryableTurns];
+\tfor (;;) {
+\t\tconst candidate = { ...value, messages, retryableTurns };
+\t\tif (Buffer.byteLength(JSON.stringify(candidate), "utf8") <= TIMELINE_JSON_LIMIT) return candidate;
+\t\tif (messages.length > 0) messages.splice(0, Math.max(1, Math.ceil(messages.length / 4)));
+\t\telse if (retryableTurns.length > 0) retryableTurns.splice(0, Math.max(1, Math.ceil(retryableTurns.length / 4)));
+\t\telse throw new TimelineTooLargeError(`message-edit 响应超过 ${String(TIMELINE_JSON_LIMIT)} 字节硬上限。`);
+\t}
 }
 function cacheTimeline(sessionId, revision, value) {
 \tif (timelineCache.has(sessionId)) timelineCache.delete(sessionId);
 \ttimelineCache.set(sessionId, { revision, value });
 \twhile (timelineCache.size > TIMELINE_CACHE_LIMIT) timelineCache.delete(timelineCache.keys().next().value);
+}
+// The host Session no longer exposes its raw `.events`; read a bounded tail
+// through the supported synchronous snapshot API (older hosts: `.events`).
+function liveTail(live) {
+\tif (typeof live.snapshotEvents === "function") {
+\t\tconst end = Number(live.seq ?? 0);
+\t\treturn live.snapshotEvents(Math.max(0, end - TIMELINE_EVENT_LIMIT), end);
+\t}
+\treturn live.events ?? [];
 }
 async function timeline(ctx, sessionId) {
 \tconst live = ctx.sessions.get(sessionId);
@@ -126,10 +164,11 @@ async function timeline(ctx, sessionId) {
 \t\tredoSessionIds: [],
 \t\tnotice: "为保护宿主内存，message-edit 仅处理当前已加载会话；请先打开会话后重试。"
 \t};
-\tconst revision = timelineRevision(live.events);
+\tconst events = liveTail(live);
+\tconst revision = timelineRevision(events);
 \tconst cached = timelineCache.get(sessionId);
 \tif (cached?.revision === revision) return cached.value;
-\tconst turns = closedTurns(recentEventWindow(live.events));
+\tconst turns = closedTurns(recentEventWindow(events));
 \tconst value = boundedTimeline({
 \t\tsessionId,
 \t\tmessages: boundedMessages(turns),

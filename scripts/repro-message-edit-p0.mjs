@@ -83,7 +83,8 @@ const boundedTimeline = await loadTimeline(installed, boundedStart, 'bounded');
 const mustNotTrace = {
   traceSession: async () => { throw new Error('the bounded projection must not call traceSession'); },
 };
-const live = { events: [], header: { createdAt: 1 } };
+// Exactly the modern host surface: no raw `.events`, only seq + snapshotEvents.
+const live = { seq: 0, header: { createdAt: 1 }, snapshotEvents: () => [] };
 const loaded = await boundedTimeline({ sessions: new Map([['live', live]]), sessionQuery: mustNotTrace }, 'live');
 assert.equal(loaded.sessionId, 'live');
 assert.equal(loaded.versions.length, 1);
