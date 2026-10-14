@@ -23,7 +23,7 @@ with tarfile.open(source, 'r:gz') as original, tarfile.open(target, 'w:gz', form
         data = original.extractfile(member).read()
         if member.name == 'package/client.js':
             text = data.decode('utf8')
-            for before, after in ((patch.DRIFTED, patch.FIXED), (patch.OLD_REVISION, patch.NEW_REVISION), (patch.OLD_BINDING, patch.NEW_BINDING)) + patch.ACTION_REPLACEMENTS + patch.CLIENT_BOUNDS:
+            for before, after in ((patch.DRIFTED, patch.FIXED), (patch.OLD_REVISION, patch.NEW_REVISION), (patch.OLD_BINDING, patch.NEW_BINDING)) + patch.ACTION_REPLACEMENTS + patch.CLIENT_BOUNDS + patch.CLIENT_NOTICE:
                 if text.count(after) == 1:
                     continue
                 if text.count(before) != 1:

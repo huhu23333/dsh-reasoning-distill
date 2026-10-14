@@ -108,6 +108,33 @@ if (expectFailure) {
       assert.equal(face.hooks.messageEdit.getSnapshot().status, 'ready');
       assert.equal(face.hooks.messageEdit.getSnapshot().timeline.messages.length, 1);
       console.log('AFTER: fetch and JSON deadlines expose retry; a valid timeline reaches ready with a message');
+      await delay(50);
+      // The historical P0 body: a raw server TypeError surfaced through the error JSON.
+      // It must land in the readable error state and never reach the renderer as a crash.
+      fetchResponse = async () => ({ ok: false, status: 409, json: async () => ({ error: "Cannot read properties of undefined (reading 'length')" }) });
+      const serverError = waitForResult();
+      face.load();
+      assert.equal(await settled(serverError), true, 'a server error body must settle');
+      assert.equal(face.hooks.messageEdit.getSnapshot().status, 'error');
+      assert.equal(face.hooks.messageEdit.getSnapshot().error, "Cannot read properties of undefined (reading 'length')");
+      await delay(50);
+      // A structurally incomplete success body is reported, not thrown at the renderer.
+      fetchResponse = async () => ({ ok: true, json: async () => ({ sessionId: 's1', messages: [] }) });
+      const incomplete = waitForResult();
+      face.load();
+      assert.equal(await settled(incomplete), true, 'an incomplete body must settle');
+      assert.equal(face.hooks.messageEdit.getSnapshot().status, 'error');
+      assert.match(face.hooks.messageEdit.getSnapshot().error, /不是数组/);
+      await delay(50);
+      // The unloaded-session guard answers with a complete empty timeline plus a notice.
+      fetchResponse = async () => ({ ok: true, json: async () => ({ sessionId: 's1', messages: [], retryableTurns: [], versions: [], undoStack: [], redoSessionIds: [], notice: '仅处理当前已加载会话' }) });
+      const noticed = waitForResult();
+      face.load();
+      assert.equal(await settled(noticed), true, 'a noticed empty timeline must settle');
+      assert.equal(face.hooks.messageEdit.getSnapshot().status, 'ready');
+      assert.equal(face.hooks.messageEdit.getSnapshot().timeline.notice, '仅处理当前已加载会话');
+      console.log('AFTER: error bodies and incomplete payloads reach the error state; the empty-timeline notice survives decoding');
+      await delay(50);
     }
     const navigation = face.openVersion('new-session');
     assert.equal(await settled(navigation), !(expectFailure || deadlineRed), 'session-list navigation must have a deadline');

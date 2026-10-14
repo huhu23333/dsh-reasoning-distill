@@ -7,13 +7,21 @@ import { pathToFileURL } from 'node:url';
 
 const bundle = process.argv[2] ?? path.join(os.homedir(), '.dsh/profiles/web/node_modules/dsh-message-edit/index.mjs');
 const source = fs.readFileSync(bundle, 'utf8');
-const anchor = 'function boundedTimeline(value) {';
-assert.equal(source.split(anchor).length, 2, 'expected bounded timeline seam');
-const exposed = `${source}\nglobalThis.__boundedTimeline = boundedTimeline;\n`;
+const start = source.indexOf('function boundedInteger(name, fallback, maximum) {');
+const end = source.indexOf('function objectValue(value) {', start);
+assert(start >= 0 && end > start, 'expected bounded timeline seam');
+const fixture = `
+const closedTurns = events => events;
+const editableMessages = turns => turns;
+const retryableTurns = turns => turns.map((_, turn) => ({ turn, preview: "fixture" }));
+${source.slice(start, end)}
+globalThis.__messageEditServer = { boundedTimeline, timeline };
+`;
 const temporary = path.join(os.tmpdir(), `message-edit-server-${process.pid}.mjs`);
-fs.writeFileSync(temporary, exposed);
+fs.writeFileSync(temporary, fixture);
 try {
   await import(`${pathToFileURL(temporary).href}?t=${Date.now()}`);
+  const { boundedTimeline, timeline } = globalThis.__messageEditServer;
   const messages = Array.from({ length: 500 }, (_, index) => ({
     key: `${index}:0`, turn: index, eventSeq: index, blockIndex: 0,
     kind: 'user', text: 'x'.repeat(2048), time: index,
@@ -22,13 +30,21 @@ try {
     sessionId: 's1', messages, retryableTurns: [], versions: [],
     undoStack: [], redoSessionIds: [],
   };
-  const bounded = globalThis.__boundedTimeline(value);
-  const bytes = Buffer.byteLength(JSON.stringify(bounded), 'utf8');
-  assert.ok(bounded.messages.length <= 200, 'message count must be bounded');
-  assert.ok(bytes <= 128 * 1024, 'serialized response must be bounded');
-  assert.equal(bounded.messages.at(-1).eventSeq, 499, 'newest editable message must survive');
-  console.log(`SERVER: ${messages.length} messages -> ${bounded.messages.length}, ${bytes} bytes (<= 131072)`);
+  assert.throws(() => boundedTimeline(value), /硬上限/, 'oversized final JSON must be rejected');
+
+  const live = await timeline({ sessions: new Map([['live', { events: messages.slice(-2), header: { createdAt: 1 } }]]) }, 'live');
+  assert.equal(live.sessionId, 'live');
+  assert.equal(live.messages.length, 2);
+  assert.equal(live.versions.length, 1);
+
+  const unloaded = await timeline({ sessions: new Map() }, 'unloaded');
+  assert.equal(unloaded.sessionId, 'unloaded');
+  for (const field of ['messages', 'retryableTurns', 'versions', 'undoStack', 'redoSessionIds']) {
+    assert.deepEqual(unloaded[field], [], `${field} must be an empty array`);
+  }
+  assert.match(unloaded.notice, /保护宿主内存.*当前已加载会话/);
+  console.log('SERVER: loaded and unloaded timelines are complete, bounded payloads; unloaded includes notice');
 } finally {
-  delete globalThis.__boundedTimeline;
+  delete globalThis.__messageEditServer;
   fs.rmSync(temporary, { force: true });
 }

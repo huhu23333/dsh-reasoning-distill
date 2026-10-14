@@ -13,8 +13,11 @@ Re-run after every reinstall/upgrade of the plugin (installs overwrite it).
 """
 from __future__ import annotations
 
+import os
 import pathlib
+import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 
 DRIFTED = 'require("@deepseek-ai/dsh-client-runtime/client")'
@@ -114,7 +117,15 @@ function cacheTimeline(sessionId, revision, value) {
 }
 async function timeline(ctx, sessionId) {
 \tconst live = ctx.sessions.get(sessionId);
-\tif (live === void 0) throw new TimelineTooLargeError("为保护宿主内存，message-edit 仅处理当前已加载会话；请先打开会话后重试。");
+\tif (live === void 0) return {
+\t\tsessionId,
+\t\tmessages: [],
+\t\tretryableTurns: [],
+\t\tversions: [],
+\t\tundoStack: [],
+\t\tredoSessionIds: [],
+\t\tnotice: "为保护宿主内存，message-edit 仅处理当前已加载会话；请先打开会话后重试。"
+\t};
 \tconst revision = timelineRevision(live.events);
 \tconst cached = timelineCache.get(sessionId);
 \tif (cached?.revision === revision) return cached.value;
@@ -219,6 +230,30 @@ NEW_NAVIGATION_SUBSCRIBE = '''\t\t\t\t\tthis.navigationWaits.add(cancel);
 \t\t\t\t\ttimer = setTimeout(cancel, MESSAGE_EDIT_DEADLINE_MS);
 \t\t\t\t\tdispose = this.sessions.list.subscribe(() => {'''
 CLIENT_BOUNDS = ((OLD_RESPONSE_VALUE, NEW_RESPONSE_VALUE), (OLD_LOAD, NEW_LOAD), (OLD_NAVIGATION, NEW_NAVIGATION), (OLD_NAVIGATION_SUBSCRIBE, NEW_NAVIGATION_SUBSCRIBE))
+# The bounded server answers an unloaded session with a complete, empty timeline
+# plus a human notice. Surface it instead of rendering the generic empty state.
+OLD_NOTICE_DECODE = '''\t\t\t\tundoStack: stringArray(data["undoStack"], "Timeline undoStack"),
+\t\t\t\tredoSessionIds: stringArray(data["redoSessionIds"], "Timeline redoSessionIds")
+\t\t\t};'''
+NEW_NOTICE_DECODE = '''\t\t\t\tundoStack: stringArray(data["undoStack"], "Timeline undoStack"),
+\t\t\t\tredoSessionIds: stringArray(data["redoSessionIds"], "Timeline redoSessionIds"),
+\t\t\t\t...((typeof data["notice"] === "string" && data["notice"].length > 0) ? { notice: data["notice"] } : {})
+\t\t\t};'''
+OLD_NOTICE_RENDER = '''\t\t\t\t\tstate.error === null ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+\t\t\t\t\t\tclassName: MessageEditTimelineView_module_css_default["error"],
+\t\t\t\t\t\tchildren: state.error
+\t\t\t\t\t}),
+\t\t\t\t\tstate.status === "loading" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {'''
+NEW_NOTICE_RENDER = '''\t\t\t\t\tstate.error === null ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+\t\t\t\t\t\tclassName: MessageEditTimelineView_module_css_default["error"],
+\t\t\t\t\t\tchildren: state.error
+\t\t\t\t\t}),
+\t\t\t\t\ttimeline.notice === void 0 ? null : /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {
+\t\t\t\t\t\tclassName: MessageEditTimelineView_module_css_default["notice"],
+\t\t\t\t\t\tchildren: timeline.notice
+\t\t\t\t\t}),
+\t\t\t\t\tstate.status === "loading" ? /* @__PURE__ */ (0, react_jsx_runtime.jsx)("p", {'''
+CLIENT_NOTICE = ((OLD_NOTICE_DECODE, NEW_NOTICE_DECODE), (OLD_NOTICE_RENDER, NEW_NOTICE_RENDER))
 OLD_REVISION = '''\t\tfunction conversationRevision(snapshot) {
 \t\t\tconst turnEnds = [...snapshot.turnEnds.entries()].map(([turn, seq]) => `${String(turn)}:${String(seq)}`).join(",");
 \t\t\treturn [
@@ -301,11 +336,17 @@ def patch(target: pathlib.Path) -> int:
         print("install the plugin first: dsh plugin --profile web add dsh-message-edit")
         return 1
     source = target.read_text(encoding="utf8")
-    replacements = SERVER_REPLACEMENTS if target.name == 'index.mjs' else ((DRIFTED, FIXED), (OLD_REVISION, NEW_REVISION), (OLD_BINDING, NEW_BINDING)) + ACTION_REPLACEMENTS + CLIENT_BOUNDS
+    replacements = SERVER_REPLACEMENTS if target.name == 'index.mjs' else ((DRIFTED, FIXED), (OLD_REVISION, NEW_REVISION), (OLD_BINDING, NEW_BINDING)) + ACTION_REPLACEMENTS + CLIENT_BOUNDS + CLIENT_NOTICE
     for before, after in replacements:
-        if source.count(after) == 1:
+        before_count = source.count(before)
+        after_count = source.count(after)
+        if after_count == 1:
             continue
-        if source.count(before) != 1 or source.count(after) != 0:
+        # The bounded server projection intentionally removes old lineage helpers;
+        # their historical compatibility replacements are then no longer present.
+        if target.name == 'index.mjs' and before_count == 0 and after_count == 0:
+            continue
+        if before_count != 1 or after_count != 0:
             print(f"nothing to patch (unexpected bundle structure): {target}")
             return 1
     patched = source
@@ -321,11 +362,33 @@ def patch(target: pathlib.Path) -> int:
     if patched == source:
         print(f"already patched: {target}")
         return 0
-    backup = target.with_name(target.name + '.orig-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
-    backup.write_bytes(target.read_bytes())
-    target.write_text(patched, encoding="utf8")
+    # Never expose a half-written or syntactically invalid installed bundle.
+    temporary: pathlib.Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode='w', encoding='utf8', dir=target.parent,
+            prefix=f'.{target.stem}.tmp-', suffix=target.suffix, delete=False,
+        ) as candidate:
+            candidate.write(patched)
+            candidate.flush()
+            os.fsync(candidate.fileno())
+            temporary = pathlib.Path(candidate.name)
+        check = subprocess.run(
+            ['node', '--check', str(temporary)], capture_output=True, text=True,
+        )
+        if check.returncode != 0:
+            print(f"nothing written (node --check failed): {target}")
+            print(check.stderr.rstrip())
+            return 1
+        backup = target.with_name(target.name + '.orig-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
+        backup.write_bytes(target.read_bytes())
+        os.replace(temporary, target)
+        temporary = None
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     print(f"backup: {backup}")
-    print(f"patched: {target}")
+    print(f"checked then patched: {target}")
     print('next: refresh the existing dsh web page (restart dsh web if bundles are cached)')
     return 0
 
