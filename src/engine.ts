@@ -266,12 +266,19 @@ export class ReasoningDistillEngine {
           if (!await this.settle(session, signal)) return true
           // The wait is even longer than the read: check again before acting for it.
           if (this.replaced(session)) return true
-          // The source agent is running throughout pre-step; message-edit acquires
-          // runMaintenance only after it becomes idle. Queue the one branch POST
-          // after this turn, without rejecting/claiming additional user input.
+          // The compression is settled: hand this turn over *now*. The branch backend
+          // reads the source log without taking its maintenance phase, so the branch
+          // exists within this pre-step; the original turn is then rejected and the
+          // remaining steps run in the branch with the compressed context.
           if (!signal?.aborted) {
-            if (typeof payload.agent.whenIdle === 'function') this.scheduleBranchAtIdle(payload.agent, session)
-            else await this.failMissingIdleAgent(session, signal)
+            const handedOver = await this.handOffToBranch(session, signal)
+            if (handedOver) return false
+            // Nothing armed, or the backend refused: the original carries on. A
+            // compression that lands after this turn's last pre-step still gets its
+            // hand-off from the deferred idle path when a later step arrives.
+            if (this.pendingBranch.has(session.id) && typeof payload.agent.whenIdle === 'function') {
+              this.scheduleBranchAtIdle(payload.agent, session)
+            }
           }
           // The failure note for a host without whenIdle may await storage;
           // a replaced id must not arm its successor.

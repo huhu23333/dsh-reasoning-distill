@@ -40,6 +40,7 @@ with tarfile.open(source, 'r:gz') as original, tarfile.open(target, 'w:gz', form
                 text = text.replace(before, after, 1)
             text = patch.patch_server_timeline(text)
             text = patch.patch_manual_turn(text)
+            text = patch.patch_splice_plan(text)
             data = text.encode('utf8')
         elif member.name == 'package/package.json':
             metadata = json.loads(data)

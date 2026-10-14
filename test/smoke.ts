@@ -1046,8 +1046,8 @@ check('the backend is asked to splice exactly that reasoning block',
   backendCalls[0]?.body['action'] === 'splice' && backendCalls[0]?.body['eventSeq'] === seq37
   && backendCalls[0]?.body['blockIndex'] === 0 && backendCalls[0]?.body['text'] === 'Distilled: ask for Paris weather and call the tool.',
   JSON.stringify(backendCalls[0]?.body))
-check('the original turn continues while branch creation waits for idle',
-  (decision37 as { kind?: string }).kind === 'enter' && nextCalled37, JSON.stringify(decision37))
+check('a created branch ends the original turn before the next request',
+  (decision37 as { kind?: string }).kind === 'reject' && !nextCalled37, JSON.stringify(decision37))
 const entry37 = (await store37.load(s37.id)).entries[0]!
 check('and the branch is recorded on the entry for the panel to open',
   entry37.handoff?.state === 'created' && entry37.handoff.branchId === 'session-branch-1'
@@ -1087,7 +1087,7 @@ console.log('scenario 37a: active source must retire before the branch POST')
 handlers.clear()
 let releaseIdle37a: (() => void) | undefined
 const idle37a = new Promise<void>(resolve => { releaseIdle37a = resolve })
-let active37a = true
+let active37a = false
 let posts37a = 0
 const activeBackend37a = createServer((_request, response) => {
   posts37a++
@@ -1111,14 +1111,13 @@ await fire('session/event', s37a, s37a.eventAt(seq37a))
 await fire('session/event', s37a, s37a.eventAt(s37a.log.length - 1))
 await settleFor(async () => (await store37a.load(s37a.id)).entries.length === 1)
 const decision37a = await decide('agent/pre-step', { agent: agent37a }, async () => ({ kind: 'enter', messages: [] }))
-check('active source: no non-idle branch POST', posts37a === 0, String(posts37a))
-active37a = false
-agent37a.status = 'idle'
-releaseIdle37a?.()
 await settleFor(async () => (await store37a.load(s37a.id)).entries[0]?.handoff?.state === 'created')
-check('active source: idle branch succeeds without duplicate POST or rejected turn', posts37a === 1 && (await store37a.load(s37a.id)).entries[0]?.handoff?.branchId === 'session-idle-branch' && (decision37a as { kind?: string }).kind === 'enter', JSON.stringify({ posts37a, decision37a, handoff: (await store37a.load(s37a.id)).entries[0]?.handoff }))
+check('the branch is created during pre-step without waiting for idle',
+  posts37a === 1 && (await store37a.load(s37a.id)).entries[0]?.handoff?.branchId === 'session-idle-branch',
+  JSON.stringify({ posts37a, handoff: (await store37a.load(s37a.id)).entries[0]?.handoff }))
+check('a created branch ends the original turn', (decision37a as { kind?: string }).kind === 'reject', JSON.stringify(decision37a))
 await fire('agent/pre-step', { agent: agent37a }, async () => ({ kind: 'enter', messages: [] }))
-check('created idle hand-off is not POSTed again', posts37a === 1, String(posts37a))
+check('a created hand-off is never POSTed again', posts37a === 1, String(posts37a))
 await new Promise<void>(resolve => activeBackend37a.close(() => resolve()))
 
 console.log('scenario 37b: idle refusal audits failure without fabricating input or a turn')
@@ -1147,19 +1146,16 @@ let followups37b = 0
 const agent37b = { session: s37b, status: 'running', whenIdle: () => idle37b, followup: () => { followups37b++ } }
 const beforeEvents37b = s37b.log.map(event => event.type)
 const decision37b = await decide('agent/pre-step', { agent: agent37b }, async () => ({ kind: 'enter', messages: [] }))
-check('idle refusal: no POST while source is active', posts37b === 0, String(posts37b))
-agent37b.status = 'idle'
-releaseIdle37b?.()
 await settleFor(async () => (await store37b.load(s37b.id)).entries[0]?.handoff?.state === 'failed')
 const note37b = (await store37b.load(s37b.id)).entries[0]?.handoff
-check('idle refusal: exact one POST, honest error, original request continues',
+check('a refusal is POSTed once, recorded honestly, and the original continues',
   posts37b === 1 && note37b?.state === 'failed' && note37b.error === 'branch backend refused deliberately'
   && (decision37b as { kind?: string }).kind === 'enter', JSON.stringify({ posts37b, note37b, decision37b }))
-check('idle refusal: no duplicate turn, user event, or followup',
+check('a refused hand-off adds no duplicate turn, user event, or followup',
   followups37b === 0 && JSON.stringify(s37b.log.map(event => event.type)) === JSON.stringify(beforeEvents37b),
   JSON.stringify({ followups37b, events: s37b.log.map(event => event.type) }))
 await fire('agent/pre-step', { agent: agent37b }, async () => ({ kind: 'enter', messages: [] }))
-check('refused idle hand-off is not POSTed again', posts37b === 1, String(posts37b))
+check('a refused hand-off is not POSTed again', posts37b === 1, String(posts37b))
 await new Promise<void>(resolve => backend37b.close(() => resolve()))
 
 console.log('scenario 37c: missing host whenIdle does not POST during pre-step')
@@ -1183,10 +1179,11 @@ await fire('session/event', s37c, s37c.eventAt(seq37c))
 await fire('session/event', s37c, s37c.eventAt(s37c.log.length - 1))
 await settleFor(async () => (await store37c.load(s37c.id)).entries.length === 1)
 const decision37c = await decide('agent/pre-step', { agent: { session: s37c } }, async () => ({ kind: 'enter', messages: [] }))
+await settleFor(async () => (await store37c.load(s37c.id)).entries[0]?.handoff?.state === 'created')
 const note37c = (await store37c.load(s37c.id)).entries[0]?.handoff
-check('missing idle API never POSTs and leaves a truthful failure',
-  posts37c === 0 && note37c?.state === 'failed' && note37c.error?.includes('host agent exposes no whenIdle')
-  && (decision37c as { kind?: string }).kind === 'enter' && engine37c.snapshot(s37c.id).pendingBranch === null,
+check('a host without whenIdle is handed over and its turn ends',
+  posts37c === 1 && note37c?.branchId === 'unexpected-37c' && (decision37c as { kind?: string }).kind === 'reject'
+  && engine37c.snapshot(s37c.id).pendingBranch === null,
   JSON.stringify({ posts37c, note37c, decision37c }))
 await new Promise<void>(resolve => backend37c.close(() => resolve()))
 
@@ -1195,10 +1192,8 @@ handlers.clear()
 let releaseIdle37d: (() => void) | undefined
 const idle37d = new Promise<void>(resolve => { releaseIdle37d = resolve })
 let posts37d = 0
-const backend37d = createServer((_request, response) => {
-  posts37d++
-  response.writeHead(200, { 'content-type': 'application/json' })
-  response.end(JSON.stringify({ sessionId: 'forbidden-late-branch' }))
+const backend37d = createServer((_request, _response) => {
+  posts37d++ // never answers: the branch timeout decides the hand-off
 })
 await new Promise<void>(resolve => backend37d.listen(0, '127.0.0.1', resolve))
 const cfg37d = makeConfig({ branchTimeoutMs: { get: () => 20 } })
@@ -1214,13 +1209,11 @@ await fire('session/event', s37d, s37d.eventAt(seq37d))
 await fire('session/event', s37d, s37d.eventAt(s37d.log.length - 1))
 await settleFor(async () => (await store37d.load(s37d.id)).entries.length === 1)
 const agent37d = { session: s37d, status: 'running', whenIdle: () => idle37d }
-await decide('agent/pre-step', { agent: agent37d }, async () => ({ kind: 'enter', messages: [] }))
-await settleFor(async () => (await store37d.load(s37d.id)).entries[0]?.handoff?.state === 'skipped')
-agent37d.status = 'idle'
-releaseIdle37d?.()
-await new Promise(resolve => setTimeout(resolve, 0))
-check('expired idle wait never POSTs and keeps a skipped note',
-  posts37d === 0 && (await store37d.load(s37d.id)).entries[0]?.handoff?.state === 'skipped'
+const decision37d = await decide('agent/pre-step', { agent: agent37d }, async () => ({ kind: 'enter', messages: [] }))
+await settleFor(async () => (await store37d.load(s37d.id)).entries[0]?.handoff?.state === 'failed')
+check('a silent backend POSTs once, records failure, and leaves the turn running',
+  posts37d === 1 && (await store37d.load(s37d.id)).entries[0]?.handoff?.state === 'failed'
+  && (decision37d as { kind?: string }).kind === 'enter'
   && engine37d.snapshot(s37d.id).pendingBranch === null, JSON.stringify({ posts37d, handoff: (await store37d.load(s37d.id)).entries[0]?.handoff }))
 await new Promise<void>(resolve => backend37d.close(() => resolve()))
 

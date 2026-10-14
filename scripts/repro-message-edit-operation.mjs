@@ -34,11 +34,14 @@ const session = {
   seq: events.length,
   snapshotEvents: (from = 0, to = events.length) => events.slice(from, to),
 };
+const followups = [];
+let maintenanceCalls = 0;
 const agent = {
   session,
   options: { provider: 'stub-provider', model: 'stub-model' },
-  followup: () => {},
-  runMaintenance: async operation => operation(agent),
+  followup: message => { followups.push(message); },
+  maintenanceCalls: () => maintenanceCalls,
+  runMaintenance: async operation => { maintenanceCalls += 1; return operation(agent); },
 };
 
 // The host validates a branch seed with the real Session constructor; use it so a
@@ -72,7 +75,7 @@ const ctx = {
       if (SessionApi !== undefined) {
         SessionApi.Session.create(SessionApi.SessionId(options.sessionId), options.seed);
       }
-      return { agent: { followup: () => {} }, dispose: async () => {} };
+      return { agent: { followup: message => { followups.push(message); } }, dispose: async () => {} };
     },
   },
   workspaceRegistry: {
@@ -149,10 +152,15 @@ try {
   // A splice branch is the whole conversation with one block rewritten: the tool
   // calls and later steps must survive, and the version record rides along.
   const originalContent = events[assistantTarget.seq].data.message.content;
+  // The compression hand-off runs inside a live turn, so the route must never take
+  // the source agent's maintenance phase (that would demand true idle).
+  assert.equal(agent.maintenanceCalls(), 0, 'the route must not require the source agent to be idle');
+  followups.length = 0;
+  const turnUserText = (closedTurn.user.data.content ?? []).filter(block => block.type === 'text').map(block => block.text).join('\n');
   await operate('splice ', {
     action: 'splice', sessionId: header.id, eventSeq: assistantTarget.seq,
     blockIndex: assistantTarget.blockIndex, text: 'spliced reasoning text',
-  }, 0);
+  }, 1);
   assert(lastSeed !== undefined, 'the splice must hand a seed to the host');
   assert(lastSeed.length >= events.length, 'the branch seed must carry the whole conversation');
   const spliced = lastSeed[assistantTarget.seq];
@@ -166,6 +174,10 @@ try {
     'tool calls must survive the splice');
   assert.deepEqual(spliced.surfaceOp, events[assistantTarget.seq].surfaceOp, 'the event envelope must survive');
   assert.equal(lastSeed[events.length].type, 'message-edit/version', 'the version record must follow the copied log');
+  // The branch continues the interrupted turn: its user input is re-issued there.
+  assert.equal(followups.length, 1, 'the branch must be driven to continue the turn');
+  assert.equal(followups[0].role, 'user');
+  assert.equal((followups[0].content ?? []).map(block => block.text).join('\n'), turnUserText, 'the current turn user input must be re-issued in the branch');
   console.log(`OPERATION ok   splice   seedEvents=${String(lastSeed.length)} blocks=${spliced.data.message.content.map(block => block.type).join('+')}`);
 
   // Hiding the replaced conversation belongs to the client UI step (it must follow

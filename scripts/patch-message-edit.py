@@ -324,6 +324,77 @@ def patch_manual_turn(source: str) -> str:
     return source[:start] + MANUAL_TURN_FUNCTION + source[end:]
 
 
+SPLICE_FUNCTIONS = '''
+/** Rewrite one assistant block in place: the branch is a copy of the whole
+* conversation with that single block's text replaced. */
+function splicePlan(operation, events) {
+\tconst target = events[operation.eventSeq];
+\tif (target === void 0 || target.type !== "assistant/message") throw new Error("splice 目标必须是助手消息事件。");
+\tconst before = target.data.message.content[operation.blockIndex];
+\tif (!isTextualBlock(before)) throw new Error("所选助手消息块不是文本或思考。");
+\tconst user = turnUserInput(events, operation.eventSeq);
+\treturn {
+\t\tboundary: events.length - 1,
+\t\tversion: pairVersionEffect(operation.sessionId, {
+\t\t\toperation: "edit",
+\t\t\tcascade: "preserve",
+\t\t\ttargetTurn: target.data.turn,
+\t\t\ttargetEventSeq: target.seq,
+\t\t\ttargetBlockIndex: operation.blockIndex,
+\t\t\tblockKind: before.type === "reasoning" ? "assistant.reasoning" : "assistant.response",
+\t\t\tbefore: before.text,
+\t\t\tafter: operation.text
+\t\t}),
+\t\tsplice: {
+\t\t\tseq: operation.eventSeq,
+\t\t\tblockIndex: operation.blockIndex,
+\t\t\ttext: operation.text
+\t\t},
+\t\t// The turn this block belongs to continues in the branch: the branch carries the
+\t\t// compressed history, so re-issuing its user input resumes the work there.
+\t\tqueuedUsers: user === void 0 ? [] : [cloneUser(user.data)]
+\t};
+}
+/** The user input of the turn containing one event, or undefined outside a turn. */
+function turnUserInput(events, seq) {
+\tlet start = -1;
+\tfor (let index = seq; index >= 0; index -= 1) {
+\t\tif (events[index]?.type === "turn/start") { start = index; break; }
+\t}
+\tif (start < 0) return void 0;
+\tfor (let index = start; index < events.length; index += 1) {
+\t\tconst event = events[index];
+\t\tif (event?.type === "turn/end") return void 0;
+\t\tif (event?.type === "user/message" && event.data?.source?.kind === "user") return event;
+\t}
+\treturn void 0;
+}
+/** Copy one assistant message event with a single content block's text replaced.
+* Tool-call blocks and the event envelope survive; the embedded provider stream no
+* longer describes the edited content, so it is dropped. */
+function splicedAssistantEvent(event, blockIndex, text) {
+\tconst data = structuredClone(event.data);
+\tdata.message.content[blockIndex] = {
+\t\t...data.message.content[blockIndex],
+\t\ttext
+\t};
+\tdata.stream = [];
+\treturn {
+\t\t...event,
+\t\tdata
+\t};
+}
+'''
+
+
+def patch_splice_plan(source: str) -> str:
+    """Normalize the splice planner and its rewriter, whatever variant is present."""
+    end = source.index('function agentOptions(events, fallback) {')
+    marker = '/** Rewrite one assistant block in place:'
+    at = source.rfind(marker, 0, end)
+    if at < 0:
+        at = source.rindex('\n}', 0, end) + 2
+    return source[:at].rstrip('\n') + '\n' + SPLICE_FUNCTIONS + source[end:]
 SERVER_REPLACEMENTS = (
     ('if (persistence !== void 0) return (await persistence.inspect(sessionId)).events;',
      'if (typeof persistence?.inspect === "function") return (await persistence.inspect(sessionId)).events;'),
@@ -367,59 +438,20 @@ SERVER_REPLACEMENTS = (
      '''\tswitch (operation.action) {
 \t\tcase "edit": return editPlan(operation, turns);
 \t\tcase "splice": return splicePlan(operation, events);'''),
-    # The splice needs its planner and its in-place event rewriter, and versionSeed
-    # has to apply the rewrite to the copied log before the version record is added.
-    ('function agentOptions(events, fallback) {',
-     '''/** Rewrite one assistant block in place: the branch is a copy of the whole
-* conversation with that single block's text replaced. */
-function splicePlan(operation, events) {
-\tconst target = events[operation.eventSeq];
-\tif (target === void 0 || target.type !== "assistant/message") throw new Error("splice 目标必须是助手消息事件。");
-\tconst before = target.data.message.content[operation.blockIndex];
-\tif (!isTextualBlock(before)) throw new Error("所选助手消息块不是文本或思考。");
-\treturn {
-\t\tboundary: events.length - 1,
-\t\tversion: pairVersionEffect(operation.sessionId, {
-\t\t\toperation: "edit",
-\t\t\tcascade: "preserve",
-\t\t\ttargetTurn: target.data.turn,
-\t\t\ttargetEventSeq: target.seq,
-\t\t\ttargetBlockIndex: operation.blockIndex,
-\t\t\tblockKind: before.type === "reasoning" ? "assistant.reasoning" : "assistant.response",
-\t\t\tbefore: before.text,
-\t\t\tafter: operation.text
-\t\t}),
-\t\tsplice: {
-\t\t\tseq: operation.eventSeq,
-\t\t\tblockIndex: operation.blockIndex,
-\t\t\ttext: operation.text
-\t\t},
-\t\tqueuedUsers: []
-\t};
-}
-/** Copy one assistant message event with a single content block's text replaced.
-* Tool-call blocks and the event envelope survive; the embedded provider stream no
-* longer describes the edited content, so it is dropped. */
-function splicedAssistantEvent(event, blockIndex, text) {
-\tconst data = structuredClone(event.data);
-\tdata.message.content[blockIndex] = {
-\t\t...data.message.content[blockIndex],
-\t\ttext
-\t};
-\tdata.stream = [];
-\treturn {
-\t\t...event,
-\t\tdata
-\t};
-}
-function agentOptions(events, fallback) {'''),
+    # A compression hand-off runs while the source turn is still live, and this
+    # route never writes to the source: it only reads its log. Demanding the source
+    # agent's maintenance phase would require true idle, which a pre-step hand-off
+    # can never satisfy.
+    ('\t\treturn await agent.runMaintenance(async () => operation(agent));',
+     '''\t\treturn await operation(agent);'''),
+    # Apply the splice to the copied log before the version record is appended.
     ('''\tconst events = inheritedSeed(source, plan.boundary);
 \tconst inheritedLength = events.length;
-\tappendLogSeedEvent(events, "message-edit/version", plan.version);''',
+\tappendLogSeedEvent(events, \"message-edit/version\", plan.version);''',
      '''\tconst events = inheritedSeed(source, plan.boundary);
 \tconst inheritedLength = events.length;
 \tif (plan.splice !== void 0) events[plan.splice.seq] = splicedAssistantEvent(events[plan.splice.seq], plan.splice.blockIndex, plan.splice.text);
-\tappendLogSeedEvent(events, "message-edit/version", plan.version);'''),
+\tappendLogSeedEvent(events, \"message-edit/version\", plan.version);'''),
     # The branch-mutation route reads the same live Session log. It must not read
     # the removed `.events` array either, or every branch creation answers
     # 400 "events is not iterable" and the compression hand-off falls back in place.
@@ -672,6 +704,7 @@ def patch(target: pathlib.Path) -> int:
         try:
             patched = patch_server_timeline(patched)
             patched = patch_manual_turn(patched)
+            patched = patch_splice_plan(patched)
         except ValueError as error:
             print(f"nothing to patch ({error}): {target}")
             return 1
