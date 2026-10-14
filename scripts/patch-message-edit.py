@@ -32,6 +32,55 @@ NEW_EVENT_MATCH = '''\t\t\t\t\t\tconst seat = row.closest("[data-chat-flow-kind]
 \t\t\t\t\t\t// A turn-local unique event is safe without comparing translated/Markdown DOM text.
 \t\t\t\t\t\tconst eventSeq = candidates.length === 1 ? candidates[0] : void 0;'''
 ACTION_REPLACEMENTS = ((OLD_ACTION_MATCH, NEW_ACTION_MATCH), (OLD_EVENT_MATCH, NEW_EVENT_MATCH))
+OLD_TIMELINE_FUNCTION = '''async function timeline(ctx, sessionId) {
+\tconst targetTrace = await ctx.sessionQuery.traceSession(sessionId);'''
+NEW_TIMELINE_FUNCTION = '''const TIMELINE_MESSAGE_LIMIT = 200;
+const TIMELINE_JSON_LIMIT = 128 * 1024;
+const timelineCache = /* @__PURE__ */ new Map();
+function timelineRevision(ctx, sessionId, trace) {
+\tconst events = ctx.sessions.get(sessionId)?.events;
+\tconst live = events === void 0 ? "persisted" : `${String(events.length)}:${String(events.at(-1)?.seq ?? 0)}`;
+\tconst lineage = [trace.target, ...trace.ancestors, ...trace.descendants.flatMap(function visit(node) {
+\t\treturn [node.session, ...node.descendants.flatMap(visit)];
+\t})].map((record) => `${record.header.id}:${String(record.header.seedLength ?? 0)}:${String(record.header.createdAt)}:${record.header.parentSession ?? ""}`).sort().join("|");
+\treturn `${live}|${lineage}`;
+}
+function boundedTimeline(value) {
+\tlet messages = value.messages.slice(-TIMELINE_MESSAGE_LIMIT);
+\tlet result = { ...value, messages };
+\twhile (messages.length > 0 && Buffer.byteLength(JSON.stringify(result), "utf8") > TIMELINE_JSON_LIMIT) {
+\t\tmessages = messages.slice(Math.max(1, Math.ceil(messages.length / 4)));
+\t\tresult = { ...value, messages };
+\t}
+\tif (Buffer.byteLength(JSON.stringify(result), "utf8") > TIMELINE_JSON_LIMIT) throw new Error("Timeline 版本元数据超过 128 KiB 限制。");
+\treturn result;
+}
+async function timeline(ctx, sessionId) {
+\tconst targetTrace = await ctx.sessionQuery.traceSession(sessionId);
+\tconst revision = timelineRevision(ctx, sessionId, targetTrace);
+\tconst cached = timelineCache.get(sessionId);
+\tif (cached?.revision === revision) return cached.value;'''
+OLD_TIMELINE_RETURN = '''\treturn {
+\t\tsessionId,
+\t\tmessages: editableMessages(turns),
+\t\tretryableTurns: retryableTurns(turns),
+\t\tversions,
+\t\tundoStack,
+\t\tredoSessionIds
+\t};
+}'''
+NEW_TIMELINE_RETURN = '''\tconst value = boundedTimeline({
+\t\tsessionId,
+\t\tmessages: editableMessages(turns),
+\t\tretryableTurns: retryableTurns(turns),
+\t\tversions,
+\t\tundoStack,
+\t\tredoSessionIds
+\t});
+\ttimelineCache.set(sessionId, { revision, value });
+\treturn value;
+}'''
+SERVER_BOUNDS = ((OLD_TIMELINE_FUNCTION, NEW_TIMELINE_FUNCTION), (OLD_TIMELINE_RETURN, NEW_TIMELINE_RETURN))
 SERVER_REPLACEMENTS = (
     ('if (persistence !== void 0) return (await persistence.inspect(sessionId)).events;',
      'if (typeof persistence?.inspect === "function") return (await persistence.inspect(sessionId)).events;'),
@@ -40,6 +89,63 @@ SERVER_REPLACEMENTS = (
     ('const lineage = flattenLineage(rootTrace.target, rootTrace.descendants);',
      'const lineage = flattenLineage(rootTrace.target, rootTrace.descendants);\n\t// A concurrently created branch may be absent from the separate root observation.\n\tif (!lineage.some(({ record }) => record.header.id === sessionId)) lineage.push({ record: targetTrace.target, depth: targetTrace.ancestors.length });'),
 )
+OLD_RESPONSE_VALUE = '''\t\tasync function responseValue(response) {
+\t\t\tconst value = await response.json();
+\t\t\tif (response.ok) return value;
+\t\t\tconst error = objectValue(value, "错误响应")["error"];
+\t\t\tthrow new Error(typeof error === "string" ? error : `请求失败：HTTP ${String(response.status)}`);
+\t\t}'''
+NEW_RESPONSE_VALUE = '''\t\tconst MESSAGE_EDIT_DEADLINE_MS = globalThis.__MESSAGE_EDIT_DEADLINE_MS ?? 5e3;
+\t\tasync function responseValue(response) {
+\t\t\tconst value = await response.json();
+\t\t\tif (response.ok) return value;
+\t\t\tconst error = objectValue(value, "错误响应")["error"];
+\t\t\tthrow new Error(typeof error === "string" ? error : `请求失败：HTTP ${String(response.status)}`);
+\t\t}
+\t\tasync function withDeadline(operation, abort, label) {
+\t\t\tlet timer;
+\t\t\ttry {
+\t\t\t\treturn await Promise.race([operation(), new Promise((_, reject) => {
+\t\t\t\t\ttimer = setTimeout(() => {
+\t\t\t\t\t\treject(new Error(`${label}超时，请重新载入。`));
+\t\t\t\t\t}, MESSAGE_EDIT_DEADLINE_MS);
+\t\t\t\t})]);
+\t\t\t} finally {
+\t\t\t\tclearTimeout(timer);
+\t\t\t}
+\t\t}'''
+OLD_LOAD = '''\t\t\t\t\tconst timeline = decodeTimeline(await responseValue(await fetch(`${MESSAGE_EDIT_PATH}?sessionId=${encodeURIComponent(this.sessionId)}`, {
+\t\t\t\t\t\tmethod: "GET",
+\t\t\t\t\t\theaders: { accept: "application/json" },
+\t\t\t\t\t\tcache: "no-store",
+\t\t\t\t\t\tsignal: abort.signal
+\t\t\t\t\t})));'''
+NEW_LOAD = '''\t\t\t\t\tconst timeline = decodeTimeline(await withDeadline(async () => responseValue(await fetch(`${MESSAGE_EDIT_PATH}?sessionId=${encodeURIComponent(this.sessionId)}`, {
+\t\t\t\t\t\tmethod: "GET",
+\t\t\t\t\t\theaders: { accept: "application/json" },
+\t\t\t\t\t\tcache: "no-store",
+\t\t\t\t\t\tsignal: abort.signal
+\t\t\t\t\t})), abort, "载入消息时间线"));'''
+OLD_NAVIGATION = '''\t\t\t\t\tlet settled = false;
+\t\t\t\t\tlet dispose = () => {};
+\t\t\t\t\tconst finish = (open) => {
+\t\t\t\t\t\tif (settled) return;
+\t\t\t\t\t\tsettled = true;
+\t\t\t\t\t\tdispose();'''
+NEW_NAVIGATION = '''\t\t\t\t\tlet settled = false;
+\t\t\t\t\tlet dispose = () => {};
+\t\t\t\t\tlet timer;
+\t\t\t\t\tconst finish = (open) => {
+\t\t\t\t\t\tif (settled) return;
+\t\t\t\t\t\tsettled = true;
+\t\t\t\t\t\tclearTimeout(timer);
+\t\t\t\t\t\tdispose();'''
+OLD_NAVIGATION_SUBSCRIBE = '''\t\t\t\t\tthis.navigationWaits.add(cancel);
+\t\t\t\t\tdispose = this.sessions.list.subscribe(() => {'''
+NEW_NAVIGATION_SUBSCRIBE = '''\t\t\t\t\tthis.navigationWaits.add(cancel);
+\t\t\t\t\ttimer = setTimeout(cancel, MESSAGE_EDIT_DEADLINE_MS);
+\t\t\t\t\tdispose = this.sessions.list.subscribe(() => {'''
+CLIENT_BOUNDS = ((OLD_RESPONSE_VALUE, NEW_RESPONSE_VALUE), (OLD_LOAD, NEW_LOAD), (OLD_NAVIGATION, NEW_NAVIGATION), (OLD_NAVIGATION_SUBSCRIBE, NEW_NAVIGATION_SUBSCRIBE))
 OLD_REVISION = '''\t\tfunction conversationRevision(snapshot) {
 \t\t\tconst turnEnds = [...snapshot.turnEnds.entries()].map(([turn, seq]) => `${String(turn)}:${String(seq)}`).join(",");
 \t\t\treturn [
@@ -122,7 +228,7 @@ def patch(target: pathlib.Path) -> int:
         print("install the plugin first: dsh plugin --profile web add dsh-message-edit")
         return 1
     source = target.read_text(encoding="utf8")
-    replacements = SERVER_REPLACEMENTS if target.name == 'index.mjs' else ((DRIFTED, FIXED), (OLD_REVISION, NEW_REVISION), (OLD_BINDING, NEW_BINDING)) + ACTION_REPLACEMENTS
+    replacements = SERVER_REPLACEMENTS + SERVER_BOUNDS if target.name == 'index.mjs' else ((DRIFTED, FIXED), (OLD_REVISION, NEW_REVISION), (OLD_BINDING, NEW_BINDING)) + ACTION_REPLACEMENTS + CLIENT_BOUNDS
     for before, after in replacements:
         if source.count(after) == 1:
             continue

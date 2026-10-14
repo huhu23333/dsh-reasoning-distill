@@ -34,6 +34,22 @@ dsh plugin --profile web add ./vendor/dsh-message-edit-0.2.3-patched2.tgz
 
 也可对任何兼容的已安装旧包重新应用：`python3 scripts/patch-message-edit.py`。重新打包：`python3 scripts/package-message-edit.py`（从原始 patched1 归档生成 patched2）；归档内包名仍为 `dsh-message-edit`，匹配 bundle id。之后刷新已有 DSH Web 页面；若 bundle 缓存仍旧，重新启动原 `dsh web` 服务再刷新。归档的 source map 仍指向上游原始源码，调试补丁位置请参见此文档及实际 `client.js`。
 
+## Timeline 有界等待与服务端上限
+
+现行安装件的 Timeline GET 原先把 `fetch()` 和 `response.json()` 直接串在 `status = "loading"` 后，没有 deadline；`openWhenListed()` 也只有列表订阅，没有 deadline。任一 promise 不 settle 时，Timeline 永久显示“正在载入”，而 Header 在 `status !== "ready"` 时向行内编辑器传空 messages，所以编辑按钮同源消失。
+
+patched3 为 GET（包含正文读取）和版本导航各加 5 秒 deadline。GET 超时进入现有 error 状态并显示“重新载入”，不向插槽抛错；导航超时只结束等待，不打开不存在的 session。服务端返回最近 200 条可编辑消息，并继续裁剪到 JSON 不超过 128 KiB；超限只保留最新消息。按 live log 的事件长度/末 seq 与 lineage header 指纹缓存投影，避免真信号未变化时重复读取全部日志。
+
+重复证明：
+
+```sh
+node scripts/repro-message-edit-client.cjs ~/.dsh/profiles/web/node_modules/dsh-message-edit/client.js.orig-20261014T130501Z --deadline-red
+node scripts/repro-message-edit-client.cjs ~/.dsh/profiles/web/node_modules/dsh-message-edit/client.js
+node scripts/repro-message-edit-server.mjs ~/.dsh/profiles/web/node_modules/dsh-message-edit/index.mjs
+```
+
+重生成归档使用 `python3 scripts/package-message-edit.py`，产物为 `vendor/dsh-message-edit-0.2.3-patched3.tgz`，包内名称仍是 `dsh-message-edit`。
+
 ## 残余
 
-存在 eventSource 的现行 Session binding：Timeline/编辑按钮不再因初始化崩溃，且事件变更继续触发刷新；但真实浏览器中的视觉交互仍需人工验证。缺失 eventSource 的旧宿主虽可渲染，纯内容变化无法由静态回退推导，可能要手动重开以刷新；建议上游正式改为订阅 SessionBinding.eventSource 并发布匹配的源码映射与自动化 UI 回归测试。此补丁没有改变服务端编辑/分支能力。
+存在 eventSource 的现行 Session binding：Timeline/编辑按钮不再因初始化崩溃，且事件变更继续触发刷新。缺失 eventSource 的旧宿主虽可渲染，纯内容变化无法由静态回退推导，可能要手动重开以刷新。服务端模块在进程启动时加载；安装件已更新，但遵守本任务“不重启宿主”的边界，当前已运行进程要到下次正常启动后才加载 patched3 服务端缓存与上限。
