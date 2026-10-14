@@ -8,6 +8,7 @@ import { BUILTIN_HOLIDAYS, BUILTIN_PRICES, resolveRule, type Config } from './co
 import { priceAt, resolvePeakSource, whaleStatus } from './peak.ts'
 import type { SessionRecord } from './store.ts'
 import type { ActiveCompression, BlockingReason, CatalogModel, CatalogReport, CompressionEntry, PeakInfo, SessionReport } from './shared.ts'
+import { entryInForceHere } from './shared.ts'
 import { DEFAULT_PROMPT } from './prompt.ts'
 
 /**
@@ -110,7 +111,9 @@ export function buildReport(
     // Lifetime tokens survive a frozen epoch: the request count is kept when the
     // live money is frozen, so a retired rewrite still reports what it saved.
     lifetimeTokens += entry.savedTokensPerRequest * entry.liveRequests
-    const adopted = entry.failed !== true && entry.skipped !== true
+    // A compression handed off to a branch is in force there, not here: this
+    // conversation keeps the pre-compression history, so it earns no success and no stock.
+    const adopted = entryInForceHere(entry, sessionId)
     if (adopted) succeeded += 1
     // The stock counts only rewrites a request would carry right now, priced at
     // the hit rate of the model that would send them: those tokens sit in a

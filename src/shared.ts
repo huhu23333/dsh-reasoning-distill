@@ -84,6 +84,31 @@ export interface CompressionEntry {
   active: boolean
 }
 
+/** The part of a recorded compression that decides where its rewrite lives. */
+export interface CompressionPlacement {
+  failed?: true
+  skipped?: true
+  handoff?: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number }
+}
+
+/**
+ * Whether a recorded compression is the one *this* conversation itself carries.
+ *
+ * A successful hand-off moves the rewrite into the branch it created: the branch
+ * inherited the entry with its own id as the destination, so the rewrite is in force
+ * there — and not in the conversation it left behind, which keeps its pre-compression
+ * history and earns neither a success nor any stock. Failed or skipped attempts never
+ * substituted anything anywhere.
+ * @param entry - one recorded compression.
+ * @param sessionId - the conversation the question is asked for.
+ * @returns whether this conversation carries the rewrite.
+ */
+export function entryInForceHere(entry: CompressionPlacement, sessionId: string): boolean {
+  if (entry.failed === true || entry.skipped === true) return false
+  const handoff = entry.handoff
+  return handoff?.state !== 'created' || handoff.branchId === undefined || handoff.branchId === sessionId
+}
+
 /** Aggregate report for one session. */
 export interface SessionReport {
   sessionId: string

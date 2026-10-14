@@ -118,6 +118,19 @@ check('the blocking banner names the reason', modern.includes('activity.blocked'
 check('elapsed seconds are computed, not NaN', modern.includes('3s') && !modern.includes('NaN'))
 check('the compression session id is shown so it can be opened', modern.includes('session-compress-1'))
 check('a non-failed entry does not claim to be abandoned', !modern.includes('view.abandoned'))
+// A compression handed off to a branch is in force in that branch; the conversation
+// that keeps its pre-compression reasoning earns no success and carries no stock.
+const handedOffEntry = {
+  ...modernReport().entries[0]!,
+  handoff: { state: 'created' as const, branchId: 'branch-9', at: 30 },
+}
+check('a compression moved to a branch carries no stock in the conversation it left',
+  stockOfEntry(handedOffEntry, 'session-1') === 0)
+check('and it still carries its stock in the branch it moved to',
+  stockOfEntry(handedOffEntry, 'branch-9') > 0)
+const movedMarkup = tryRender(<ReportBody report={{ ...modernReport(), entries: [handedOffEntry] }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
+check('the panel reports the rewrite as moved, not as adopted here',
+  movedMarkup.includes('view.branchedAway') && movedMarkup.includes('view.branchedAwayNote'))
 // The reworked figures: success is shown apart from attempts, the per-request
 // figure is a stock, and the retired cache-break card is gone.
 check('success and attempts are shown apart',

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { availableSessionStorage, backendById, isStaleResponse, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
-import { HANDOFF_ROUTE, REPORT_ROUTE, type CompressionEntry, type SessionReport } from '../shared.ts'
+import { HANDOFF_ROUTE, REPORT_ROUTE, entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
 
@@ -84,31 +84,38 @@ export function reducedOfEntry(entry: CompressionEntry): number {
   return entry.liveSaved + entry.frozenSaved
 }
 
-export function stockOfEntry(entry: CompressionEntry, live?: readonly string[]): number {
+export function stockOfEntry(entry: CompressionEntry, sessionId: string, live?: readonly string[]): number {
+  // A rewrite handed off to a branch is in force there, not in the conversation it
+  // left: that one keeps the original reasoning, so no request of it carries this.
+  if (!entryInForceHere(entry, sessionId)) return 0
   // The engine's set is the authority: a rewrite that compaction removed from the
   // prompt is gone even when the record was never marked inactive (for example a
   // compaction that happened while this plugin was not running).
   if (live !== undefined && !live.includes(entry.id)) return 0
   if (entry.active !== true) return 0
-  if (entry.failed === true || entry.skipped === true) return 0
   if (entry.distilledTokens >= entry.originalTokens) return 0
   return entry.savedTokensPerRequest
 }
 
-function Entry({ entry, t, liveStockIds }: {
+function Entry({ entry, sessionId, t, liveStockIds }: {
   entry: CompressionEntry
+  sessionId: string
   t: Translate
   liveStockIds?: readonly string[]
 }) {
   const run = entry.distill
   const estimated = run.estimated === true
-  const notAdopted = entry.failed === true || entry.skipped === true
-  const verdict = entry.failed === true ? t('view.abandoned') : t('view.skipped')
+  // The rewrite moved into the branch this hand-off created: this conversation keeps
+  // its pre-compression history, so the entry is an attempt here, never a success.
+  const moved = entry.handoff?.state === 'created' && entry.handoff.branchId !== undefined && entry.handoff.branchId !== sessionId
+  const notAdopted = entry.failed === true || entry.skipped === true || moved
+  const verdict = entry.failed === true ? t('view.abandoned') : moved ? t('view.branchedAway') : t('view.skipped')
   return <details className={css.entry}><summary><span className={css.entryTitle}>{t('view.turn')} {entry.turn} · {t('view.step')} {entry.step}</span><span className={css.muted}>{entry.provider}/{entry.model}</span><span className={css.metric}>{count(entry.originalChars)} {t('view.chars')} · {t('view.estimate')} {count(entry.originalTokens)} {t('view.tokens')}</span>{notAdopted
     ? <span className={css.error}>{verdict} · {t('view.cost')} {money(run.cost)}{estimated ? ` (${t('view.estimated')})` : ''}</span>
     : <span className={`${css.metric} ${entryNet(entry) > 0 ? css.negative : css.positive}`}>{signedMoney(increasedOfEntry(entry))} − {money(reducedOfEntry(entry))} = {signedMoney(entryNet(entry))}</span>}</summary>
     <div className={css.entryBody}>
       {entry.skipped === true && <p role="status" className={css.note}>{t('view.skippedNote')}</p>}
+      {moved && <p role="status" className={css.note}>{t('view.branchedAwayNote')}</p>}
       {run.error && <p role="alert" className={css.error}>{t('view.abandoned')}: {run.error}</p>}
       <div className={css.facts}>
         <div><span>{t('view.original')}</span><strong>{count(entry.originalChars)} {t('view.chars')} / {count(entry.originalTokens)} {t('view.tokens')} ({t('view.estimated')})</strong></div>
@@ -123,7 +130,7 @@ function Entry({ entry, t, liveStockIds }: {
         {entry.handoff?.state === 'skipped' && <div><span>交接已跳过</span><strong>{entry.handoff.error ?? ''}</strong></div>}
         {entry.handoff?.state === 'failed' && <div><span>{t('view.branchFailed')}</span><strong className={css.error}>{entry.handoff.error ?? ''} · {t('view.branchKept')}</strong></div>}
         {entry.handoff?.state === 'created' && <div><span>{t('view.branchCreated')}</span><strong>{entry.handoff.branchId ?? ''}</strong></div>}
-        <div><span>{t('view.stock')}</span><strong>{t('view.estimate')} {count(stockOfEntry(entry, liveStockIds))} token</strong> · <strong>{t('view.estimate')} {signedCount(-entry.savedTokensPerRequest * entry.liveRequests)} {t('view.tokens')} {t('view.lifetime')}</strong></div>
+        <div><span>{t('view.stock')}</span><strong>{t('view.estimate')} {count(stockOfEntry(entry, sessionId, liveStockIds))} token</strong> · <strong>{t('view.estimate')} {signedCount(-entry.savedTokensPerRequest * entry.liveRequests)} {t('view.tokens')} {t('view.lifetime')}</strong></div>
       </div>
       <TextBlock label={t('view.request')} value={run.requestText} />
       <TextBlock label={t('view.result')} value={run.responseText} />
@@ -435,7 +442,7 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
           <span className={css.metric}>{Math.max(0, Math.round((now - item.startedAt) / 1000))}s</span>
         </div>)}
       </section>}
-      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}{report.entries.map(entry => <Entry key={entry.id} entry={entry} t={t} liveStockIds={report.stockIds} />)}</section>
+      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}{report.entries.map(entry => <Entry key={entry.id} entry={entry} sessionId={report.sessionId} t={t} liveStockIds={report.stockIds} />)}</section>
       <section className={css.section}><h3>{t('view.sessions')}</h3>{report.entries.map(entry => <SessionRow key={entry.id} entry={entry} t={t} openSession={openSession} />)}</section>
     </>}
   </div>

@@ -27,6 +27,7 @@ import { priceAt } from './peak.ts'
 import { DEFAULT_PROMPT, encloseDistillationData, looksLikeFinalReply } from './prompt.ts'
 import type { SessionRecord, SidecarStore, StoredEntry } from './store.ts'
 import type { ActiveCompression, BlockingReason, DistillRun } from './shared.ts'
+import { entryInForceHere } from './shared.ts'
 
 /**
  * One request's view of the surface: which node seqs exist, and where each lands
@@ -551,7 +552,9 @@ export class ReasoningDistillEngine {
    * @returns true when this entry still replaces a replayed message.
    */
   private survives(session: Session, entry: StoredEntry, surface?: Surface): boolean {
-    if (entry.failed === true || entry.skipped === true || entry.distilledText.length === 0) return false
+    // A rewrite handed off to a branch belongs to that branch: replaying this
+    // conversation must show its own, pre-compression reasoning.
+    if (!entryInForceHere(entry, String(session.id)) || entry.distilledText.length === 0) return false
     if (entry.inactive === true) return false
     const nodes = surface?.nodes ?? new Set<number>(session.surface.nodes)
     if (!nodes.has(entry.targetSeq)) return false

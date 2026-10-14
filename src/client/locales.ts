@@ -72,7 +72,7 @@ export const zh = {
   'view.tokens': '估算 token', 'view.chars': '字符', 'view.session': '会话 ID',
   'view.open': '打开会话', 'view.copy': '复制会话 ID', 'view.copied': '已复制',
   'view.noSession': '没有会话 ID', 'view.failedRun': '压缩失败',
-  'view.abandoned': '已放弃', 'view.skipped': '未采用', 'view.skippedNote': '蒸馏跑完了（开销已计入），但节省低于该模型的最低节省阈值，因此没有替换——原始思考保持不变。', 'view.estimated': '估算', 'view.sessionMissing': '未能创建审计会话（替换仍已生效）',
+  'view.abandoned': '已放弃', 'view.skipped': '未采用', 'view.branchedAway': '已转分支（本会话未生效）', 'view.branchedAwayNote': '改写只在新分支中生效：本会话保持压缩前的原文，因此这里不计成功、也不产生节省（这次压缩的尝试与开销仍然计入）。', 'view.skippedNote': '蒸馏跑完了（开销已计入），但节省低于该模型的最低节省阈值，因此没有替换——原始思考保持不变。', 'view.estimated': '估算', 'view.sessionMissing': '未能创建审计会话（替换仍已生效）',
   'view.peak': '峰时', 'view.off': '谷时', 'view.estimate': '约',
   'view.notAvailable': '不可用', 'view.historical': '（历史累计，含已被前文压缩淘汰的）',
 } as const
@@ -149,7 +149,7 @@ export const en: Record<keyof typeof zh, string> = {
   'view.tokens': 'estimated tokens', 'view.chars': 'characters', 'view.session': 'Session ID',
   'view.open': 'Open session', 'view.copy': 'Copy session ID', 'view.copied': 'Copied',
   'view.noSession': 'No session ID', 'view.failedRun': 'Distillation failed',
-  'view.abandoned': 'Abandoned', 'view.skipped': 'Not adopted', 'view.skippedNote': 'The distillation completed (its cost is counted) but saved less than this model’s minimum, so nothing was replaced and the original reasoning stands.', 'view.estimated': 'estimated', 'view.sessionMissing': 'no audit session could be created (the rewrite still applied)',
+  'view.abandoned': 'Abandoned', 'view.skipped': 'Not adopted', 'view.branchedAway': 'moved to the branch (not applied here)', 'view.branchedAwayNote': 'The rewrite is in force in the new branch only: this conversation keeps its pre-compression reasoning, so it earns neither a success nor any saving here (the attempt and its cost are still counted).', 'view.skippedNote': 'The distillation completed (its cost is counted) but saved less than this model’s minimum, so nothing was replaced and the original reasoning stands.', 'view.estimated': 'estimated', 'view.sessionMissing': 'no audit session could be created (the rewrite still applied)',
   'view.peak': 'Peak', 'view.off': 'Off-peak', 'view.estimate': 'approx.',
   'view.notAvailable': 'Unavailable', 'view.historical': '(lifetime, rewrites retired by earlier compaction included)',
 }

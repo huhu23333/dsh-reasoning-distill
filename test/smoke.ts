@@ -1122,6 +1122,15 @@ const branchRecord37a = await store37a.load('session-idle-branch')
 check('the branch inherits the ledger so its panel reports the compression it was cut from',
   branchRecord37a.entries.length === 1 && branchRecord37a.entries[0]?.id === (await store37a.load(s37a.id)).entries[0]?.id,
   JSON.stringify({ branchEntries: branchRecord37a.entries.length }))
+// The rewrite is in force in the branch, not in the conversation that keeps its own
+// pre-compression history: that one counts an attempt, the branch counts the success.
+const sourceReport37a = buildReport(s37a.id, await store37a.load(s37a.id), cfg10 as never)
+const branchReport37a = buildReport('session-idle-branch', branchRecord37a, cfg10 as never)
+check('the conversation that handed the rewrite off earns no success and no stock',
+  sourceReport37a.succeeded === 0 && sourceReport37a.stockTokens === 0,
+  JSON.stringify({ succeeded: sourceReport37a.succeeded, stock: sourceReport37a.stockTokens }))
+check('the branch counts the compression it inherited as its success',
+  branchReport37a.succeeded === 1, JSON.stringify({ succeeded: branchReport37a.succeeded }))
 await fire('agent/pre-step', { agent: agent37a }, async () => ({ kind: 'enter', messages: [] }))
 check('a created hand-off is never POSTed again', posts37a === 1, String(posts37a))
 await new Promise<void>(resolve => activeBackend37a.close(() => resolve()))
