@@ -29,19 +29,41 @@ const events = records.slice(1);
 assert.equal(header.type, 'session', 'the first record must be the session header');
 events.forEach((event, index) => assert.equal(event.seq, index, 'seq must equal the log offset'));
 
-const live = {
-  header: { createdAt: header.createdAt },
-  seq: events.length,
-  snapshotEvents: (from = 0, to = events.length) => events.slice(from, to),
+// A two-version family: this session is the branch child of a synthetic root.
+// Its own effect event sits at inheritedEventCount, exactly where versionSeed puts it.
+const ROOT_ID = 'session-root-fixture';
+const versionEvent = {
+  type: 'message-edit/version', seq: events.length, time: Date.now(),
+  data: {
+    schemaVersion: 2,
+    effect: { id: 'effect-fixture', operation: 'edit', cascade: 'truncate', targetTurn: 1, blockKind: 'reasoning', before: '原始思考', after: '蒸馏后的思考' },
+    inverse: { kind: 'restore-version', sessionId: ROOT_ID },
+  },
 };
+const live = {
+  header: { id: header.id, createdAt: header.createdAt, parentSession: ROOT_ID },
+  seq: events.length,
+  inheritedEventCount: events.length,
+  snapshotEvents: (from = 0, to = events.length) => (from === events.length && to === events.length + 1 ? [versionEvent] : events.slice(from, to)),
+};
+const rootRecord = { header: { id: ROOT_ID, createdAt: header.createdAt - 1, isSeeded: false }, live: false, persisted: true };
+const childRecord = { header: { id: header.id, createdAt: header.createdAt, parentSession: ROOT_ID, isSeeded: true }, live: true, persisted: true };
+const lineageTrace = id => (id === ROOT_ID
+  ? { complete: true, root: rootRecord, target: rootRecord, ancestors: [], descendants: [{ session: childRecord, descendants: [] }] }
+  : { complete: true, root: rootRecord, target: childRecord, ancestors: [rootRecord], descendants: [] });
+
 
 const plugin = await import(`${pathToFileURL(bundle).href}?t=${Date.now()}`);
 let handler;
 const ctx = {
   effect: register => register(),
   webServer: { register: contribution => { handler = contribution.handler; } },
-  sessions: { get: id => (id === header.id ? live : undefined) },
-  sessionQuery: { traceSession: async () => { throw new Error('the bounded route must not trace the session'); } },
+  sessions: {
+    get: id => (id === header.id ? live : id === ROOT_ID
+      ? { header: { id: ROOT_ID, createdAt: header.createdAt - 1 }, seq: 0, inheritedEventCount: 0, snapshotEvents: () => [] }
+      : undefined),
+  },
+  sessionQuery: { traceSession: async id => lineageTrace(id) },
 };
 plugin.apply(ctx);
 assert.equal(typeof handler, 'function', 'apply() must register the HTTP route');
@@ -70,11 +92,40 @@ try {
     assert(Array.isArray(loaded.body[field]), `${field} must be an array`);
   }
   assert(loaded.body.messages.length > 0, 'a session with closed turns must expose editable messages');
+  // The family tree is header-only: the branch must register as a version of the root.
+  assert.equal(loaded.body.versions.length, 2, 'a branch child must appear beside its root');
+  const [root, current] = loaded.body.versions;
+  assert.equal(root.sessionId, ROOT_ID);
+  assert.equal(root.depth, 0);
+  assert.equal(root.current, false);
+  assert.equal(root.parentSessionId, undefined);
+  assert.equal(current.sessionId, header.id);
+  assert.equal(current.depth, 1);
+  assert.equal(current.current, true);
+  assert.equal(current.parentSessionId, ROOT_ID);
+  assert.equal(current.onCurrentEffectPath, true);
+  assert.equal(current.operation, 'edit', 'a loaded version must carry its own effect');
+  assert.equal(current.targetTurn, 1);
+  assert.equal(current.before, '原始思考');
+  assert.deepEqual(loaded.body.undoStack, [ROOT_ID], 'undo must target the parent version');
+  assert.deepEqual(loaded.body.redoSessionIds, []);
   assert(loaded.bytes <= 128 * 1024, `the payload must respect the byte ceiling, got ${String(loaded.bytes)}`);
   console.log(
     `ROUTE ok   loaded   status=${String(loaded.status)} time=${loaded.ms.toFixed(1)}ms bytes=${String(loaded.bytes)} ` +
     `messages=${String(loaded.body.messages.length)} retryableTurns=${String(loaded.body.retryableTurns.length)} versions=${String(loaded.body.versions.length)}`,
   );
+
+  // The reverse direction: standing on the root, the branch is the redo target.
+  const rootView = await request(ROOT_ID);
+  assert.equal(rootView.status, 200, JSON.stringify(rootView.body));
+  assert.equal(rootView.body.versions.length, 2);
+  assert.equal(rootView.body.versions[0].current, true);
+  assert.equal(rootView.body.versions[1].current, false);
+  assert.equal(rootView.body.versions[1].depth, 1);
+  assert.equal(rootView.body.versions[1].operation, 'edit', 'a loaded child keeps its effect on the parent view');
+  assert.deepEqual(rootView.body.undoStack, []);
+  assert.deepEqual(rootView.body.redoSessionIds, [header.id]);
+  console.log(`ROUTE ok   root     status=${String(rootView.status)} versions=${String(rootView.body.versions.length)} redo=[${rootView.body.redoSessionIds.join(',')}]`);
 
   const unloaded = await request('session-does-not-exist');
   assert.equal(unloaded.status, 200, JSON.stringify(unloaded.body));

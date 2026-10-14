@@ -157,6 +157,77 @@ function liveTail(live) {
 function sessionLog(session) {
 \treturn typeof session?.snapshotEvents === "function" ? session.snapshotEvents() : session?.events ?? [];
 }
+/** One version's own effect event. Only a loaded session can be read in O(1);
+* a persisted branch holds a full copy of its parent's log, which this route must
+* never load merely to label a row. */
+function loadedVersionEvent(ctx, record) {
+\tconst live = ctx.sessions.get(record.header.id);
+\tif (live === void 0 || typeof live.snapshotEvents !== "function") return void 0;
+\tconst inherited = Number(live.inheritedEventCount ?? 0);
+\tif (!Number.isSafeInteger(inherited) || inherited <= 0) return void 0;
+\tconst event = live.snapshotEvents(inherited, inherited + 1)[0];
+\treturn event?.type === "message-edit/version" && event.data?.effect !== void 0 ? event : void 0;
+}
+/** Depth-first lineage from header records only: parentSessionId is the structural
+* inverse link every version child is created with. */
+function flattenLineage(root, descendants) {
+\tconst result = [{ record: root, depth: 0 }];
+\tconst visit = (nodes, depth) => {
+\t\tconst ordered = [...(nodes ?? [])].sort((left, right) => (left.session?.header?.createdAt ?? 0) - (right.session?.header?.createdAt ?? 0) || String(left.session?.header?.id ?? "").localeCompare(String(right.session?.header?.id ?? "")));
+\t\tfor (const node of ordered) {
+\t\t\tif (node?.session?.header?.id === void 0) continue;
+\t\t\tresult.push({ record: node.session, depth });
+\t\t\tvisit(node.descendants, depth + 1);
+\t\t}
+\t};
+\tvisit(descendants, 1);
+\treturn result;
+}
+/** Bounded family projection: two header-only traces plus at most one O(1) event
+* read per loaded member; an absent trace falls back to a single version. */
+async function lineageVersions(ctx, sessionId) {
+\ttry {
+\t\tconst target = await ctx.sessionQuery.traceSession(sessionId);
+\t\tif (target?.target?.header?.id === void 0) return void 0;
+\t\tconst rootId = target.complete === true ? target.root?.header?.id : target.ancestors?.at?.(-1)?.header?.id ?? sessionId;
+\t\tconst tree = rootId !== void 0 && rootId !== sessionId ? await ctx.sessionQuery.traceSession(rootId) : target;
+\t\tconst lineage = flattenLineage(tree?.target ?? target.target, tree?.descendants ?? []);
+\t\tconst onPath = new Set([sessionId]);
+\t\tfor (const ancestor of target.ancestors ?? []) if (ancestor?.header?.id !== void 0) onPath.add(ancestor.header.id);
+\t\tconst versions = lineage.map(({ record, depth }) => {
+\t\t\tconst id = record.header.id;
+\t\t\tconst event = loadedVersionEvent(ctx, record);
+\t\t\tconst effect = event?.data?.effect;
+\t\t\treturn {
+\t\t\t\tsessionId: id,
+\t\t\t\t...record.header.parentSession === void 0 ? {} : { parentSessionId: record.header.parentSession },
+\t\t\t\t...effect?.id === void 0 ? {} : { effectId: effect.id },
+\t\t\t\t...event?.data?.inverse?.sessionId === void 0 ? {} : { inverseSessionId: event.data.inverse.sessionId },
+\t\t\t\tcreatedAt: event?.time ?? record.header.createdAt ?? 0,
+\t\t\t\tdepth,
+\t\t\t\tcurrent: id === sessionId,
+\t\t\t\tonCurrentEffectPath: onPath.has(id),
+\t\t\t\t...effect?.operation === void 0 ? {} : { operation: effect.operation },
+\t\t\t\t...effect?.cascade === void 0 ? {} : { cascade: effect.cascade },
+\t\t\t\t...effect?.targetTurn === void 0 ? {} : { targetTurn: effect.targetTurn },
+\t\t\t\t...effect?.blockKind === void 0 ? {} : { blockKind: effect.blockKind },
+\t\t\t\t...effect?.before === void 0 ? {} : { before: effect.before },
+\t\t\t\t...effect?.after === void 0 ? {} : { after: effect.after }
+\t\t\t};
+\t\t});
+\t\tconst byId = new Map(versions.map((version) => [version.sessionId, version]));
+\t\tconst undoStack = [];
+\t\tlet cursor = byId.get(sessionId)?.inverseSessionId ?? byId.get(sessionId)?.parentSessionId;
+\t\twhile (cursor !== void 0 && byId.has(cursor) && !undoStack.includes(cursor)) {
+\t\t\tundoStack.push(cursor);
+\t\t\tcursor = byId.get(cursor)?.inverseSessionId ?? byId.get(cursor)?.parentSessionId;
+\t\t}
+\t\tconst redoSessionIds = versions.filter((version) => version.sessionId !== sessionId && version.parentSessionId === sessionId).map((version) => version.sessionId);
+\t\treturn { versions, undoStack, redoSessionIds };
+\t} catch {
+\t\treturn void 0;
+\t}
+}
 async function timeline(ctx, sessionId) {
 \tconst live = ctx.sessions.get(sessionId);
 \tif (live === void 0) return {
@@ -169,7 +240,11 @@ async function timeline(ctx, sessionId) {
 \t\tnotice: "为保护宿主内存，message-edit 仅处理当前已加载会话；请先打开会话后重试。"
 \t};
 \tconst events = liveTail(live);
-\tconst revision = timelineRevision(events);
+\t// The family signature joins the cache key: a new branch changes the version
+\t// tree without changing this session's own log.
+\tconst family = await lineageVersions(ctx, sessionId);
+\tconst familyRevision = family === void 0 ? "single" : family.versions.map((version) => `${version.sessionId}:${String(version.createdAt)}`).join(",");
+\tconst revision = `${timelineRevision(events)}|${familyRevision}`;
 \tconst cached = timelineCache.get(sessionId);
 \tif (cached?.revision === revision) return cached.value;
 \tconst turns = closedTurns(recentEventWindow(events));
@@ -177,9 +252,9 @@ async function timeline(ctx, sessionId) {
 \t\tsessionId,
 \t\tmessages: boundedMessages(turns),
 \t\tretryableTurns: boundedRetryableTurns(turns),
-\t\tversions: [{ sessionId, createdAt: live.header?.createdAt ?? 0, depth: 0, current: true, onCurrentEffectPath: true }],
-\t\tundoStack: [],
-\t\tredoSessionIds: []
+\t\tversions: family?.versions ?? [{ sessionId, createdAt: live.header?.createdAt ?? 0, depth: 0, current: true, onCurrentEffectPath: true }],
+\t\tundoStack: family?.undoStack ?? [],
+\t\tredoSessionIds: family?.redoSessionIds ?? []
 \t});
 \tcacheTimeline(sessionId, revision, value);
 \treturn value;

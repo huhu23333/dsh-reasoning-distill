@@ -97,4 +97,4 @@ for (const field of ['messages', 'retryableTurns', 'versions', 'undoStack', 'red
   assert.deepEqual(unloaded[field], [], `${field} must be an empty array when unloaded`);
 }
 assert.match(unloaded.notice, /当前已加载会话/);
-console.log('AFTER: bounded projection answers both host shapes with complete payloads and never calls traceSession');
+console.log('AFTER: bounded projection answers both host shapes with complete payloads and degrades without a lineage trace');
