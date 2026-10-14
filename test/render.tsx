@@ -11,10 +11,10 @@ import { readFileSync } from 'node:fs'
 import { effectHarness } from './effect-harness.ts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, signedCount, signedMoney, stockOfEntry } from '../src/client/View.tsx'
-import { CompressionActivity, freshHandoff } from '../src/client/ActivityChip.tsx'
+import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
@@ -106,7 +106,7 @@ function modernReport(): SessionReport {
     }],
     blockingSince: 6000,
     blockingReason: 'tool',
-    config: { enabled: true, defaultThresholdTokens: 4000, defaultDistiller: 'a/b', peak: { enabled: false, source: 'builtin', label: 'builtin', detail: 'd' } },
+    config: { enabled: true, defaultThresholdTokens: 4000, defaultDistiller: 'a/b', archiveSuperseded: true, peak: { enabled: false, source: 'builtin', label: 'builtin', detail: 'd' } },
   }
 }
 
@@ -265,6 +265,7 @@ function settings(overrides: Partial<SettingsValue> = {}): SettingsValue {
     peakSource: 'builtin',
     holidays: [],
     prices: {},
+    archiveSuperseded: true,
     prompt: '',
     maxInputChars: 120000,
     maxOutputChars: 0,
@@ -277,6 +278,9 @@ const edited = settings({ defaultRule: { ...settings().defaultRule, oneShotSubag
 check('a field this user edited is written',
   saveOperations(untouched, edited).some(op => op.path[0] === 'defaultRule' && op.op === 'set'))
 check('and nothing else is dragged along', saveOperations(untouched, edited).length === 1)
+check('the archive switch is written when this user flips it',
+  saveOperations(settings(), settings({ archiveSuperseded: false })).some(op => op.path[0] === 'archiveSuperseded' && op.op === 'set'))
+check('an unset archive switch defaults to on', normalizeSettings({} as never).archiveSuperseded === true)
 // The regression: another client flipped compressSubagents to true while this
 // panel sat with an untouched draft derived from the older value. The save must
 // ignore the latest value entirely, or it silently reverts them.
@@ -331,7 +335,7 @@ check('the activity chip is silent while idle',
 // has to be exact: follow only a branch that landed after this view opened, and
 // follow the newest one when out-of-order reports arrive.
 const handoffReport = (...handoffs: { state: 'created' | 'failed' | 'skipped'; branchId?: string; at: number }[]): SessionReport =>
-  ({ entries: handoffs.map(handoff => ({ handoff })) } as unknown as SessionReport)
+  ({ entries: handoffs.map(handoff => ({ handoff })), config: { archiveSuperseded: true } } as unknown as SessionReport)
 check('a hand-off created after this session opened is followed',
   freshHandoff(handoffReport({ state: 'created', branchId: 'branch-1', at: 20 }), 'session-1', { sessionId: 'session-1', at: 10 })?.branchId === 'branch-1')
 check('a hand-off that predates the current view is history, not a redirect',
@@ -345,6 +349,18 @@ check('a seat showing another session follows nothing',
   freshHandoff(handoffReport({ state: 'created', branchId: 'branch-1', at: 20 }), 'session-2', { sessionId: 'session-1', at: 10 }) === undefined)
 check('a failed hand-off is never followed',
   freshHandoff(handoffReport({ state: 'failed', at: 20 }), 'session-1', { sessionId: 'session-1', at: 10 }) === undefined)
+// The archive switch is plugin configuration, default on; the seat reads it from the
+// report it already polls, so the value in force when the branch appears decides.
+check('a followed branch archives the conversation it replaced by default',
+  shouldArchiveSuperseded(handoffReport({ state: 'created', branchId: 'branch-1', at: 20 })))
+check('and leaves it in the list when the switch is off',
+  !shouldArchiveSuperseded({
+    ...handoffReport({ state: 'created', branchId: 'branch-1', at: 20 }),
+    config: { archiveSuperseded: false },
+  } as unknown as SessionReport))
+check('a report that could not be read never archives anything', !shouldArchiveSuperseded(null))
+check('the backend-specific options belong to a branch backend only',
+  backendOptionsVisible('message-edit') && !backendOptionsVisible('msg-edit') && !backendOptionsVisible(''))
 
 check('no render path threw', !rendered.some(markup => markup.includes('__THREW__')))
 

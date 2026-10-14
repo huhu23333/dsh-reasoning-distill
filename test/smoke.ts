@@ -168,6 +168,8 @@ function makeConfig(overrides: Record<string, unknown> = {}): never {
     // exercise the no-backend refusal (scenario 36).
     rewriteBackend: { get: () => 'message-edit' },
     branchTimeoutMs: { get: () => 15_000 },
+    // The report carries this switch to the client seat that follows a branch.
+    archiveSuperseded: { get: () => true },
     holidays: { get: () => [] },
     prompt: { get: () => '' },
     maxInputChars: { get: () => 100000 },

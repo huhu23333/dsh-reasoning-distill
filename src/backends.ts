@@ -79,6 +79,19 @@ export function backendById(id: string): RewriteBackend | undefined {
 }
 
 /**
+ * Whether the backend-specific options block belongs on screen.
+ *
+ * Only a branch backend leaves a superseded conversation behind, and only a branch
+ * backend makes the host wait on it: those options are shown with the selected
+ * backend and disappear with it.
+ * @param id - stored backend id.
+ * @returns whether the block is shown.
+ */
+export function backendOptionsVisible(id: string): boolean {
+  return backendById(id)?.kind === 'branch'
+}
+
+/**
  * Whether the master switch may be on: it needs a backend to apply the result.
  * @param backend - the stored backend id.
  * @param enabled - the stored master switch.

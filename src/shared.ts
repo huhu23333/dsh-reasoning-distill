@@ -142,6 +142,12 @@ export interface SessionReport {
     defaultDistiller: string
     /** Selected assistant-rewrite backend id; empty when none is chosen. */
     rewriteBackend: string
+    /**
+     * Whether following a branch also archives the conversation it replaced. The
+     * client reads it from here: this seat already polls the report, and the value has
+     * to be current when the branch appears.
+     */
+    archiveSuperseded: boolean
     /** Whether the second price column is in use, and which source decides it. */
     peak: PeakInfo
   }

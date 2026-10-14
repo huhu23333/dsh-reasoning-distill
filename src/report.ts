@@ -150,6 +150,7 @@ export function buildReport(
       // backend id means the feature is not actually on.
       enabled: config.enabled.get() && backendById(config.rewriteBackend.get()) !== undefined,
       rewriteBackend: config.rewriteBackend.get(),
+      archiveSuperseded: config.archiveSuperseded.get(),
       defaultThresholdTokens: defaultRule.thresholdTokens,
       defaultDistiller: `${defaultRule.distiller.provider}/${defaultRule.distiller.model}`,
       peak: peakInfo(config),

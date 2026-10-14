@@ -116,6 +116,12 @@ export interface Config {
    * carrying on in the original conversation. `0` waits forever.
    */
   branchTimeoutMs: Volatile<number>
+  /**
+   * Whether a branch also archives the conversation it replaced. On by default: the
+   * branch continues the same work, so the superseded conversation is hidden from the
+   * list as soon as the branch is on screen — and stays recoverable from the archive.
+   */
+  archiveSuperseded: Volatile<boolean>
   /** Distillation instruction; empty selects the built-in prompt. */
   prompt: Volatile<string>
   /**
@@ -228,6 +234,7 @@ export const Config = z.object({
   })).default(DEFAULT_PRICE_ENTRIES).volatile(),
   rewriteBackend: z.string().default('').volatile(),
   branchTimeoutMs: z.number().default(0).volatile(),
+  archiveSuperseded: z.boolean().default(true).volatile(),
   prompt: z.string().default('').volatile(),
   maxInputChars: z.number().default(120000).volatile(),
   maxOutputChars: z.number().default(0).volatile(),

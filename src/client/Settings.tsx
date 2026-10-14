@@ -6,7 +6,7 @@ import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  REWRITE_BACKENDS, backendById, backendInstalled, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
+  REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
 import { FALLBACK_RULE, mergeRule, sparseOverride } from '../rule.ts'
@@ -325,10 +325,6 @@ export function ReasoningDistillSettings({ form, t }: Props) {
     </section>
     <section className={css.section}>
       <h3>{t('settings.backend')}</h3>
-      <Count label={t('settings.branchTimeout')} value={draft.branchTimeoutMs}
-        disabled={backendById(draft.rewriteBackend)?.kind !== 'branch'}
-        onChange={branchTimeoutMs => update(current => ({ ...current, branchTimeoutMs }))} />
-      <p className={css.note}>{t('settings.branchTimeoutHint')}</p>
       <BackendChooser value={draft.rewriteBackend} t={t} onSelect={id => update(current => ({
         ...current,
         rewriteBackend: id,
@@ -336,6 +332,18 @@ export function ReasoningDistillSettings({ form, t }: Props) {
         // master switch closes with it; picking one leaves the choice to the user.
         ...(id === '' ? { enabled: false } : {}),
       }))} />
+      {/* Options that only mean something for the selected backend, shown with it:
+          a branch backend is the only one that can leave a superseded conversation
+          behind, and the only one the host has to wait on. */}
+      {backendOptionsVisible(draft.rewriteBackend) && <div className={css.backendOptions}>
+        <h4>{t('settings.branchOptions')} · {draft.rewriteBackend}</h4>
+        <Toggle label={t('settings.archiveSuperseded')} checked={draft.archiveSuperseded}
+          onChange={archiveSuperseded => update(current => ({ ...current, archiveSuperseded }))} />
+        <p className={css.note}>{t('settings.archiveSupersededHint')}</p>
+        <Count label={t('settings.branchTimeout')} value={draft.branchTimeoutMs}
+          onChange={branchTimeoutMs => update(current => ({ ...current, branchTimeoutMs }))} />
+        <p className={css.note}>{t('settings.branchTimeoutHint')}</p>
+      </div>}
     </section>
     <section className={css.section}><h3>{t('settings.default')}</h3><RuleFields rule={draft.defaultRule} catalog={catalog} t={t} onChange={defaultRule => update(current => ({ ...current, defaultRule }))} /></section>
     <section className={css.section}><div className={css.sectionHeading}><h3>{t('settings.models')}</h3>{catalogError && <button type="button" className={css.iconButton} title={t('settings.retry')} aria-label={t('settings.retry')} onClick={() => setCatalogAttempt(n => n + 1)}><IconRefreshOutlineRegular /></button>}</div>

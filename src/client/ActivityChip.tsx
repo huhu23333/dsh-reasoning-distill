@@ -25,10 +25,18 @@ export interface Live {
 export const IDLE: Live = { count: 0, blockingSince: null, reason: null, startedAt: null }
 
 /**
- * Whether a branch also hides the conversation it replaced. Off for now: the
- * switch to the branch stays automatic, but the source remains in the list.
+ * Whether following a branch also archives the conversation it replaced.
+ *
+ * The switch is plugin configuration (@link Config.archiveSuperseded, on by default)
+ * and reaches this seat through the report's config block, so the value in force when
+ * the branch appears is the one that decides. Archiving only hides the conversation
+ * from the list: it stays recoverable from the archive.
+ * @param report - the report just read, or null when the read failed.
+ * @returns whether the superseded conversation should be archived.
  */
-export const ARCHIVE_SUPERSEDED = false
+export function shouldArchiveSuperseded(report: SessionReport | null): boolean {
+  return report?.config.archiveSuperseded === true
+}
 
 /** Props of the composer activity seat. */
 type Props = PropsRuntime<'conversation.input.activity'> & PropsLocale<typeof NS> & {
@@ -108,9 +116,10 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, on
 
   /**
    * Follow the newest hand-off that landed after this session was opened: show its
-   * branch, then hide the conversation the branch replaced. The engine defers the
-   * branch to idle, so this seat — not the report panel — has to be the follower:
-   * the panel is only mounted while the user looks at it.
+   * branch, then archive the conversation the branch replaced when the configuration
+   * asks for it (default on). The engine defers the branch to idle, so this seat —
+   * not the report panel — has to be the follower: the panel is only mounted while
+   * the user looks at it.
    */
   const follow = (report: SessionReport | null): void => {
     const fresh = freshHandoff(report, sessionId, followedAt.current)
@@ -119,7 +128,7 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, on
     if (followed.current.has(fresh.branchId)) return
     followed.current.add(fresh.branchId)
     openSession(fresh.branchId)
-    if (ARCHIVE_SUPERSEDED) archiveSession(sessionId)
+    if (shouldArchiveSuperseded(report)) archiveSession(sessionId)
   }
 
 

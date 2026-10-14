@@ -8,3 +8,5 @@
 .pickerItem strong{font-weight:600}
 .peakBox{margin:0 0 16px;padding:12px 14px;border:1px solid var(--dsw-border,#dde2e1);border-radius:10px;display:flex;flex-direction:column;gap:8px}
 .holidayBox{width:100%;box-sizing:border-box;min-height:120px;padding:8px 10px;border:1px solid var(--dsw-border,#dde2e1);border-radius:8px;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:transparent;color:inherit;resize:vertical}
+.backendOptions{margin:14px 0 0;padding:12px 14px;border:1px solid var(--dsw-border,#dde2e1);border-radius:10px;display:flex;flex-direction:column;gap:8px}
+.backendOptions h4{font-size:13px;font-weight:600;margin:0;color:var(--dsw-text-secondary,#667477)}
