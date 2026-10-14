@@ -24,6 +24,12 @@ export interface Live {
 
 export const IDLE: Live = { count: 0, blockingSince: null, reason: null, startedAt: null }
 
+/**
+ * Whether a branch also hides the conversation it replaced. Off for now: the
+ * switch to the branch stays automatic, but the source remains in the list.
+ */
+export const ARCHIVE_SUPERSEDED = false
+
 /** Props of the composer activity seat. */
 type Props = PropsRuntime<'conversation.input.activity'> & PropsLocale<typeof NS> & {
   /** Session whose compressions are shown. */
@@ -113,7 +119,7 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, on
     if (followed.current.has(fresh.branchId)) return
     followed.current.add(fresh.branchId)
     openSession(fresh.branchId)
-    archiveSession(sessionId)
+    if (ARCHIVE_SUPERSEDED) archiveSession(sessionId)
   }
 
 

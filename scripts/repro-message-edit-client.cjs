@@ -166,8 +166,8 @@ if (expectFailure) {
       assert.equal(applied, true, 'the edit must report success');
       await delay(30);
       assert.deepEqual(opened, ['new-session', 'branch-1'], 'the branch must become the visible conversation');
-      assert.deepEqual(archived, ['s1'], 'the replaced conversation must be archived');
-      console.log('AFTER: an edit switches to the branch and archives the conversation it replaced');
+      assert.deepEqual(archived, [], 'archiving is switched off: the source stays listed');
+      console.log('AFTER: an edit switches to the branch and leaves the replaced conversation listed');
     }
   })().catch(error => { console.error(error); process.exitCode = 1; });
 }

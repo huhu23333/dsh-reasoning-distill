@@ -563,7 +563,10 @@ NEW_NAV_COMMENT = '''\t\t\t/** Select one conversation through the UI navigation
 \t\t\t/** Session-list publication is the reactive dependency for navigation. */'''
 OLD_MUTATE_OPEN = '''\t\t\t\t\tawait this.openWhenListed(result.sessionId);
 \t\t\t\t\treturn true;'''
-NEW_MUTATE_OPEN = '''\t\t\t\t\tif (await this.openWhenListed(result.sessionId)) await this.archiveSuperseded(this.sessionId, result.sessionId);
+NEW_MUTATE_OPEN = '''\t\t\t\t\t// A branch replaces its source. Whether the source also leaves the conversation
+\t\t\t\t\t// list is a product choice: archiveSuperseded is false for now, so it stays.
+\t\t\t\t\tconst archiveSuperseded = false;
+\t\t\t\t\tif (await this.openWhenListed(result.sessionId) && archiveSuperseded) await this.archiveSuperseded(this.sessionId, result.sessionId);
 \t\t\t\t\treturn true;'''
 CLIENT_HANDOFF = ((OLD_OPEN_LISTED, NEW_OPEN_LISTED), (OLD_OPEN_FINISH, NEW_OPEN_FINISH), (OLD_NAV_COMMENT, NEW_NAV_COMMENT), (OLD_MUTATE_OPEN, NEW_MUTATE_OPEN))
 OLD_REVISION = '''\t\tfunction conversationRevision(snapshot) {
