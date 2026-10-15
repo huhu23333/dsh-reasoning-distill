@@ -38,7 +38,3 @@ export function encloseDistillationData(sections: string): string {
 export function looksLikeFinalReply(text: string): boolean {
   return /(?:^|\n)\s*(?:#{1,6}\s*)?(?:final answer|reply to (?:the )?user|最终答案|回复用户)\s*[:：]?\s*(?:\n|$)/im.test(text)
 }
-
-/** Placeholder shown in the Settings page when the configured prompt is empty. */
-export const PROMPT_IS_DEFAULT_NOTE
-  = 'Configured prompt is empty, so the built-in instruction is used. Clear the box again to restore it.'
