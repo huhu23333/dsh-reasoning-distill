@@ -4,6 +4,7 @@ import type {} from '@deepseek-ai/dsh-client-locale/client'
 import type {} from '@deepseek-ai/dsh-client-ui-settings/client'
 import type {} from '@deepseek-ai/dsh-client-ui-conversation/client'
 import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
+import { SETTINGS_NS } from '../shared.ts'
 import { ReasoningDistillSettings } from './Settings.tsx'
 import { CompressionActivity } from './ActivityChip.tsx'
 import { ReasoningDistillView } from './View.tsx'
@@ -45,8 +46,9 @@ export function apply(ctx: Context): void {
   ctx.effect(() => () => { configureInstallBridge(undefined) })
   const t = ctx.locale.bind(NS)
   // The host's client-side form type is not resolvable here, so the shape this
-  // panel consumes is stated explicitly.
-  const form = ctx.configForms.get('reasoning-distill') as {
+  // panel consumes is stated explicitly. The namespace is the same one the host
+  // writes through, so both halves edit one document.
+  const form = ctx.configForms.get(SETTINGS_NS) as {
     getSnapshot(): unknown
     subscribe(listener: () => void): () => void
     mutate(ops: never, revision?: number): unknown

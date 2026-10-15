@@ -21,7 +21,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-subagent'
 
-import { backendById, rewriteRequest } from './backends.ts'
+import { backendById, backendMissingFrom, rewriteRequest } from './backends.ts'
 import { resolveRule, type Config, type ModelRule } from './config.ts'
 import { priceAt } from './peak.ts'
 import { DEFAULT_PROMPT, encloseDistillationData, looksLikeFinalReply } from './prompt.ts'
@@ -187,6 +187,20 @@ export class ReasoningDistillEngine {
   private active = true
 
   /**
+   * Whether the stored backend has been checked against the profile's plugin list yet.
+   *
+   * The check is about the selection, not about any one turn, so it belongs to the first pre-step
+   * of the process and to no other — a later turn must not pay for it again.
+   */
+  private backendChecked = false
+
+  /**
+   * Commits `enabled: false` to the settings document. Absent when the host has no settings
+   * service, and then a missing backend can only be reported, never acted on.
+   */
+  private writeMasterOff: (() => Promise<void>) | undefined
+
+  /**
    * @param ctx - host context carrying the session store, LLM seam, and logger.
    * @param config - live plugin configuration.
    * @param store - sidecar store.
@@ -197,12 +211,15 @@ export class ReasoningDistillEngine {
    * @param store - sidecar store.
    * @param archive - archive one session on the host, when the host offers it. Injected so
    *   tests never touch a workspace registry.
+   * @param activePlugins - the profile's active plugin entries, or undefined when they cannot be
+   *   read. Read once, at the first pre-step, to recognize a backend whose plugin is gone.
    */
   constructor(
     private readonly ctx: Context,
     private readonly config: Config,
     private readonly store: SidecarStore,
     private readonly archive: ((sessionId: string) => Promise<void>) | undefined = undefined,
+    private readonly activePlugins: (() => Promise<readonly string[] | undefined>) | undefined = undefined,
   ) {}
 
   /** Attach every observer, hook, and existing-session wrap. */
@@ -236,6 +253,9 @@ export class ReasoningDistillEngine {
     })
     this.ctx.on('agent/pre-step', async (payload, next) => {
       try {
+        // Started here — it acts on the first pre-step of the process, whatever this turn decides —
+        // because the stored selection can name a backend whose plugin this process never loaded.
+        const backendCheck = this.checkBackendOnce()
         const continueOriginal = await (async (): Promise<boolean> => {
           // `attach` preloads the sidecar fire-and-forget, so on a resumed session
           // the first request could otherwise be assembled from raw reasoning while
@@ -274,6 +294,10 @@ export class ReasoningDistillEngine {
           // The read is awaited: the id can be replaced underneath it, and then this
           // obsolete pre-step must not settle, hand off or arm anything.
           if (signal?.aborted || this.replaced(session)) return true
+          // The backend check is joined here, so the decision this turn is about to make reads
+          // the switch it may have closed. It waits behind the synchronous prologue above, which
+          // an overlapping pre-step has to be able to join before this call yields.
+          await backendCheck
           // A stop must end the wait, not queue behind it: the host only looks at its
           // signal once this handler returns.
           void this.flushOwedNotes(session, signal)
@@ -319,6 +343,64 @@ export class ReasoningDistillEngine {
    */
   usePersistence(attach: (session: Session) => Promise<void>): void {
     this.attachWriter = attach
+  }
+
+  /**
+   * Register the write that closes the master switch on a backend that is gone.
+   *
+   * The host reads its configuration through volatile references, which have no public setter, so
+   * the switch is closed the way the panel closes it: through the settings service, one write that
+   * updates the running reference and the stored document together.
+   * @param write - commits `enabled: false`.
+   */
+  useSettingsWriter(write: () => Promise<void>): void {
+    this.writeMasterOff = write
+  }
+
+  /**
+   * Run the backend check once per process, at the first pre-step.
+   *
+   * Nothing else in this plugin may fail because of it: the check reports, and a host that cannot
+   * answer for its profile is not a reason to break the turn that happened to be first.
+   */
+  private async checkBackendOnce(): Promise<void> {
+    if (this.backendChecked) return
+    this.backendChecked = true
+    try {
+      await this.checkBackend()
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: backend check failed: %o', error)
+    }
+  }
+
+  /**
+   * Close the master switch when the selected backend's plugin is no longer installed.
+   *
+   * The backends answer on routes the host cannot reach — an in-place backend's route sits behind
+   * `/api/*`, where the shell demands the browser's own credentials — so the host recognizes a
+   * missing backend from the profile's active plugin list instead. A stored selection naming a
+   * plugin that list no longer carries cannot hand a rewrite over, and leaving the switch open
+   * would promise a write-back that can never happen; turning it off here is the same outcome the
+   * panel reaches with its probe. The stored value is only written when it is still on, so a
+   * profile whose switch is already off is reported and left alone.
+   */
+  private async checkBackend(): Promise<void> {
+    const backend = this.config.rewriteBackend.get() ?? ''
+    const plugin = backendById(backend)?.plugin
+    const active = this.activePlugins === undefined ? undefined : await this.activePlugins()
+    if (!backendMissingFrom(plugin, active)) return
+    this.ctx.logger.warn('reasoning-distill: rewrite backend %s needs plugin %s, which the profile no longer lists; the master switch cannot apply anything', backend, plugin)
+    if (this.config.enabled.get() !== true) return
+    if (this.writeMasterOff === undefined) {
+      this.ctx.logger.warn('reasoning-distill: the master switch could not be turned off: the host exposes no settings service')
+      return
+    }
+    try {
+      await this.writeMasterOff()
+      this.ctx.logger.warn('reasoning-distill: the master switch was turned off')
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: the master switch could not be turned off: %o', error)
+    }
   }
 
   /**

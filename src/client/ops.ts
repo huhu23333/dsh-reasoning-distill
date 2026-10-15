@@ -126,7 +126,7 @@ export function messageEditRequest(
 }
 
 export {
-  REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, masterSwitchState, nextBackend, rewriteRequest,
+  REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendOptionsVisible, masterSwitchState, nextBackend, rewriteRequest,
 } from '../backends.ts'
 export type { ProbeAnswer, RewriteBackend } from '../backends.ts'
 

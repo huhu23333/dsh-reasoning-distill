@@ -14,7 +14,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, claimRewriteAttempt, forcesMasterOff, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, claimRewriteAttempt, forcesMasterOff, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
 import { installPromptFor, type InstallJob } from '../src/install-shared.ts'
@@ -223,6 +223,21 @@ check('an identical answer is still absence, whatever the status', !backendInsta
   && !backendInstalled({ status: 405, contentType: null, body: ' ' }, absentShell))
 check('an empty or unknown id resolves to no backend',
   backendById('') === undefined && backendById('nope') === undefined)
+// The host cannot probe these routes (in-place ones need the browser's credentials), so the
+// startup check reads the profile's active plugin list instead. Only a list that was read *and*
+// lacks the plugin may close the switch down; every weaker answer leaves the user's setting alone.
+const active = ['dsh-base', '@moton16/dsh-msg-edit']
+check('every backend names the plugin that serves it, so none is checked by accident',
+  REWRITE_BACKENDS.every(backend => (backend.plugin ?? '') !== ''))
+check('a plugin the active list does not carry is reported missing',
+  backendMissingFrom('@moton16/dsh-msg-edit', ['dsh-base']) && backendMissingFrom('dsh-context-shaping', active)
+  && backendMissingFrom('dsh-message-edit', []))
+check('a plugin the active list carries is found, by name or by repository spec',
+  !backendMissingFrom('@moton16/dsh-msg-edit', active)
+  && !backendMissingFrom('dsh-context-shaping', ['zeranhub/dsh-context-shaping']))
+check('a list that could not be read closes nothing', !backendMissingFrom('dsh-message-edit', undefined))
+check('no plugin name — no backend, or one this host does not know — closes nothing',
+  !backendMissingFrom('', active) && !backendMissingFrom(undefined, active))
 // Master switch: locked off with no backend, the user's choice otherwise.
 check('no backend locks the master switch off', masterSwitchState('', true).locked && masterSwitchState('', true).checked === false)
 check('a selected backend unlocks it and keeps the user value',

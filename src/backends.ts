@@ -22,6 +22,16 @@ export interface RewriteBackend {
   probe: { method: 'POST'; path: string; body: Record<string, unknown> }
   /** Where the rewrite lands. */
   kind: 'branch' | 'in-place'
+  /**
+   * Package that owns this backend's route, when a plugin does.
+   *
+   * The panel proves a backend is installed by probing it, but the host cannot: an in-place
+   * backend answers behind `/api/*`, where the shell demands the browser's own credentials. The
+   * profile's active plugin list is the host-side signal instead, so a backend names the package
+   * whose presence in that list means its route exists. A route the host itself serves would
+   * leave this unset, and then nothing host-side is ever closed down on its account.
+   */
+  plugin?: string
 }
 
 /** Backends this plugin knows how to drive, in panel order. */
@@ -29,19 +39,58 @@ export const REWRITE_BACKENDS: readonly RewriteBackend[] = [
   {
     id: 'message-edit',
     kind: 'branch',
+    plugin: 'dsh-message-edit',
     probe: { method: 'POST', path: '/message-edit', body: { action: 'edit', sessionId: '', eventSeq: 0, blockIndex: 0, text: 'probe' } },
   },
   {
     id: 'msg-edit',
     kind: 'in-place',
+    plugin: '@moton16/dsh-msg-edit',
     probe: { method: 'POST', path: '/api/msg-edit/get-message', body: { sessionId: '', messageId: '' } },
   },
   {
     id: 'context-shaping',
     kind: 'in-place',
+    // The package is not published to npm, so the profile may carry it under the repository spec
+    // the install instructions name rather than under this name; {@link backendMissingFrom}
+    // accepts either.
+    plugin: 'dsh-context-shaping',
     probe: { method: 'POST', path: '/api/dsh-context-shaping/edit', body: { sessionId: '', messageId: '', part: 'thinking' } },
   },
 ]
+
+/**
+ * Whether one active plugin entry carries this package.
+ *
+ * An entry is normally the dependency key, which is the package name; an install from a repository
+ * puts the `owner/repo` spec there instead, so a declared package name also matches an entry's
+ * trailing path segment. Wildcarding in this direction can only keep a switch open that a probe
+ * would close anyway, never close one on a name this list happens to spell differently.
+ * @param entry - one active plugin entry.
+ * @param plugin - declared package name.
+ * @returns whether the entry names that package.
+ */
+function namesPlugin(entry: string, plugin: string): boolean {
+  return entry === plugin || entry.endsWith(`/${plugin}`)
+}
+
+/**
+ * Whether the selected backend's plugin is absent from the active plugin list.
+ *
+ * A backend's route exists only while its plugin is loaded, and the host cannot probe for it (see
+ * {@link RewriteBackend.plugin}). The profile's active plugin list is the signal the host owns, and
+ * the plugin manager updates it when a backend is installed or removed. Absence of evidence is not
+ * evidence of absence: a backend without a plugin name, and an unread list, both answer false, so a
+ * healthy profile is never closed down on a guess.
+ * @param plugin - the backend's package name.
+ * @param activePlugins - the profile's active plugin entries; undefined when it could not be read.
+ * @returns true only when the list was read and carries no entry for the package.
+ */
+export function backendMissingFrom(plugin: string | undefined, activePlugins: readonly string[] | undefined): boolean {
+  if (plugin === undefined || plugin === '') return false
+  if (activePlugins === undefined) return false
+  return !activePlugins.some(entry => namesPlugin(entry, plugin))
+}
 
 /** What one probe request saw; two of these are compared, so it is only the shape. */
 export interface ProbeAnswer {

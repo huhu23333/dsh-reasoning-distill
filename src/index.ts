@@ -19,6 +19,7 @@ import type { Config as PluginConfig } from './config.ts'
 import { ReasoningDistillEngine } from './engine.ts'
 import { InstallRunner, installerScript, scriptedSpawner } from './install.ts'
 import { registerRoutes } from './route.ts'
+import { SETTINGS_NS } from './shared.ts'
 import { SidecarStore } from './store.ts'
 
 export { Config } from './config.ts'
@@ -29,6 +30,35 @@ export const name = 'reasoning-distill'
 
 /** Services required before the engine can observe sessions. */
 export const inject = ['sessions', 'llm', 'sessionPersistence']
+
+/**
+ * The plugin entries the profile has active, or undefined when they cannot be read.
+ *
+ * Installing or removing a companion backend rewrites the profile manifest, and only its bundle
+ * list says whether that plugin is *loaded*: a package left in `dependencies` after being disabled
+ * is installed but serves no route.
+ *
+ * The launcher's own profile context is the only source consulted. `DSH_PROFILE` is exported into
+ * shell tools and not into this process, so an environment lookup would read whatever profile the
+ * surrounding shell happened to name rather than the one being served — and this check only ever
+ * closes a switch the user set. Everything unreadable — no profile, no manifest, no bundle list —
+ * is reported as unknown rather than as absent.
+ * @param ctx - host context.
+ * @returns the active plugin entries, or undefined.
+ */
+async function activePlugins(ctx: Context): Promise<readonly string[] | undefined> {
+  const profile = (ctx as unknown as { get(key: string): unknown }).get('profileContext') as { dir?: unknown } | undefined
+  if (typeof profile?.dir !== 'string' || profile.dir === '') return undefined
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const manifest: unknown = JSON.parse(await readFile(`${profile.dir}/package.json`, 'utf8'))
+    const bundles = (manifest as { dsh?: { profile?: { bundles?: unknown } } })?.dsh?.profile?.bundles
+    if (!Array.isArray(bundles)) return undefined
+    return bundles.filter((entry): entry is string => typeof entry === 'string')
+  } catch {
+    return undefined
+  }
+}
 
 /**
  * Plugin body.
@@ -50,7 +80,7 @@ export function apply(ctx: Context, config: PluginConfig): void {
     if (registry === undefined) throw new Error('the workspace registry is unavailable')
     await registry.archiveSession(sessionId)
   }
-  const engine = new ReasoningDistillEngine(ctx, config, store, archive)
+  const engine = new ReasoningDistillEngine(ctx, config, store, archive, () => activePlugins(ctx))
   engine.start()
   // One installer at a time, in this process: the quick-install page can be closed and
   // reopened without losing progress, and cancellation is a kill.
@@ -74,9 +104,18 @@ export function apply(ctx: Context, config: PluginConfig): void {
     // `effect` requires a disposable, so the unavailable host type is stated as
     // the shape it actually returns.
     const settings = (child as unknown as {
-      settings: { configure(options: { auto: boolean }, fiber: unknown): () => void }
+      settings: {
+        configure(options: { auto: boolean }, fiber: unknown): () => void
+        update?(ns: string, patch: object): Promise<void>
+      }
     }).settings
     child.effect(() => settings.configure({ auto: false }, ctx.fiber), 'reasoning-distill: settings page')
+    // The host half owns the document the panel edits, so a backend that is gone is closed the
+    // same way the panel closes it. A host without `update` keeps the report-only path.
+    const update = settings.update
+    if (update !== undefined) {
+      engine.useSettingsWriter(async () => { await update.call(settings, SETTINGS_NS, { enabled: false }) })
+    }
   })
   ctx.logger.info('reasoning-distill: watching reasoning over %d estimated tokens', resolveRule('', config).thresholdTokens)
 }

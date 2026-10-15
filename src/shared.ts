@@ -238,6 +238,15 @@ export interface CatalogReport {
   }
 }
 
+/**
+ * Name of this plugin's own settings document.
+ *
+ * The profile entry id, the settings namespace and the key the panel looks its form up by are the
+ * same string, and both halves have to spell it the same way: the host closes its own master switch
+ * through it, the panel edits the same document through it.
+ */
+export const SETTINGS_NS = 'reasoning-distill'
+
 /** Route paths owned by this plugin. */
 export const REPORT_ROUTE = '/api/reasoning-distill/report'
 /** Same-origin route that stops a session's turn once a rewrite has landed. */
