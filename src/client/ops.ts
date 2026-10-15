@@ -13,7 +13,7 @@
  */
 
 import type { ModelPrices, ModelRule } from '../config.ts'
-import { FALLBACK_RULE, mergeRule, withKindDefaults, withLimitDefaults, type RuleOverride, type RuleSource } from '../rule.ts'
+import { FALLBACK_RULE, mergeRule, withKindDefaults, type RuleOverride, type RuleSource } from '../rule.ts'
 import { backendById, backendInstalled, masterSwitchState, type ProbeAnswer, type RewriteBackend } from '../backends.ts'
 import { entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
 
@@ -54,6 +54,11 @@ export function oneShotDepthDisabled(rule: StoredRule): boolean {
  * shows what will actually run. Without it a stored `{ enabled: false }` renders
  * as the fallback defaults and saving anything writes the derived value back,
  * permanently changing behaviour the user never touched.
+ *
+ * Both retirements are folded as the **lowest** layer, below the built-in rule,
+ * the default rule, and one model's own entry: a layer that never mentions a
+ * field has to keep inheriting the ceiling stated above it, and the retired
+ * limits only answer when no stored layer does.
  * @param value - the stored document.
  * @param legacyOneShot - the retired global one-shot switch, when still present.
  * @returns a draft whose rule layers match the engine's resolution.
@@ -68,11 +73,19 @@ export function normalizeSettings(value: SettingsValue, legacyOneShot?: boolean)
   }
   const models: Record<string, StoredRule> = {}
   for (const [id, override] of Object.entries(value.models ?? {})) {
-    models[id] = withLimitDefaults(withKindDefaults(override, legacyOneShot), legacyLimits)
+    // Left sparse, exactly as stored: the retired limits are folded in UNDER this
+    // layer (see `defaultRule` below), never into it. Injecting them here would let
+    // a ceiling saved before the move shadow the one the default rule states, which
+    // is a rule the engine does not apply — and the next unrelated edit would then
+    // persist that shadowing value into the entry.
+    models[id] = withKindDefaults(override, legacyOneShot)
   }
   return {
     ...value,
-    defaultRule: mergeRule(FALLBACK_RULE, withLimitDefaults(withKindDefaults(value.defaultRule ?? {}, legacyOneShot), legacyLimits), undefined),
+    // The engine folds the retired limits as the LOWEST layer, below the built-in
+    // rule (`config.ts` `resolveRule`); folding the default rule the same way keeps
+    // this draft identical to what a model with no entry of its own resolves to.
+    defaultRule: mergeRule({ ...FALLBACK_RULE, ...legacyLimits }, withKindDefaults(value.defaultRule ?? {}, legacyOneShot), undefined),
     models,
     peakSource: value.peakSource ?? 'builtin',
     rewriteBackend: value.rewriteBackend ?? '',

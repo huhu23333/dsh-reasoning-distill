@@ -16,6 +16,8 @@ import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
 import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendUnusable, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
+import { mergeRule, sparseOverride } from '../src/rule.ts'
+import { resolveRule } from '../src/config.ts'
 import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
 import { installPromptFor, type InstallJob } from '../src/install-shared.ts'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
@@ -371,6 +373,96 @@ check('and nothing else is dragged along', saveOperations(untouched, edited).len
 check('the archive switch is written when this user flips it',
   saveOperations(settings(), settings({ archiveSuperseded: false })).some(op => op.path[0] === 'archiveSuperseded' && op.op === 'set'))
 check('an unset archive switch defaults to on', normalizeSettings({} as never).archiveSuperseded === true)
+
+console.log('client: the panel resolves the retired top-level limits exactly as the engine does')
+// `normalizeSettings` feeds both the display fold (`ruleOf` in `Settings.tsx`) and
+// the save diff, so the draft must carry the same three layers the engine folds in
+// `resolveRule`: the retired top-level limits as the LOWEST layer, then the default
+// rule, then one model's own entry. Injecting that retired value into every model
+// layer instead made the panel show — and, on the next edit, persist — a ceiling
+// the runtime never applies.
+const engineRule = (doc: SettingsValue, model: string) => resolveRule(model, {
+  defaultRule: { get: () => doc.defaultRule },
+  models: { get: () => doc.models },
+  ...(doc.maxInputChars === undefined ? {} : { maxInputChars: { get: () => doc.maxInputChars } }),
+  ...(doc.maxOutputChars === undefined ? {} : { maxOutputChars: { get: () => doc.maxOutputChars } }),
+})
+/** The exact expression `ruleOf` renders with (`Settings.tsx`). */
+const panelRule = (doc: SettingsValue, model: string) => {
+  const draft = normalizeSettings(doc)
+  return mergeRule(FALLBACK_RULE, draft.defaultRule, draft.models[model])
+}
+const limitsAgree = (doc: SettingsValue, model: string): boolean => {
+  const engine = engineRule(doc, model)
+  const panel = panelRule(doc, model)
+  return engine.maxInputChars === panel.maxInputChars && engine.maxOutputChars === panel.maxOutputChars
+}
+// No rule layer states a ceiling, so the retired top-level ones are all there is.
+const legacyCeilings = settings({ maxOutputChars: 1500, models: { 'deepseek-flash': { thresholdTokens: 9000 } } })
+const legacyPanel = panelRule(legacyCeilings, 'deepseek-flash')
+check('with no ceiling in any rule layer both sides keep the retired top-level one',
+  legacyPanel.maxInputChars === 120000 && legacyPanel.maxOutputChars === 1500
+  && limitsAgree(legacyCeilings, 'deepseek-flash'))
+// The regression: the default rule states a ceiling and the model entry exists but
+// states none. That model must inherit the default rule's ceiling, not the retired
+// top-level value sitting below it.
+const statedDefault = settings({
+  maxOutputChars: 120000,
+  defaultRule: { ...settings().defaultRule, maxInputChars: 1000, maxOutputChars: 2000 },
+  models: { 'deepseek-flash': { thresholdTokens: 9000 } },
+})
+const statedPanel = panelRule(statedDefault, 'deepseek-flash')
+check('a model that states no ceiling shows the default rule, not the retired top-level value',
+  statedPanel.maxInputChars === 1000 && statedPanel.maxOutputChars === 2000
+  && limitsAgree(statedDefault, 'deepseek-flash'))
+// A ceiling stated on the model itself still wins over both lower layers.
+const modelStated = settings({
+  maxOutputChars: 120000,
+  defaultRule: { ...settings().defaultRule, maxInputChars: 1000, maxOutputChars: 2000 },
+  models: { 'deepseek-flash': { maxInputChars: 500, maxOutputChars: 700 } },
+})
+const modelPanel = panelRule(modelStated, 'deepseek-flash')
+check('a model that states its own ceiling keeps it on both sides',
+  modelPanel.maxInputChars === 500 && modelPanel.maxOutputChars === 700
+  && limitsAgree(modelStated, 'deepseek-flash'))
+// The invariant on its own, over the whole input space of the layering rule: each
+// of the three layers either states a ceiling, states zero, or says nothing.
+/**
+ * One document with a chosen ceiling per layer, both limit fields set alike so a
+ * single document exercises both.
+ * @param legacy - the retired top-level value.
+ * @param byDefault - what the default rule states, when it states anything.
+ * @param byModel - what the model entry states, when it states anything.
+ * @returns the settings document.
+ */
+const limitDocument = (legacy: number, byDefault: number | undefined, byModel: number | undefined): SettingsValue => settings({
+  maxInputChars: legacy,
+  maxOutputChars: legacy,
+  defaultRule: {
+    ...settings().defaultRule,
+    ...(byDefault === undefined ? {} : { maxInputChars: byDefault, maxOutputChars: byDefault }),
+  },
+  models: {
+    'deepseek-flash': byModel === undefined
+      ? { thresholdTokens: 9000 }
+      : { maxInputChars: byModel, maxOutputChars: byModel },
+  },
+})
+const ceilingDocuments: SettingsValue[] = [legacyCeilings, statedDefault, modelStated, settings(),
+  ...[120000, 0].flatMap(legacy =>
+    [undefined, 0, 1000].flatMap(byDefault =>
+      [undefined, 0, 500].map(byModel => limitDocument(legacy, byDefault, byModel))))]
+check('the panel and the engine agree on the ceilings of every document and model',
+  ceilingDocuments.every(doc => ['deepseek-flash', 'another-model'].every(model => limitsAgree(doc, model))))
+// The other half of the same defect: the display fold is also what the save diff
+// treats as inherited, so a retired ceiling must not become an explicit model entry
+// just because the user edited an unrelated field.
+const inheritedForModel = mergeRule(FALLBACK_RULE, normalizeSettings(statedDefault).defaultRule, undefined)
+const afterUnrelatedEdit = sparseOverride(inheritedForModel, { ...statedPanel, thresholdTokens: 1234 })
+check('editing another field of a model entry does not freeze the retired ceiling into it',
+  afterUnrelatedEdit.thresholdTokens === 1234
+  && afterUnrelatedEdit.maxInputChars === undefined && afterUnrelatedEdit.maxOutputChars === undefined)
+
 // The regression: another client flipped compressSubagents to true while this
 // panel sat with an untouched draft derived from the older value. The save must
 // ignore the latest value entirely, or it silently reverts them.
