@@ -582,7 +582,13 @@ export class ReasoningDistillEngine {
     if (withDistilledReasoning(message, entry.distilledText) === undefined) return false
     // The reasoning must still be the text this distillation came from: an edit in
     // place (same id, same seq) must not be silently overwritten by stale output.
-    if (entry.originalHash !== undefined && hashText(reasoningTextOf(message)) !== entry.originalHash) return false
+    // The distilled text itself also qualifies: a branch inherits a log whose block was
+    // already spliced to it, so the rewrite is in force there with nothing left to
+    // replace — and it is the text the request carries.
+    const currentReasoning = reasoningTextOf(message)
+    if (entry.originalHash !== undefined
+      && hashText(currentReasoning) !== entry.originalHash
+      && currentReasoning !== entry.distilledText) return false
     return true
   }
 
@@ -622,7 +628,12 @@ export class ReasoningDistillEngine {
       // The message actually being replaced decides: an earlier wrapper may have
       // edited the reasoning in its returned list while the durable event stayed
       // the same, and that edit must not be overwritten by stale distillation.
-      if (entry.originalHash !== undefined && hashText(reasoningTextOf(source)) !== entry.originalHash) continue
+      // Same rule as survives(): the original reasoning, or the distilled text a branch
+      // inherited in its place, both mean this rewrite is the one in force.
+      const currentReasoning = reasoningTextOf(source)
+      if (entry.originalHash !== undefined
+        && hashText(currentReasoning) !== entry.originalHash
+        && currentReasoning !== entry.distilledText) continue
       const replaced = withDistilledReasoning(source, entry.distilledText)
       if (replaced === undefined) continue
       out ??= [...messages]
@@ -660,6 +671,28 @@ export class ReasoningDistillEngine {
       saved += entry.savedTokensPerRequest * (priceAt(entry.model, prices, now, this.config).bucket.hit / 1_000_000)
     }
     return { tokens, saved, ids: [...applied.keys()] }
+  }
+
+  /**
+   * Whether this conversation still has background work of its own.
+   *
+   * The host's job registry owns every background task — bash jobs and subagent runs
+   * alike, keyed by their owning session — so one lookup answers both. A host without
+   * that service is never busy, and a read that fails must not stop compression.
+   * @param session - conversation being considered.
+   * @returns whether work is running under it.
+   */
+  private busyWithWork(session: Session): boolean {
+    if (!this.config.skipWhileBusy.get()) return false
+    const jobs = (this.ctx as unknown as { get(key: string): unknown }).get('jobs') as
+      { list?(caller?: unknown): readonly { status?: string }[] } | undefined
+    if (jobs?.list === undefined) return false
+    try {
+      return jobs.list(String(session.id)).some(job => job.status === 'running' || job.status === 'stopping')
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: could not read the job list for %s: %o', session.id, error)
+      return false
+    }
   }
 
   /** Do not POST from pre-step when an old host lacks the idle API. */
@@ -1172,6 +1205,15 @@ export class ReasoningDistillEngine {
           if (this.abandoned.has(key) || this.storageBroken.has(session.id)) {
             this.pending.delete(key)
             if (this.inFlight.get(key) === gate) this.inFlight.delete(key)
+            return
+          }
+          // A conversation whose own background work is still running is left alone when
+          // the configuration asks for it: a branch created now would have to leave that
+          // work behind, so this is treated as if the reasoning were under the threshold.
+          if (this.busyWithWork(session)) {
+            this.pending.delete(key)
+            if (this.inFlight.get(key) === gate) this.inFlight.delete(key)
+            this.ctx.logger.info('reasoning-distill: %s keeps its reasoning: background work is running', session.id)
             return
           }
           this.launch(session, event)

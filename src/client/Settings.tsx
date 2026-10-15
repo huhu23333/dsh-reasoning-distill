@@ -342,6 +342,9 @@ export function ReasoningDistillSettings({ form, t }: Props) {
         <Toggle label={t('settings.archiveSuperseded')} checked={draft.archiveSuperseded}
           onChange={archiveSuperseded => update(current => ({ ...current, archiveSuperseded }))} />
         <p className={css.note}>{t('settings.archiveSupersededHint')}</p>
+        <Toggle label={t('settings.skipWhileBusy')} checked={draft.skipWhileBusy}
+          onChange={skipWhileBusy => update(current => ({ ...current, skipWhileBusy }))} />
+        <p className={css.note}>{t('settings.skipWhileBusyHint')}</p>
         <Count label={t('settings.branchTimeout')} value={draft.branchTimeoutMs}
           onChange={branchTimeoutMs => update(current => ({ ...current, branchTimeoutMs }))} />
         <p className={css.note}>{t('settings.branchTimeoutHint')}</p>

@@ -134,7 +134,7 @@ const ctx = {
   },
   llm: fakeLlm,
   // Mirror Cordis's optional service lookup without requiring an injection.
-  get(name: string): unknown { return name === 'webServer' || name === 'agents' ? Reflect.get(this, name) : undefined },
+  get(name: string): unknown { return name === 'webServer' || name === 'agents' || name === 'jobs' ? Reflect.get(this, name) : undefined },
   on: (name: string, fn: Function) => {
     const list = handlers.get(name) ?? []
     list.push(fn)
@@ -189,6 +189,8 @@ function makeConfig(overrides: Record<string, unknown> = {}): never {
     branchTimeoutMs: { get: () => 15_000 },
     // The report carries this switch to the client seat that follows a branch.
     archiveSuperseded: { get: () => true },
+    // A branch cannot take the conversation's background work with it.
+    skipWhileBusy: { get: () => true },
     holidays: { get: () => [] },
     prompt: { get: () => '' },
     maxInputChars: { get: () => 100000 },
@@ -1581,7 +1583,42 @@ await settleFor(async () => (await store59.load(s59.id)).entries[0]!.liveRequest
 check('sent rewritten reasoning stays credited after an unrelated derivation', JSON.stringify(sent59).includes('Distilled:')
   && (await store59.load(s59.id)).entries[0]!.liveRequests === 1,
   JSON.stringify({ sent: sent59, entry: (await store59.load(s59.id)).entries[0] }))
+// A branch inherits a log whose compressed block already holds the distilled text (the
+// hand-off splices it in). That rewrite is in force there — it is what the request carries
+// — so it must count, not be skipped because its original text is gone. This is why every
+// compression except the newest used to read as 0 tokens of stock.
+const targetEvent59 = s59.log.find(event => event.seq === entry59.targetSeq)!
+const targetContent59 = (targetEvent59.data as { message: { content: Array<{ type: string; text?: string }> } }).message.content
+const targetBlock59 = targetContent59.find(block => block.type === 'reasoning')!
+targetBlock59.text = entry59.distilledText
+const stock59 = engine59.stock(s59.id)
+check('a rewrite whose block already holds the distilled text still counts as in force',
+  stock59?.ids.includes(entry59.id) === true,
+  JSON.stringify({ ids: stock59?.ids, seq: entry59.targetSeq }))
 
+
+console.log('scenario 64: running background work pauses compression when configured')
+handlers.clear()
+const store64 = new SidecarStore()
+const engine64 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store64)
+engine64.start()
+const s64 = new FakeSession('session-busy-64')
+sessions.set(s64.id, s64)
+await fire('session/created', s64)
+// The host's job registry owns background tasks and subagent runs alike; one running job
+// must keep this conversation's compression from triggering at all.
+const jobsFace64 = ctx as unknown as { jobs?: unknown }
+jobsFace64.jobs = { list: () => [{ status: 'running' }] }
+await runStep40(engine64, s64, '64a')
+await new Promise<void>(resolve => setTimeout(resolve, 40))
+check('a running background job keeps the compression from triggering',
+  (await store64.load(s64.id)).entries.length === 0,
+  JSON.stringify((await store64.load(s64.id)).entries.map(entry => entry.id)))
+jobsFace64.jobs = { list: () => [{ status: 'settled' }] }
+await runStep40(engine64, s64, '64b')
+await settleFor(async () => (await store64.load(s64.id)).entries.length === 1)
+check('and it triggers again once that work settles', (await store64.load(s64.id)).entries.length === 1)
+delete jobsFace64.jobs
 console.log('scenario 59b: sparse rules inherit the finite built-in read backstop')
 handlers.clear()
 // An explicit rule timeout: the shipping default is 0 (no deadline), so this scenario

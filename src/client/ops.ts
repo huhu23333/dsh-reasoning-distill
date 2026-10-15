@@ -78,6 +78,8 @@ export function normalizeSettings(value: SettingsValue, legacyOneShot?: boolean)
     // On by default: the branch continues the same work, so the conversation it
     // replaced belongs in the archive unless the user says otherwise.
     archiveSuperseded: value.archiveSuperseded ?? true,
+    // On by default too: a branch cannot take background work with it.
+    skipWhileBusy: value.skipWhileBusy ?? true,
     holidays: [...(value.holidays ?? [])],
     prices: structuredClone(value.prices ?? {}),
     prompt: value.prompt ?? '',
@@ -198,6 +200,8 @@ export type SettingsValue = {
   branchTimeoutMs: number
   /** Whether following a branch also archives the conversation it replaced. */
   archiveSuperseded: boolean
+  /** Whether a conversation with running background work is left uncompressed. */
+  skipWhileBusy: boolean
   prompt: string
   /** @deprecated Retired top-level limit; only a document saved before the move has it. */
   maxInputChars?: number
@@ -211,7 +215,7 @@ export type Operation = { op: 'set'; path: (string | number)[]; value: unknown }
 
 /** Scalar fields the panel writes as a whole. */
 const SCALAR_FIELDS = [
-  'enabled', 'defaultRule', 'prompt', 'peakSource', 'holidays', 'rewriteBackend', 'branchTimeoutMs', 'archiveSuperseded',
+  'enabled', 'defaultRule', 'prompt', 'peakSource', 'holidays', 'rewriteBackend', 'branchTimeoutMs', 'archiveSuperseded', 'skipWhileBusy',
 ] as const satisfies readonly (keyof SettingsValue)[]
 
 /** Fields keyed by model id, diffed per entry and per field. */

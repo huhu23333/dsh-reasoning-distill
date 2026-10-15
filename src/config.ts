@@ -122,6 +122,16 @@ export interface Config {
    * list as soon as the branch is on screen — and stays recoverable from the archive.
    */
   archiveSuperseded: Volatile<boolean>
+  /**
+   * Whether a conversation that still has background work of its own is left alone.
+   *
+   * A background job or a subagent run belongs to the conversation that started it, so a
+   * branch created mid-work would have to leave that work behind. On (the default), such a
+   * conversation is treated as if the reasoning were under the threshold: nothing is
+   * distilled and no branch is created. Off, compression runs and the replaced
+   * conversation waits to be archived until that work ends.
+   */
+  skipWhileBusy: Volatile<boolean>
   /** Distillation instruction; empty selects the built-in prompt. */
   prompt: Volatile<string>
   /**
@@ -243,6 +253,7 @@ export const Config = z.object({
   rewriteBackend: z.string().default('').volatile(),
   branchTimeoutMs: z.number().default(0).volatile(),
   archiveSuperseded: z.boolean().default(true).volatile(),
+  skipWhileBusy: z.boolean().default(true).volatile(),
   prompt: z.string().default('').volatile(),
   // Legacy top-level limit: a document narrowed before limits moved into each rule
   // still resolves through it, and its default is the same "no ceiling" the rule uses.
