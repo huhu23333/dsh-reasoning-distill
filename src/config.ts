@@ -177,8 +177,8 @@ export const DEFAULT_RULE: ModelRule = {
   minSavedTokens: 600,
   includeToolResults: true,
   includeFinalTurns: true,
-  timeoutMs: 60000,
-  maxInputChars: 120000,
+  timeoutMs: 0,
+  maxInputChars: 0,
   maxOutputChars: 0,
   distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
 }
@@ -236,7 +236,9 @@ export const Config = z.object({
   branchTimeoutMs: z.number().default(0).volatile(),
   archiveSuperseded: z.boolean().default(true).volatile(),
   prompt: z.string().default('').volatile(),
-  maxInputChars: z.number().default(120000).volatile(),
+  // Legacy top-level limit: a document narrowed before limits moved into each rule
+  // still resolves through it, and its default is the same "no ceiling" the rule uses.
+  maxInputChars: z.number().default(0).volatile(),
   maxOutputChars: z.number().default(0).volatile(),
 })
 

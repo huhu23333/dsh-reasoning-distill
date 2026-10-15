@@ -23,6 +23,18 @@ const { SidecarStore, dshHome, legacySidecarPath, sidecarPath } = await import('
 const { buildReport } = await import('../src/report.ts')
 const { registerRoutes } = await import('../src/route.ts')
 const { HANDOFF_ROUTE, REPORT_ROUTE } = await import('../src/shared.ts')
+const { DEFAULT_RULE } = await import('../src/config.ts')
+const { FALLBACK_RULE } = await import('../src/rule.ts')
+
+// The panel's fallback rule and the host's default rule must stay identical: a panel
+// that renders different defaults than the engine applies is how a setting silently
+// flips. Both ship "no timeout" and "no background-block ceiling" by default now.
+check('the panel fallback rule equals the host default rule',
+  JSON.stringify(FALLBACK_RULE) === JSON.stringify(DEFAULT_RULE),
+  JSON.stringify({ panel: FALLBACK_RULE, host: DEFAULT_RULE }))
+check('the shipping defaults impose neither a distillation timeout nor an input ceiling',
+  DEFAULT_RULE.timeoutMs === 0 && DEFAULT_RULE.maxInputChars === 0 && DEFAULT_RULE.maxOutputChars === 0,
+  JSON.stringify({ timeoutMs: DEFAULT_RULE.timeoutMs, maxInputChars: DEFAULT_RULE.maxInputChars }))
 
 /** Minimal in-memory session. */
 class FakeSession {
@@ -1513,7 +1525,9 @@ check('sent rewritten reasoning stays credited after an unrelated derivation', J
 
 console.log('scenario 59b: sparse rules inherit the finite built-in read backstop')
 handlers.clear()
-const cfg59b = makeConfig({ defaultRule: { get: () => ({}) }, models: { get: () => ({}) } })
+// An explicit rule timeout: the shipping default is 0 (no deadline), so this scenario
+// states the 60s it exercises instead of relying on a built-in it no longer has.
+const cfg59b = makeConfig({ defaultRule: { get: () => ({ timeoutMs: 60_000 }) }, models: { get: () => ({}) } })
 const store59b = new SidecarStore()
 let releaseRead59b: (() => void) | undefined
 const stalled59b = new Promise<void>(resolve => { releaseRead59b = resolve })
@@ -1532,7 +1546,7 @@ const raced59b = new AbortController()
 let continued59b = false
 const second59b = fire('agent/pre-step', { agent: { session: s59b }, signal: raced59b.signal }, async () => { continued59b = true; return { kind: 'enter' } })
 await new Promise<void>(resolve => setTimeout(resolve, 15))
-check('missing timeout inherits the 60s rule and expires after its 30s grace', continued59b)
+check('a 60s rule timeout expires a stalled read after its 30s grace', continued59b)
 stopped59b.abort()
 raced59b.abort()
 releaseRead59b?.()

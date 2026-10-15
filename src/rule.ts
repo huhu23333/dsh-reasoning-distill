@@ -117,8 +117,8 @@ export const FALLBACK_RULE: ModelRule = {
   enabled: true, continuableSubagents: true, continuableMaxDepth: 0,
   oneShotSubagents: false, oneShotMaxDepth: 0,
   thresholdTokens: 4000, minSavedTokens: 600,
-  includeToolResults: true, includeFinalTurns: true, timeoutMs: 60000,
-  maxInputChars: 120000, maxOutputChars: 0,
+  includeToolResults: true, includeFinalTurns: true, timeoutMs: 0,
+  maxInputChars: 0, maxOutputChars: 0,
   distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
 }
 

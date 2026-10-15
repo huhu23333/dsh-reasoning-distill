@@ -93,7 +93,7 @@
       minSavedTokens: 600          # 蒸馏后至少省这么多才值得替换
       includeToolResults: true     # 是否在工具调用之外再附上其结果（调用恒定附带）
       includeFinalTurns: true      # 最终回答那一轮也压缩
-      timeoutMs: 60000             # 该模型单次蒸馏的超时；0 = 不设置超时
+      timeoutMs: 0                 # 该模型单次蒸馏的超时；0 = 不设置超时（默认不设）
       continuableSubagents: true   # 对【可续接子代理】（如队友）启用
       continuableMaxDepth: 0       # 可续接子代理的最大生效深度（0 = 不限制）
       oneShotSubagents: false      # 对【一次性子代理】启用
@@ -104,7 +104,7 @@
     holidays: ['2026-01-01', ...]  # 全天谷价的法定节假日（北京时间日期）
     prices: {}                     # 逐模型价格条目：peak/off 两栏 + peakPricing 是否分栏
     prompt: ''                     # 空 = 内置提示词
-    maxInputChars: 120000
+    maxInputChars: 0               # 背景块（工具结果）长度上限；0 = 不截断（默认不截断）
     maxOutputChars: 0              # 0 = 不限制蒸馏结果长度
     rewriteBackend: message-edit    # 助手消息改写后端；空 = 未选（见「助手消息改写后端」）
     branchTimeoutMs: 0              # 分支型后端专用：宿主等待建分支的时限，0 = 永不超时
