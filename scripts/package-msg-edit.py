@@ -18,7 +18,14 @@ import tarfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 UPSTREAM = ROOT / 'vendor/dsh-msg-edit-0.1.0-upstream.tar.gz'
-TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched7.tgz'
+TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched8.tgz'
+
+# The next refusal was "assistant/message embeds its source stream and cannot carry
+# sourceEventSeqs": that event type must not cite source events at all, because it embeds the
+# stream it came from and its replacement range is already carried by surfaceOp. Upstream passes
+# sourceEventSeqs: [seq] alongside the replace op, so the append threw again. Its user/message
+# path (edit-message) may keep citing sources -- only the assistant copy is forbidden.
+SOURCE_SEQS = re.compile(r"(surfaceOp: \{ op: 'replace', startSeq: [^}]+ \}),\s*sourceEventSeqs: \[seq\],")
 
 # The host's replace-op validator (packages/core/session/src/surface.ts) accepts exactly
 # { op: 'replace', startSeq, endSeq } and rejects anything else with "invalid replace
@@ -103,7 +110,7 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
             metadata = json.loads(data)
             if metadata['name'] != '@moton16/dsh-msg-edit':
                 raise SystemExit(f"unexpected package name: {metadata['name']}")
-            metadata['version'] = '0.1.0-patched7'
+            metadata['version'] = '0.1.0-patched8'
             peers = metadata.get('peerDependencies', {})
             for key in list(peers):
                 peers[key] = PEER_FLOOR
@@ -134,6 +141,9 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
             text, replaced_ops = REPLACE_OP.subn(r"surfaceOp: { op: 'replace', startSeq: \1, endSeq: \2 }", text)
             if replaced_ops < 1 or "op: 'replace', start:" in text:
                 raise SystemExit('host bundle replace ops no longer match the expected shape')
+            text, dropped_sources = SOURCE_SEQS.subn(r'\1,', text)
+            if dropped_sources < 1 or 'sourceEventSeqs: [seq]' in text:
+                raise SystemExit('host bundle assistant replace op no longer cites sourceEventSeqs')
             data = text.replace(INJECT_FROM, INJECT_TO, 1).replace(AGENTS_FROM, AGENTS_TO, 1).encode('utf8')
             host_patch = 'agents shim + inject + event reads'
         info = tarfile.TarInfo(f'package/{relative}')
@@ -141,7 +151,8 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
         info.mode = member.mode or 0o644
         info.mtime = member.mtime
         target.addfile(info, io.BytesIO(data))
-print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched7)')
+print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched8)')
+print('assistant replace ops: dropped the forbidden sourceEventSeqs citation')
 print('replace ops: start/end -> startSeq/endSeq (the only shape the host validator accepts)')
 print('editor panel: floating overlay (position:fixed, z-index:4000, 64vh scroll)')
 print('host: session.events -> session.snapshotEvents()')
