@@ -14,7 +14,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendUnusable, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendUnusable, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { mergeRule, sparseOverride } from '../src/rule.ts'
 import { resolveRule } from '../src/config.ts'
@@ -161,18 +161,25 @@ check('provider usage is shown verbatim and fallback token figures identify esti
   && estimatedUsage.includes('7 / 2 / 13 token (view.estimated)')
   && modern.includes('22,036 view.chars / 5,509 view.tokens') && modern.includes('5,509 view.tokens (view.estimated)'))
 
-console.log('client: the branch bridge speaks dsh-message-edit\'s contract')
-const bridge = messageEditRequest('session-1', { targetSeq: 12, targetBlockIndex: 1 }, 'short reasoning')
+console.log('client: the branch request contract is the host rewriteRequest')
+// The bridge the client half of the rewrite used to build (`messageEditRequest`
+// with `action:'edit'` + `cascade:'truncate'`) contradicted what the host sends
+// (`rewriteRequest`: `action:'splice'`, no cascade — `edit` rebuilds the turn
+// from its start and drops tool calls and later steps). It had no production
+// caller, so it was deleted rather than kept as a second, divergent copy of the
+// contract; the request the host actually posts is pinned by the smoke test's
+// scenario 37 (`action === 'splice'`). The shared builder answers for both
+// halves here:
+const bridge = rewriteRequest('message-edit', 'session-1', { targetSeq: 12, targetBlockIndex: 1 }, 'short reasoning')
 check('the request matches the companion contract',
-  bridge?.['action'] === 'edit' && bridge['sessionId'] === 'session-1' && bridge['eventSeq'] === 12
-  && bridge['blockIndex'] === 1 && bridge['text'] === 'short reasoning' && bridge['cascade'] === 'truncate',
+  bridge?.body['action'] === 'splice' && bridge.body['sessionId'] === 'session-1' && bridge.body['eventSeq'] === 12
+  && bridge.body['blockIndex'] === 1 && bridge.body['text'] === 'short reasoning'
+  && bridge.body['cascade'] === undefined,
   JSON.stringify(bridge))
-check('a preserve cascade can be requested',
-  messageEditRequest('s', { targetSeq: 1, targetBlockIndex: 0 }, 'x', 'preserve')?.['cascade'] === 'preserve')
 check('an unknown block index cannot be bridged',
-  messageEditRequest('s', { targetSeq: 1, targetBlockIndex: -1 }, 'x') === undefined)
-check('empty text cannot be bridged', messageEditRequest('s', { targetSeq: 1, targetBlockIndex: 0 }, '') === undefined)
-check('a session without an id cannot be bridged', messageEditRequest('', { targetSeq: 1, targetBlockIndex: 0 }, 'x') === undefined)
+  rewriteRequest('message-edit', 's', { targetSeq: 1, targetBlockIndex: -1 }, 'x') === undefined)
+check('empty text cannot be bridged', rewriteRequest('message-edit', 's', { targetSeq: 1, targetBlockIndex: 0 }, '') === undefined)
+check('a session without an id cannot be bridged', rewriteRequest('message-edit', '', { targetSeq: 1, targetBlockIndex: 0 }, 'x') === undefined)
 
 console.log('client: the rewrite backend registry drives the panel')
 check('one backend is offered, plus the in-place slot still waiting for an implementation',

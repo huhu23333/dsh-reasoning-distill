@@ -106,7 +106,7 @@ function headerLineRefusal(wire) {
   const allowed = new Set([...required, 'cwd', 'parentSession', 'origin', 'agentPreset']);
   const stray = Object.keys(wire).filter(key => !allowed.has(key));
   if (stray.length > 0) {
-    return `SKIP writing: the physical header line carries ${stray.join(',')} the read path refuses; run repair-header-fields.mjs first`;
+    return `SKIP writing: the physical header line carries ${stray.join(',')} the read path refuses; run repair-header-fields.mjs first (add --line-only when this log also carries event-level defects)`;
   }
   const missing = required.filter(key => !(key in wire));
   if (missing.length > 0) return `SKIP writing: the physical header line lacks ${missing.join(',')}`;

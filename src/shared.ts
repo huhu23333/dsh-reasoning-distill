@@ -70,7 +70,17 @@ export interface CompressionEntry {
   /** Estimated tokens removed from every later request in this epoch. */
   savedTokensPerRequest: number
   distill: DistillRun
-  /** Tokens that fell out of the cache-hit prefix at the substitution point. */
+  /**
+   * Tokens that fell out of the cache-hit prefix at the substitution point.
+   *
+   * Pinned at 0 by design: the rewrite always lands before the message is ever
+   * replayed (the pre-step await), so the rewritten message and everything after
+   * it are new input on the next request either way — with or without this
+   * plugin they are billed as a miss. The two fields stay in the persisted
+   * record and the report wire format for compatibility with older sidecars and
+   * panels; removing them is a schema change, not a cleanup (README, the
+   * "缓存断裂" note).
+   */
   cacheBreakTokens: number
   /** Extra 元 that miss pricing added on the substitution request. */
   cacheBreakCost: number

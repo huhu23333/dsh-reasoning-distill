@@ -16,7 +16,16 @@
 // importable here -- is reported and left byte-identical, because a log the host still
 // refuses is exactly what this script must not report as repaired.
 //
-// Usage: node scripts/repair-header-fields.mjs [--apply] [--root <sessions dir>] [--host <session package>]
+// One exception, on request: a log that carries BOTH a stray header field and an
+// event-level defect is a deadlock. The event repair scripts refuse a first line the read
+// path refuses, and this script's whole-log self-check refuses the event-level defect, so
+// no script order could repair it. `--line-only` breaks the deadlock by writing the
+// stripped first line WITHOUT the whole-log verdict: the result is not claimed to be a
+// repaired log -- the event repair script must run next, and it writes only after its own
+// whole-log self-check passes. The default (without the flag) keeps the self-check
+// semantics unchanged.
+//
+// Usage: node scripts/repair-header-fields.mjs [--apply] [--line-only] [--root <sessions dir>] [--host <session package>]
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -25,6 +34,7 @@ import zlib from 'node:zlib';
 import { pathToFileURL } from 'node:url';
 
 const apply = process.argv.includes('--apply');
+const lineOnly = process.argv.includes('--line-only');
 const argOf = (flag, fallback) => {
   const at = process.argv.indexOf(flag);
   return at >= 0 && process.argv[at + 1] !== undefined ? process.argv[at + 1] : fallback;
@@ -155,8 +165,10 @@ for (const file of findLogs(root)) {
   }
   // The encode above proves the bytes round-trip and the keys are clean; this is the host's
   // own verdict on what they say. A refusal here is the whole point: the log has to be one
-  // the host reads, not merely one whose first line this script likes.
-  const verdict = refusal(check, candidate.slice(1));
+  // the host reads, not merely one whose first line this script likes. `--line-only` skips
+  // this verdict on request: the stripped line is written so the event repair script can
+  // run its own whole-log self-check afterwards, and nothing here claims the log is fixed.
+  const verdict = lineOnly ? undefined : refusal(check, candidate.slice(1));
   if (verdict !== undefined) {
     console.log(`  ${verdict}`);
     continue;
@@ -165,5 +177,6 @@ for (const file of findLogs(root)) {
   fs.copyFileSync(file, backup);
   fs.writeFileSync(file, encoded);
   repaired += 1;
+  if (lineOnly) console.log('  LINE-ONLY: wrote the stripped first line without a whole-log verdict; run the event repair script next (it writes only after its own self-check passes)');
 }
 console.log(`${apply ? 'REPAIRED' : 'CANDIDATES'} ${apply ? repaired : candidates}`);

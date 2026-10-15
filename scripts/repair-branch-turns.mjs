@@ -155,7 +155,7 @@ function headerLineRefusal(wire) {
   const allowed = new Set([...required, 'cwd', 'parentSession', 'origin', 'agentPreset']);
   const stray = Object.keys(wire).filter(key => !allowed.has(key));
   if (stray.length > 0) {
-    return `SKIP writing: the physical header line carries ${stray.join(',')} the read path refuses; run repair-header-fields.mjs first`;
+    return `SKIP writing: the physical header line carries ${stray.join(',')} the read path refuses; run repair-header-fields.mjs first (add --line-only when this log also carries event-level defects)`;
   }
   const missing = required.filter(key => !(key in wire));
   if (missing.length > 0) return `SKIP writing: the physical header line lacks ${missing.join(',')}`;
@@ -223,7 +223,10 @@ function refusal(raw, events) {
     version: host.SESSION_FORMAT_VERSION,
     id: host.SessionId(raw.id),
     createdAt: raw.createdAt,
-    isSeeded: false,
+    // The artifact the validator saw above was built from the stored value; the
+    // constructors must judge the same header. A hardcoded `false` here would
+    // hand the two readers different inputs whenever the stored value is true.
+    isSeeded: raw.isSeeded === true,
     ...(raw.parentSession === undefined ? {} : { parentSession: host.SessionId(raw.parentSession) }),
     ...(raw.cwd === undefined ? {} : { cwd: raw.cwd }),
   };

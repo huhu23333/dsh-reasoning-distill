@@ -27,6 +27,7 @@ const { InstallRunner } = await import('../src/install.ts')
 const { INSTALLABLE_BACKENDS, INSTALL_STEPS } = await import('../src/install-shared.ts')
 const { DEFAULT_RULE, resolveRule } = await import('../src/config.ts')
 const { FALLBACK_RULE } = await import('../src/rule.ts')
+import type { SessionRecord } from '../src/store.ts'
 
 // Declared before the first `check` call below: the counter is read by `check`
 // itself, and a failing assertion near the top of the file must report as a FAIL
@@ -1951,6 +1952,72 @@ check('starting the verified backend returns its running job',
 const cancelled63 = await installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'cancel' }) }))
 check('cancelling through the route reaches the runner',
   cancelled63?.status === 200 && routeRunner63.killed(), String(cancelled63?.status))
+
+console.log('scenario 65: a commit landing after the wait deadline rolls back instead of flipping the ledger')
+handlers.clear()
+/** A store whose first commit stalls between the mutation and the rename, so the wait deadline can expire inside the commit window (C1). */
+class StallingCommitStore extends SidecarStore {
+  stallMs = 0
+  private stalled = false
+  protected override async commitToDisk(target: string, record: SessionRecord): Promise<void> {
+    if (this.stallMs > 0 && !this.stalled) {
+      this.stalled = true
+      await new Promise(resolve => setTimeout(resolve, this.stallMs))
+    }
+    await super.commitToDisk(target, record)
+  }
+}
+const rule65 = {
+  enabled: true, thresholdTokens: 200, minSavedTokens: 5,
+  includeToolResults: true, includeFinalTurns: true, timeoutMs: 120,
+  distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
+}
+const cfg65 = makeConfig({ defaultRule: { get: () => rule65 } })
+const store65 = new StallingCommitStore()
+store65.stallMs = 400
+const engine65 = new ReasoningDistillEngine({ ...ctx, llm: fakeLlm } as never, cfg65 as never, store65)
+engine65.start()
+const s65 = new FakeSession('session-c1-commit-window')
+sessions.set(s65.id, s65)
+await fire('session/created', s65)
+s65.append('user/message', { id: 'u65', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const seq65 = s65.append('assistant/message', {
+  turn: 1, step: 1,
+  message: { id: 'a65', role: 'assistant', content: [{ type: 'reasoning', text: fatReasoning }, { type: 'text', text: 'done' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+}).seq
+s65.append('step/end', { turn: 1, step: 1 })
+await fire('session/event', s65, s65.eventAt(seq65))
+await fire('session/event', s65, s65.eventAt(s65.log.length - 1))
+const started65 = Date.now()
+await fire('agent/pre-step', { agent: { session: s65 } }, async () => undefined)
+const elapsed65 = Date.now() - started65
+check('the pre-step still releases the request at the deadline, not after the commit',
+  elapsed65 >= 100 && elapsed65 < 300, `${elapsed65}ms`)
+// The rollback publishes the failed entry to the cache before it rewrites the
+// file, so the ledger is consistent from the first read; wait for the disk to
+// catch up before asserting it.
+await settleFor(async () => {
+  const cached = (await store65.load(s65.id)).entries
+  if (cached.length !== 1 || cached[0]!.failed !== true) return false
+  try {
+    const onDisk = JSON.parse(readFileSync(sidecarPath(s65.id), 'utf8')) as { entries: Array<{ failed?: boolean }> }
+    return onDisk.entries.length === 1 && onDisk.entries[0]?.failed === true
+  } catch {
+    return false
+  }
+})
+const rec65 = (await store65.load(s65.id)).entries[0]!
+const disk65 = JSON.parse(readFileSync(sidecarPath(s65.id), 'utf8')) as { entries: Array<{ failed?: boolean; distilledText: string }> }
+check('the late commit is recorded as failed, never adopted',
+  rec65.failed === true && (rec65.distill.error ?? '').includes('abandoned'),
+  JSON.stringify({ failed: rec65.failed, error: rec65.distill.error }))
+check('the rollback is durable: the file agrees with the in-memory record',
+  disk65.entries.length === 1 && disk65.entries[0]?.failed === true, JSON.stringify(disk65.entries.map(entry => entry.failed)))
+check('and the ledger never flips: the deadline-released request and later ones replay raw reasoning',
+  (s65.deriveMessages() as Array<{ content: Array<{ type: string; text?: string }> }>)
+    .find(message => message.content.some(block => block.type === 'reasoning' && block.text === fatReasoning)) !== undefined,
+  'derivation no longer carries the raw reasoning')
 
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
