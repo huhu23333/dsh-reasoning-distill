@@ -1565,6 +1565,9 @@ const flakyStore54 = {
     if (failWrites54) throw new Error('disk full')
     return realStore54.update(id, mutate as never)
   },
+  // Only writes are meant to fail here, so eviction is delegated just like the reads: the
+  // engine calls `forget` as part of the store interface, not as an optional capability.
+  forget: (id: string) => { realStore54.forget(id) },
 } as never
 const engine54 = new ReasoningDistillEngine({ ...ctx, webServer: { port: port54 } } as never, cfg10 as never, flakyStore54)
 engine54.start()

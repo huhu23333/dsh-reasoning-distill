@@ -21,6 +21,14 @@
 // byte-identical, because a log whose numbers or references are wrong is exactly what this
 // script must not report as repaired.
 //
+// Both readers are handed a header the script rebuilds from the fields it knows, so the
+// *physical* first line never reaches them: a stray key there would pass the gate above and
+// this script would report a log the read path still refuses over its first line alone. The
+// line is impossible for this script to certify that way, so it is checked against the same
+// guard the read path applies to it (see `headerLineRefusal`), and a log whose line fails
+// that guard is refused here and left byte-identical: run `repair-header-fields.mjs` for it
+// first, then this one.
+//
 // Usage: node scripts/repair-plugin-events.mjs [--apply] [--root <sessions dir>] [--host <session package>]
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -140,20 +148,48 @@ function remapUncoveredReference(source, out, field, owner, reference) {
 }
 
 /**
+ * The physical first line's own admissibility to the read path.
+ *
+ * The readers in {@link refusal} are handed a header rebuilt from the fields this script knows,
+ * so the stored line is never judged by them; it is written back verbatim, so a stray key on it
+ * survives the write and the read path refuses the whole log over that line alone
+ * (`isHeaderLine` in session-persistence-jsonl/src/format.ts accepts exactly the required keys
+ * plus `cwd`/`parentSession`/`origin`/`agentPreset`). The key set is the same one the sibling
+ * `repair-header-fields.mjs` repairs against.
+ * @param wire - the stored `session` record, exactly as it will be written back.
+ * @returns `undefined` when the line is one the read path accepts, else why the write is refused.
+ */
+function headerLineRefusal(wire) {
+  const required = ['type', 'version', 'id', 'createdAt', 'isSeeded', 'delegationDepth'];
+  const allowed = new Set([...required, 'cwd', 'parentSession', 'origin', 'agentPreset']);
+  const stray = Object.keys(wire).filter(key => !allowed.has(key));
+  if (stray.length > 0) {
+    return `SKIP writing: the physical header line carries ${stray.join(',')} the read path refuses; run repair-header-fields.mjs first`;
+  }
+  const missing = required.filter(key => !(key in wire));
+  if (missing.length > 0) return `SKIP writing: the physical header line lacks ${missing.join(',')}`;
+  return undefined;
+}
+
+/**
  * The host's own verdict on the log a write would store.
  *
  * Both host-owned readers run on the candidate, the same ones the sibling repair scripts use:
  * `Session.fromRestore`/`create` re-walk every stored event the way a reload does, and the
  * released-v4 `restoreReleasedV4Artifact`/`assertReleasedV4Relationships` pair add the
  * relationship validation (a developer message's `headerSeq`, a replacement range, a delivery
- * `throughSeq`) that the numbering alone cannot express. A validator that is not importable
- * here certifies nothing, and a candidate either reader refuses is exactly the log this
- * script must not report as repaired; both refuse the write.
+ * `throughSeq`) that the numbering alone cannot express. The stored first line is judged first,
+ * by {@link headerLineRefusal}, because neither reader ever sees it and it reaches the file
+ * unchanged. A validator that is not importable here certifies nothing, and a candidate either
+ * reader -- or that line -- refuses is exactly the log this script must not report as repaired;
+ * all of them refuse the write.
  * @param wire - the stored `session` record.
  * @param events - the candidate events, dense and carrying their `ignorable` flags.
  * @returns `undefined` when both host readers accept, else why the write is refused.
  */
 function refusal(wire, events) {
+  const line = headerLineRefusal(wire);
+  if (line !== undefined) return line;
   if (format === undefined) return 'SKIP writing: the host released-v4 validator is not importable here';
   const artifact = {
     header: {

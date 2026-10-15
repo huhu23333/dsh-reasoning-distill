@@ -554,9 +554,8 @@ export class ReasoningDistillEngine {
     // the distiller's request and response. Dropping the store's copy here is what keeps
     // a long-lived host from pinning every conversation it has ever seen — text included
     // — for the life of the process. A later `load` reads the file again, so nothing on
-    // disk changes. A store that carries only the read/write half (a failure-injecting
-    // wrapper, say) loses the eviction rather than failing the disposal path.
-    if (typeof this.store.forget === 'function') this.store.forget(sessionId)
+    // disk changes.
+    this.store.forget(sessionId)
   }
 
   /**
