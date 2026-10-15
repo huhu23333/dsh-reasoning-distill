@@ -612,7 +612,7 @@ OLD_RESPONSE_VALUE = '''\t\tasync function responseValue(response) {
 \t\t\tconst error = objectValue(value, "错误响应")["error"];
 \t\t\tthrow new Error(typeof error === "string" ? error : `请求失败：HTTP ${String(response.status)}`);
 \t\t}'''
-NEW_RESPONSE_VALUE = '''\t\tconst MESSAGE_EDIT_DEADLINE_MS = globalThis.__MESSAGE_EDIT_DEADLINE_MS ?? 5e3;
+NEW_RESPONSE_VALUE = '''\t\tconst MESSAGE_EDIT_DEADLINE_MS = globalThis.__MESSAGE_EDIT_DEADLINE_MS ?? 1e4;
 \t\tasync function responseValue(response) {
 \t\t\tconst value = await response.json();
 \t\t\tif (response.ok) return value;
