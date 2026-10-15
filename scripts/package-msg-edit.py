@@ -17,7 +17,16 @@ import tarfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 UPSTREAM = ROOT / 'vendor/dsh-msg-edit-0.1.0-upstream.tar.gz'
-TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched4.tgz'
+TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched5.tgz'
+
+# Every one of its host handlers reads the session's event log as `session.events`, a property the
+# 0.2.x Session no longer has: reading it threw a TypeError, which is why all four endpoints
+# answered 500 and every save failed. The replacement is a method call -- snapshotEvents() --
+# returning the same frozen, in-order event list (ownEvents() would drop a forked session's
+# inherited prefix, which these handlers need). Both are deprecated in this host, which is the
+# price of porting a plugin written against the previous API.
+EVENTS_FROM = 'session.events'
+EVENTS_TO = 'session.snapshotEvents()'
 
 # Upstream's client renders four icons from @deepseek-ai/dsh-client-ui-primitives under the
 # old names: this host exports ...OutlineRegular, not ...Outline16. An undefined component is
@@ -79,7 +88,7 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
             metadata = json.loads(data)
             if metadata['name'] != '@moton16/dsh-msg-edit':
                 raise SystemExit(f"unexpected package name: {metadata['name']}")
-            metadata['version'] = '0.1.0-patched4'
+            metadata['version'] = '0.1.0-patched5'
             peers = metadata.get('peerDependencies', {})
             for key in list(peers):
                 peers[key] = PEER_FLOOR
@@ -101,14 +110,18 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
             text = data.decode('utf8')
             if text.count(INJECT_FROM) != 1 or text.count(AGENTS_FROM) != 1:
                 raise SystemExit('host bundle no longer matches the patched inject/agents shape')
+            if EVENTS_FROM not in text:
+                raise SystemExit('host bundle no longer reads session.events')
+            text = text.replace(EVENTS_FROM, EVENTS_TO)
             data = text.replace(INJECT_FROM, INJECT_TO, 1).replace(AGENTS_FROM, AGENTS_TO, 1).encode('utf8')
-            host_patch = 'agents shim + inject'
+            host_patch = 'agents shim + inject + event reads'
         info = tarfile.TarInfo(f'package/{relative}')
         info.size = len(data)
         info.mode = member.mode or 0o644
         info.mtime = member.mtime
         target.addfile(info, io.BytesIO(data))
-print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched4)')
+print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched5)')
+print('host: session.events -> session.snapshotEvents()')
 print('client icons: ' + ', '.join(f'{old}->{new}' for old, new in ICON_RENAMES.items()))
 print('host bundle: dropped the missing agents dependency and answered for it with a shim')
 print(f'client registers as {CLIENT_ID_TO}')
