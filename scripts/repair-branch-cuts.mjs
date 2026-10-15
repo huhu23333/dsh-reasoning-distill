@@ -16,7 +16,11 @@
 // written back verbatim, and a stray or missing key on it would pass the gate above while the
 // read path still refuses the whole log over that line alone. The line is therefore checked on
 // its own, against the same guard the read path applies to it (see `headerLineRefusal`), and a
-// log whose line fails that guard is refused here and left byte-identical.
+// log whose line fails that guard is refused here and left byte-identical. The host package is
+// itself a prerequisite: the released-v4 gate below is handed the event types that package
+// publishes, and a missing one leaves a collapsed set that refuses a *healthy* log over its
+// ordinary event types -- every log then looks like a candidate and the script would rewrite
+// healthy logs. Without it nothing is scanned or written at all.
 //
 // Usage: node scripts/repair-branch-cuts.mjs [--apply] [--root <sessions dir>] [--host <session package>]
 import { execFileSync } from 'node:child_process';
@@ -38,13 +42,23 @@ const checkout = argOf('--checkout', path.join(os.homedir(), 'otherProject', 'de
 // The authoritative gate: the same released-v4 validation the persistence read path runs.
 const format = await import(pathToFileURL(path.join(checkout, 'packages/session/session-format-v3-to-v4/lib/index.js')).href);
 
+// The host that is going to read the repaired log, and the source of the event types the
+// released-v4 gate below is handed. Without it that gate gets a collapsed set and refuses a
+// healthy log over its ordinary event types ("unknown event type ..."), which turns every log
+// into a candidate; there is no authoritative gate without the package, so nothing is scanned
+// or written at all.
 let host;
 try {
   host = await import(pathToFileURL(hostPath).href);
 } catch {
-  host = undefined;
-  console.error('note: host Session package not found; structural verification only');
+  console.error(`the host Session package at ${hostPath} is not importable; pass --host (nothing was scanned or written)`);
+  process.exit(2);
 }
+
+// The event types the persistence read path knows. `scan-session-logs.mjs` reproduces that path
+// and adds the message-edit plugin's own type, because a log carrying it loads fine; a check
+// stricter than the reader would refuse a repair the host would accept.
+const known = new Set([...host.KNOWN_SESSION_EVENT_TYPES, 'message-edit/version']);
 
 function findLogs(dir) {
   const found = [];
@@ -98,8 +112,8 @@ function formatRejects(raw, events) {
     inheritedEventCount: events.filter(event => event.type === 'session/end-seed' && event.data?.inherited === true).at(-1)?.seq ?? 0,
   };
   try {
-    format.restoreReleasedV4Artifact(artifact, new Set([...(host?.KNOWN_SESSION_EVENT_TYPES ?? []), 'message-edit/version']));
-    format.assertReleasedV4Relationships(artifact, new Set([...(host?.KNOWN_SESSION_EVENT_TYPES ?? []), 'message-edit/version']));
+    format.restoreReleasedV4Artifact(artifact, known);
+    format.assertReleasedV4Relationships(artifact, known);
     return undefined;
   } catch (error) {
     return String(error.message);
@@ -113,7 +127,6 @@ function hostAccepts(raw, events) {
   // must not report a log the read path still refuses over that line.
   const line = headerLineRefusal(raw);
   if (line !== undefined) return { ok: false, detail: line };
-  if (host === undefined) return { ok: true, detail: 'structural only' };
   const header = {
     version: host.SESSION_FORMAT_VERSION,
     id: host.SessionId(raw.id),

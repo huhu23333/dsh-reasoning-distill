@@ -171,7 +171,7 @@
 
 ### G. 持久化与接口
 - 每会话一个 sidecar：`<DSH_HOME>/reasoning-distill/<会话 id 净化 + sha256 前 16 位>.json`；原子写、串行队列、单飞读；损坏/无权限 → **失败关闭**（不覆盖、不发起付费调用），文件可读后自动恢复；旧命名记录只有**自证归属**才采纳，损坏的旧文件按"不可读"处理。
-- 路由：`POST /api/reasoning-distill/report`（报告）、`GET /api/reasoning-distill/catalog`（模型目录）、`POST /api/reasoning-distill/handoff`（清交接标记 + 按需停止回合）。
+- 路由：`POST /api/reasoning-distill/report`（报告）、`GET /api/reasoning-distill/catalog`（模型目录）、`POST /api/reasoning-distill/handoff`（清交接标记 + 按需停止回合）、`GET|POST /api/reasoning-distill/install`（后端安装：`GET` 读当前作业 / 可安装后端 / 步骤 / 插件目录，`POST` 传 `action:'start'|'cancel'`；安装跑在宿主进程里，关掉页面不中断，见 `src/route.ts:103-134`）。
 - 客户端轮询：会话页每 4 秒（并在窗口重新聚焦时）读一次报告；输入框指示器每 2 秒。响应按"已应用的最新序号"排序，慢响应不会丢、旧响应不会覆盖新状态。
 
 ---

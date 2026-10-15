@@ -145,6 +145,18 @@ export class SidecarStore {
   private readonly cache = new Map<string, SessionRecord>()
   private readonly queues = new Map<string, Promise<void>>()
   private readonly pending = new Map<string, Promise<SessionRecord>>()
+  /**
+   * The write epoch of every session with a queued or running write.
+   *
+   * `forget` marks the live epoch evicted, so a write that was already queued when the
+   * session was dropped cannot publish its record back: dropping the cache entry alone
+   * would be undone by that write's own `cache.set` when it finishes, leaving the
+   * record — original reasoning text plus the distiller's request and response — in
+   * memory for the life of the process. `forget` detaches the evicted epoch from this map,
+   * so the next write for the same id starts a fresh one — the same session id can be
+   * attached again and must not be permanently barred from publishing.
+   */
+  private readonly epochs = new Map<string, { evicted: boolean }>()
 
   /**
    * Read one session's record.
@@ -241,36 +253,49 @@ export class SidecarStore {
    * @param mutate - synchronous mutation of a private record copy.
    */
   update(sessionId: string, mutate: (record: SessionRecord) => void): Promise<void> {
+    // The epoch this write belongs to, captured before it queues: `forget` may evict it
+    // while the write waits, and a write queued for a session that is gone must not leave
+    // its record behind (see `forget`).
+    const epoch = this.epochOf(sessionId)
     const run = async (): Promise<void> => {
-      // Each queued write starts from the last committed version. Mutators cannot
-      // expose their candidate through load/peek before the rename succeeds.
-      const record = structuredClone(await this.load(sessionId))
-      mutate(record)
-      const dir = rootDir()
-      // Private by construction: these files hold original reasoning, distiller
-      // prompts/responses and tool output, so neither the directory nor the
-      // record may be readable by other users on the host.
-      await mkdir(dir, { recursive: true, mode: 0o700 })
-      // `mkdir` does not tighten a directory that already exists, and this one
-      // names sessions by id: an installation that created it 0755 would expose
-      // the file names to other local users even though each file is 0600.
-      const info = await stat(dir).catch(() => undefined)
-      if (info === undefined || !info.isDirectory()) {
-        throw new Error(`reasoning-distill: ${dir} is not a directory`)
+      try {
+        // Each queued write starts from the last committed version. Mutators cannot
+        // expose their candidate through load/peek before the rename succeeds.
+        const record = structuredClone(await this.load(sessionId))
+        mutate(record)
+        const dir = rootDir()
+        // Private by construction: these files hold original reasoning, distiller
+        // prompts/responses and tool output, so neither the directory nor the
+        // record may be readable by other users on the host.
+        await mkdir(dir, { recursive: true, mode: 0o700 })
+        // `mkdir` does not tighten a directory that already exists, and this one
+        // names sessions by id: an installation that created it 0755 would expose
+        // the file names to other local users even though each file is 0600.
+        const info = await stat(dir).catch(() => undefined)
+        if (info === undefined || !info.isDirectory()) {
+          throw new Error(`reasoning-distill: ${dir} is not a directory`)
+        }
+        await chmod(dir, 0o700).catch(() => undefined)
+        const tightened = await stat(dir).catch(() => undefined)
+        if (tightened === undefined || (tightened.mode & 0o077) !== 0) {
+          throw new Error(`reasoning-distill: ${dir} is not private (mode ${(tightened?.mode ?? 0).toString(8)}); refusing to store reasoning in it`)
+        }
+        const target = fileFor(sessionId)
+        // Unique per write: two stores (a reload, a second instance in tests) can
+        // otherwise pick the same name in the same millisecond and one rename then
+        // loses its source file.
+        const tmp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
+        await writeFile(tmp, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 })
+        await rename(tmp, target)
+        this.cache.set(sessionId, record)
+      } finally {
+        // Publishing above can resurrect a record `forget` already dropped -- and `load`
+        // repopulated the cache mid-write for the same reason. Evicting the epoch is what
+        // makes the disposal stick, on both exits. The committed file is not touched: the
+        // next `load` reads it back rather than handing around a copy of a session that is
+        // gone.
+        if (epoch.evicted) this.cache.delete(sessionId)
       }
-      await chmod(dir, 0o700).catch(() => undefined)
-      const tightened = await stat(dir).catch(() => undefined)
-      if (tightened === undefined || (tightened.mode & 0o077) !== 0) {
-        throw new Error(`reasoning-distill: ${dir} is not private (mode ${(tightened?.mode ?? 0).toString(8)}); refusing to store reasoning in it`)
-      }
-      const target = fileFor(sessionId)
-      // Unique per write: two stores (a reload, a second instance in tests) can
-      // otherwise pick the same name in the same millisecond and one rename then
-      // loses its source file.
-      const tmp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
-      await writeFile(tmp, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 })
-      await rename(tmp, target)
-      this.cache.set(sessionId, record)
     }
     const previous = this.queues.get(sessionId) ?? Promise.resolve()
     const next = previous.then(run, run)
@@ -281,9 +306,26 @@ export class SidecarStore {
     // so the write that ends up last removes its own entry. Another update that
     // arrives first replaces it in the map and owns the removal instead.
     void tracked.then(() => {
-      if (this.queues.get(sessionId) === tracked) this.queues.delete(sessionId)
+      if (this.queues.get(sessionId) !== tracked) return
+      this.queues.delete(sessionId)
+      // The last write that captured this epoch has finished, so nothing is left for a
+      // later `forget` to evict and the next write starts a fresh epoch.
+      if (this.epochs.get(sessionId) === epoch) this.epochs.delete(sessionId)
     })
     return next
+  }
+
+  /**
+   * The write epoch a new write for one session belongs to.
+   * @param sessionId - owning session id.
+   * @returns the session's live epoch, created when it has none.
+   */
+  private epochOf(sessionId: string): { evicted: boolean } {
+    const existing = this.epochs.get(sessionId)
+    if (existing !== undefined) return existing
+    const fresh = { evicted: false }
+    this.epochs.set(sessionId, fresh)
+    return fresh
   }
 
   /**
@@ -293,11 +335,23 @@ export class SidecarStore {
    * The record carries the original reasoning text and the distiller's request and
    * response, so a long-lived host that never dropped it would keep every conversation
    * it has ever seen in memory. A read already in flight publishes its snapshot when it
-   * resolves, so that outcome is dropped too; the next `load` then reads the file
-   * again rather than handing back the record of a session that is gone.
+   * resolves, so that outcome is dropped too; a write already queued behind the queue is
+   * evicted the same way (its epoch is marked, so its own `cache.set` is undone when it
+   * ends). The next `load` then reads the file again rather than handing back the record
+   * of a session that is gone.
    * @param sessionId - owning session id.
    */
   forget(sessionId: string): void {
+    // Evict the live epoch *before* dropping the cache entry: a write that was already
+    // queued, or one that is running right now, publishes its candidate with `cache.set`
+    // when it ends and would put the record back exactly as it was. Detaching the epoch
+    // from the map is what keeps that eviction from poisoning a later write for the same
+    // id -- the same session id can be attached again, and that write starts a fresh epoch.
+    const epoch = this.epochs.get(sessionId)
+    if (epoch !== undefined) {
+      epoch.evicted = true
+      this.epochs.delete(sessionId)
+    }
     this.cache.delete(sessionId)
     const inFlight = this.pending.get(sessionId)
     if (inFlight !== undefined) {

@@ -10,13 +10,18 @@
 // step, then turn/end with the forked reason) at the point the branch's own turn opens,
 // shifting later sequence numbers and the seq references that follow them. Every
 // candidate is re-walked and loaded through the host's own Session constructors before
-// it is written, and every file is backed up first. Those constructors are handed a header
-// this script *rebuilds* from the fields it knows, so the stored first line never reaches
-// them: the line is written back verbatim, and a stray or missing key on it passes the
-// constructors while the read path still refuses the whole log over that line alone. The line
-// is therefore checked on its own, against the same guard the read path applies to it (see
-// `headerLineRefusal`), in both passes below, and a file whose line fails that guard is
-// refused and left byte-identical.
+// it is written, and every file is backed up first. Those constructors alone are not the
+// host's verdict on the whole log: they replay the events and never run the released-v4
+// relationship validation the persistence read path runs, so a log whose delivery marker
+// names the wrong Session was written and reported REPAIRED while that path still refused
+// it. The validator is therefore run on the candidate first (see `refusal`), the same pair
+// the sibling repair scripts run. Both readers are handed a header this script *rebuilds*
+// from the fields it knows, so the stored first line never reaches them: the line is
+// written back verbatim, and a stray or missing key on it passes the readers while the read
+// path still refuses the whole log over that line alone. The line is therefore checked on
+// its own, against the same guard the read path applies to it (see `headerLineRefusal`), in
+// both passes below, and a file whose line fails that guard is refused and left
+// byte-identical.
 //
 // The numbers a shift moves are nothing without the references that name them: both passes
 // below rewrite seqs, so both move every reference through the host's own event-reference
@@ -24,7 +29,7 @@
 // and refuse a file whose references cannot be placed rather than writing one the host loads
 // with its references pointing at the wrong events.
 //
-// Usage: node scripts/repair-branch-turns.mjs [--apply] [--root <sessions dir>] [--host <session package>]
+// Usage: node scripts/repair-branch-turns.mjs [--apply] [--root <sessions dir>] [--host <session package>] [--checkout <dsh checkout>]
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -39,6 +44,7 @@ const argOf = (flag, fallback) => {
 };
 const root = argOf('--root', path.join(os.homedir(), '.dsh', 'sessions'));
 const hostPath = argOf('--host', path.join(os.homedir(), 'otherProject', 'deepseek-harness', 'packages', 'core', 'session', 'lib', 'index.js'));
+const checkout = argOf('--checkout', path.join(os.homedir(), 'otherProject', 'deepseek-harness'));
 
 let host;
 try {
@@ -46,6 +52,23 @@ try {
 } catch {
   host = undefined;
 }
+
+// The host's released-v4 validator: the same pair the persistence read path runs, and the only
+// gate that expresses the relationships replaying the events alone cannot (a delivery marker's
+// `sessionId`/`throughSeq`, a developer message's `headerSeq`, a replacement range). Without it
+// a candidate the read path still refuses is certified by the constructors alone and written.
+let format;
+try {
+  format = await import(pathToFileURL(path.join(checkout, 'packages/session/session-format-v3-to-v4/lib/index.js')).href);
+} catch {
+  format = undefined;
+}
+
+// The event types the persistence read path knows. The validator is handed a collapsed set when
+// the Session package is missing and then refuses a healthy log over its ordinary event types
+// ("unknown event type ..."), so that package is a prerequisite of the gate rather than an
+// optional extra: `refusal` refuses the write when either reader is unavailable.
+const known = new Set([...(host?.KNOWN_SESSION_EVENT_TYPES ?? []), 'message-edit/version']);
 
 // The host's own event-reference remap, imported from its sources because the built package
 // does not re-export it. It is what makes rewriting a seq safe: it moves `surfaceOp`'s
@@ -118,7 +141,7 @@ function remapUncoveredReference(source, out, field, owner, reference) {
 /**
  * The physical first line's own admissibility to the read path.
  *
- * `hostAccepts` below is handed a header this script *rebuilds* from the fields it knows, so the
+ * `refusal` below is handed a header this script *rebuilds* from the fields it knows, so the
  * stored line is never judged by the host constructors; the line is written back verbatim, so a
  * stray key on it survives the write and the read path refuses the whole log over that line
  * alone (`isHeaderLine` in session-persistence-jsonl/src/format.ts accepts exactly the required
@@ -158,8 +181,44 @@ function brokenAt(events) {
   return undefined;
 }
 
-function hostAccepts(raw, events) {
-  if (host === undefined) return 'structural only';
+/**
+ * The host's own verdict on the log a write would store.
+ *
+ * Two host readers run on the candidate, in the order the read path applies them: the
+ * released-v4 `restoreReleasedV4Artifact`/`assertReleasedV4Relationships` pair, which adds the
+ * relationship validation the constructors below cannot express, and then `Session.fromRestore`
+ * / `create`, which replay the events exactly as a reload does. A reader that is not importable
+ * here certifies nothing: a file whose only proof is missing must not be reported as repaired.
+ * @param raw - the stored `session` record, exactly as it will be written back.
+ * @param events - the candidate events.
+ * @returns `undefined` when both host readers accept, else why the write is refused.
+ */
+function refusal(raw, events) {
+  if (format === undefined) return 'the host released-v4 validator is not importable here';
+  if (host === undefined) return 'the host Session package is not importable here';
+  const artifact = {
+    header: {
+      version: 4,
+      id: raw.id,
+      createdAt: raw.createdAt,
+      isSeeded: raw.isSeeded === true,
+      delegationDepth: raw.delegationDepth ?? 0,
+      ...(raw.cwd === undefined ? {} : { cwd: raw.cwd }),
+      ...(raw.parentSession === undefined ? {} : { parentSession: raw.parentSession }),
+      ...(raw.origin === undefined ? {} : { origin: raw.origin }),
+      ...(raw.agentPreset === undefined ? {} : { agentPreset: raw.agentPreset }),
+    },
+    events,
+    // The current format keeps the inherited cut on the last tagged session/end-seed event;
+    // the physical header has no such field (a stray one makes the first line invalid).
+    inheritedEventCount: events.filter(event => event.type === 'session/end-seed' && event.data?.inherited === true).at(-1)?.seq ?? 0,
+  };
+  try {
+    format.restoreReleasedV4Artifact(artifact, known);
+    format.assertReleasedV4Relationships(artifact, known);
+  } catch (error) {
+    return `the host released-v4 validator rejects it: ${error instanceof Error ? error.message : String(error)}`;
+  }
   const header = {
     version: host.SESSION_FORMAT_VERSION,
     id: host.SessionId(raw.id),
@@ -172,9 +231,9 @@ function hostAccepts(raw, events) {
     host.Session.fromRestore(host.SessionId(raw.id), events, header, host.SessionLogOffset(0), 'detached');
     host.Session.create(host.SessionId(raw.id), events, header, host.SessionLogOffset(0));
   } catch (error) {
-    return `REJECTED ${String(error.message)}`;
+    return `the host Session constructors reject it: ${error instanceof Error ? error.message : String(error)}`;
   }
-  return 'both host paths accept it';
+  return undefined;
 }
 
 function findLogs(dir) {
@@ -209,7 +268,7 @@ for (const file of findLogs(root)) {
   const shift = closers.length;
   console.log(`${apply ? 'REPAIR' : 'WOULD REPAIR'} ${raw.id} at=${String(broken.index)} closers=${String(shift)}`);
   if (!apply) continue;
-  // The stored first line goes back verbatim and `hostAccepts` below never sees it, so a line
+  // The stored first line goes back verbatim and `refusal` below never sees it, so a line
   // the read path refuses has to refuse the write here.
   const line = headerLineRefusal(raw);
   if (line !== undefined) {
@@ -242,9 +301,9 @@ for (const file of findLogs(root)) {
     console.log(`  SKIP repairing: ${error instanceof Error ? error.message : String(error)}`);
     continue;
   }
-  const verdict = hostAccepts(raw, shifted);
-  console.log(`  ${verdict}`);
-  if (verdict.startsWith('REJECTED') || brokenAt(shifted) !== undefined) continue;
+  const verdict = refusal(raw, shifted);
+  console.log(`  ${verdict === undefined ? 'both host readers accept it' : `REJECTED ${verdict}`}`);
+  if (verdict !== undefined || brokenAt(shifted) !== undefined) continue;
   const encoded = zlib.zstdCompressSync(Buffer.from([raw, ...shifted].map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8'));
   const backup = `${file}.bak-turns-${new Date().toISOString().replace(/[:.]/g, '')}`;
   fs.copyFileSync(file, backup);
@@ -298,9 +357,9 @@ for (const file of findLogs(root)) {
     console.log(`  SKIP renumbering: ${error instanceof Error ? error.message : String(error)}`);
     continue;
   }
-  const verdict = hostAccepts(raw, fixed);
-  console.log(`  ${verdict}`);
-  if (verdict.startsWith('REJECTED') || fixed.some((event, index) => event.seq !== index)) continue;
+  const verdict = refusal(raw, fixed);
+  console.log(`  ${verdict === undefined ? 'both host readers accept it' : `REJECTED ${verdict}`}`);
+  if (verdict !== undefined || fixed.some((event, index) => event.seq !== index)) continue;
   const encoded = zlib.zstdCompressSync(Buffer.from([raw, ...fixed].map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8'));
   const backup = `${file}.bak-gaps-${new Date().toISOString().replace(/[:.]/g, '')}`;
   fs.copyFileSync(file, backup);
