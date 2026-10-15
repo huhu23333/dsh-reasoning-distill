@@ -228,7 +228,7 @@
 | 流在抛出前已产出文本，成本按 0 输出估算 | 成立 | 边收边计字符数，异常路径按已收输出估算 |
 | 派生位置索引只按 `length+tail` 缓存，可能失效 | 成立（其建议的 `surface.contentGeneration` 在本 build **不存在**） | 改为**每个会话事件都失效**索引缓存，不依赖不存在的 API |
 | 压缩会话创建失败仍持久化，条目可能指向不存在的会话 / 留下孤儿会话 | 成立 | 先记 id 再 append（append 失败也保留可用 id）；确实拿不到会话时条目标注 `sessionMissing`，界面显示"未能创建审计会话（替换仍已生效）"，不再像 bug |
-| `deriveMessages` 包装没有撤销器，卸载后仍改写 | **部分成立**：`ctx.effect` 确实注册了撤销器（`src/engine.ts:255`），但它只把 `active` 置 false（`src/engine.ts:450-453`），**不还原**被替换的 `deriveMessages`/`deriveEventMessage`（`Object.defineProperty` 只做一次，`src/engine.ts:614,623`）；且宿主的增量派生缓存只在 `contentGeneration` 变化时重建（`packages/core/session/src/index.ts:856-870`），可能短期继续用蒸馏版 | **未修**（审查台账 C3，需先定方案：真还原 + 失效宿主缓存，还是文档化）。原先这里写的"卸载时恢复原方法（e2e 验证过）"**不实**：撤销路径没有任何测试执行过——`test/smoke.ts:145` 只把 effect 体收进数组，`:99` 声明的 `effects` 从未被调用 |
+| `deriveMessages` 包装没有撤销器，卸载后仍改写 | **部分成立**：`ctx.effect` 确实注册了撤销器（`src/engine.ts:272`），但它只把 `active` 置 false（`src/engine.ts:473-475`），**不还原**被替换的 `deriveMessages`/`deriveEventMessage`（`Object.defineProperty` 只做一次，`src/engine.ts:646,655`）；且宿主的增量派生缓存只在 `contentGeneration` 变化时重建（`packages/core/session/src/index.ts:856-870`），可能短期继续用蒸馏版 | **未修**（审查台账 C3，需先定方案：真还原 + 失效宿主缓存，还是文档化）。原先这里写的"卸载时恢复原方法（e2e 验证过）"**不实**：撤销路径没有任何测试执行过——`test/smoke.ts:195` 只把 effect 体收进数组，`:149` 声明的 `effects` 从未被调用 |
 | 渲染期安全（A）、安全/隐私（F） | **未发现问题** | 渲染路径另有 16 项 SSR 测试兜底；无密钥落盘、无推理内容进日志 |
 
 ### 第二轮（对已修版本的复查）
