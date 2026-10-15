@@ -10,6 +10,7 @@ to build from anything but the vendored revision.
 Usage: python3 scripts/package-msg-edit.py
 """
 import hashlib
+import re
 import io
 import json
 import pathlib
@@ -17,7 +18,14 @@ import tarfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 UPSTREAM = ROOT / 'vendor/dsh-msg-edit-0.1.0-upstream.tar.gz'
-TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched6.tgz'
+TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched7.tgz'
+
+# The host's replace-op validator (packages/core/session/src/surface.ts) accepts exactly
+# { op: 'replace', startSeq, endSeq } and rejects anything else with "invalid replace
+# surfaceOp" -- which is what every save answered. Upstream writes the previous revision's key
+# names (start/end), so the append threw and nothing was ever recorded. Both of its replace
+# sites (rewrite-message and regenerate) are rewritten.
+REPLACE_OP = re.compile(r"surfaceOp: \{ op: 'replace', start: ([^,]+), end: ([^}]+) \}")
 
 # Its editor panel is rendered inside the assistant-actions slot -- a narrow flex row -- and its
 # CSS gives that panel no positioning at all, so the host's layout clips it: half a box, the
@@ -95,7 +103,7 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
             metadata = json.loads(data)
             if metadata['name'] != '@moton16/dsh-msg-edit':
                 raise SystemExit(f"unexpected package name: {metadata['name']}")
-            metadata['version'] = '0.1.0-patched6'
+            metadata['version'] = '0.1.0-patched7'
             peers = metadata.get('peerDependencies', {})
             for key in list(peers):
                 peers[key] = PEER_FLOOR
@@ -123,6 +131,9 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
             if EVENTS_FROM not in text:
                 raise SystemExit('host bundle no longer reads session.events')
             text = text.replace(EVENTS_FROM, EVENTS_TO)
+            text, replaced_ops = REPLACE_OP.subn(r"surfaceOp: { op: 'replace', startSeq: \1, endSeq: \2 }", text)
+            if replaced_ops < 1 or "op: 'replace', start:" in text:
+                raise SystemExit('host bundle replace ops no longer match the expected shape')
             data = text.replace(INJECT_FROM, INJECT_TO, 1).replace(AGENTS_FROM, AGENTS_TO, 1).encode('utf8')
             host_patch = 'agents shim + inject + event reads'
         info = tarfile.TarInfo(f'package/{relative}')
@@ -130,7 +141,8 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
         info.mode = member.mode or 0o644
         info.mtime = member.mtime
         target.addfile(info, io.BytesIO(data))
-print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched6)')
+print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched7)')
+print('replace ops: start/end -> startSeq/endSeq (the only shape the host validator accepts)')
 print('editor panel: floating overlay (position:fixed, z-index:4000, 64vh scroll)')
 print('host: session.events -> session.snapshotEvents()')
 print('client icons: ' + ', '.join(f'{old}->{new}' for old, new in ICON_RENAMES.items()))
