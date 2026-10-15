@@ -22,7 +22,9 @@ const { apply: applyPlugin, inject: requiredServices } = await import('../src/in
 const { SidecarStore, dshHome, legacySidecarPath, sidecarPath } = await import('../src/store.ts')
 const { buildReport } = await import('../src/report.ts')
 const { registerRoutes } = await import('../src/route.ts')
-const { HANDOFF_ROUTE, REPORT_ROUTE } = await import('../src/shared.ts')
+const { HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE } = await import('../src/shared.ts')
+const { InstallRunner } = await import('../src/install.ts')
+const { INSTALLABLE_BACKENDS, INSTALL_STEPS } = await import('../src/install-shared.ts')
 const { DEFAULT_RULE } = await import('../src/config.ts')
 const { FALLBACK_RULE } = await import('../src/rule.ts')
 
@@ -279,6 +281,7 @@ const persistedAudit = persisted.get(auditedEntry?.distill.sessionId ?? '')
 const reopenedAudit = persistedAudit === undefined ? undefined : new FakeSession(auditedEntry!.distill.sessionId, { id: auditedEntry!.distill.sessionId, cwd: '/tmp' })
 for (const event of persistedAudit ?? []) reopenedAudit!.append(event.type, event.data)
 let reportHandler: ((request: Request) => Promise<Response>) | undefined
+let installHandler: ((request: Request) => Promise<Response>) | undefined
 const coldSessions = new Map([[audited.id, audited]])
 const coldContext = {
   ...auditCtx,
@@ -288,11 +291,25 @@ const coldContext = {
   inject: (_deps: string[], callback: (child: unknown) => void) => callback(coldContext),
   connection: { fetch: { register: (route: { path: string; fetch: (request: Request) => Promise<Response> }) => {
     if (route.path === REPORT_ROUTE) reportHandler = route.fetch
+    if (route.path === INSTALL_ROUTE) installHandler = route.fetch
     return async () => undefined
   } } },
   effect: (register: () => unknown) => { register() },
 }
-registerRoutes(coldContext as never, makeConfig(), new SidecarStore(), { snapshot: () => ({ active: [], blockingSince: null, blockingReason: null, pendingBranch: null, generation: 0 }), stock: () => undefined, handoff: async () => ({ ok: true, recorded: true }) })
+/** A runner whose child process this test drives by hand. */
+function manualRunner(): { runner: InstanceType<typeof InstallRunner>; line: (value: string) => void; exit: (code: number | null) => void; killed: () => boolean } {
+  let onLine: ((line: string) => void) | undefined
+  let onExit: ((code: number | null) => void) | undefined
+  let killed = false
+  const runner = new InstallRunner(() => ({
+    onLine: handler => { onLine = handler },
+    onExit: handler => { onExit = handler },
+    kill: () => { killed = true; onExit?.(null) },
+  }))
+  return { runner, line: value => onLine?.(value), exit: code => onExit?.(code), killed: () => killed }
+}
+const coldRunner = new InstallRunner(() => ({ onLine: () => undefined, onExit: () => undefined, kill: () => undefined }))
+registerRoutes(coldContext as never, makeConfig(), new SidecarStore(), { snapshot: () => ({ active: [], blockingSince: null, blockingReason: null, pendingBranch: null, generation: 0 }), stock: () => undefined, handoff: async () => ({ ok: true, recorded: true }) }, coldRunner)
 const coldReportResponse = await reportHandler?.(new Request('http://localhost/api/report', { method: 'POST', body: JSON.stringify({ sessionId: audited.id }) }))
 const coldReport = coldReportResponse === undefined ? undefined : await coldReportResponse.json() as { entries: Array<{ sessionLive?: boolean }> }
 check('audit startup requires persistence and compressed session loads durably without missing marker',
@@ -1688,6 +1705,58 @@ check('reversed failed writes replay only the newer owed hand-off without backen
   && saved62i?.state === 'failed' && saved62i.error === 'new failed' && owed62i.size === 0
   && backendCalls.length === backendBeforeReplay62i && writes62i === 4,
   JSON.stringify({ oldResult62i, newResult62i, owedBeforeReplay62i, saved62i, owedAfterReplay62i: owed62i.size, writes62i, backendBeforeReplay62i, backendAfterReplay62i: backendCalls.length }))
+
+console.log('scenario 63: quick-install runner and route')
+const install63 = manualRunner()
+const started63 = install63.runner.start('message-edit')
+check('a scripted install starts with every step pending',
+  started63.ok && started63.job.phase === 'running' && started63.job.steps.every(step => step.state === 'pending'),
+  JSON.stringify(started63.ok ? started63.job.steps : started63))
+check('a second install is refused while one runs',
+  install63.runner.start('message-edit').ok === false)
+install63.line('##STEP resolve')
+install63.line('checkout=/x profile=web')
+install63.line('##DONE resolve')
+const midway63 = install63.runner.status()!
+check('the reported step moves to done and ordinary output becomes the log',
+  midway63.steps[0]?.state === 'done' && midway63.steps[1]?.state === 'pending' && midway63.log.includes('checkout=/x profile=web'),
+  JSON.stringify({ steps: midway63.steps.map(step => step.state), log: midway63.log }))
+check('cancelling kills the child and the job ends cancelled',
+  install63.runner.cancel() && install63.killed() && install63.runner.status()?.phase === 'cancelled',
+  JSON.stringify(install63.runner.status()))
+const failing63 = manualRunner()
+failing63.runner.start('message-edit')
+failing63.line('##STEP verify')
+failing63.line('##FAIL verify 安装件与 vendor 不一致')
+failing63.exit(1)
+const failed63 = failing63.runner.status()!
+check('a failing step fails the job with its message',
+  failed63.phase === 'failed' && failed63.steps.find(step => step.id === 'verify')?.error === '安装件与 vendor 不一致' && failed63.error !== undefined,
+  JSON.stringify(failed63))
+const routeRunner63 = manualRunner()
+const installContext63 = {
+  ...coldContext,
+  connection: { fetch: { register: (route: { path: string; fetch: (request: Request) => Promise<Response> }) => {
+    if (route.path === INSTALL_ROUTE) installHandler = route.fetch
+    return async () => undefined
+  } } },
+}
+registerRoutes(installContext63 as never, makeConfig(), new SidecarStore(), { snapshot: () => ({ active: [], blockingSince: null, blockingReason: null, pendingBranch: null, generation: 0 }), stock: () => undefined, handoff: async () => ({ ok: true, recorded: true }) }, routeRunner63.runner)
+const status63 = await installHandler?.(new Request('http://localhost/api/install'))
+const statusBody63 = status63 === undefined ? undefined : await status63.json() as { job: unknown; backends: unknown[]; steps: unknown[]; repo: string }
+check('the page can read the backend list, the step labels and the checkout before starting',
+  statusBody63?.job === null && statusBody63.backends.length === INSTALLABLE_BACKENDS.length && statusBody63.steps.length === INSTALL_STEPS.length && statusBody63.repo.length > 1,
+  JSON.stringify(statusBody63).slice(0, 200))
+const refused63 = await installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'start', backendId: 'msg-edit' }) }))
+check('a backend without a scripted install is refused rather than guessed at',
+  refused63?.status === 409, String(refused63?.status))
+const accepted63 = await installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'start', backendId: 'message-edit' }) }))
+const acceptedBody63 = accepted63 === undefined ? undefined : await accepted63.json() as { job?: { phase?: string } }
+check('starting the verified backend returns its running job',
+  accepted63?.status === 200 && acceptedBody63?.job?.phase === 'running', JSON.stringify(acceptedBody63))
+const cancelled63 = await installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'cancel' }) }))
+check('cancelling through the route reaches the runner',
+  cancelled63?.status === 200 && routeRunner63.killed(), String(cancelled63?.status))
 
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)

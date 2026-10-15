@@ -7,6 +7,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-workspace/client'
 import { ReasoningDistillSettings } from './Settings.tsx'
 import { CompressionActivity } from './ActivityChip.tsx'
 import { ReasoningDistillView } from './View.tsx'
+import { configureInstallBridge } from './install-bridge.ts'
 import { en, NS, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -19,6 +20,29 @@ export const inject = ['slots', 'locale', 'configForms', 'uiWorkspace']
 
 export function apply(ctx: Context): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }))
+  // The Settings panel is a slot component and cannot reach the shell itself, so the
+  // two capabilities its quick-install page needs are published here. The bridge is
+  // cleared again on disposal, so the panel never promises what it cannot do.
+  configureInstallBridge({
+    startSession: (workspaceId, prompt) => {
+      ctx.uiWorkspace.startSession(workspaceId as Parameters<typeof ctx.uiWorkspace.startSession>[0], { prompt })
+    },
+    workspaces: () => {
+      // The Workspace controller is a client service without published types here, so
+      // the shape read from it is stated explicitly and mapped defensively: the page
+      // only needs an id and something readable.
+      const service = (ctx as unknown as { get(key: string): unknown }).get('workspaces') as
+        { list?: { getSnapshot(): { items?: readonly Record<string, unknown>[] } } } | undefined
+      const items = service?.list?.getSnapshot().items ?? []
+      return items.map((item, index) => ({
+        id: typeof item['workspaceId'] === 'string' ? item['workspaceId'] : String(item['id'] ?? index),
+        label: typeof item['title'] === 'string' && item['title'] !== ''
+          ? item['title']
+          : String(item['path'] ?? item['workspaceId'] ?? `workspace ${String(index + 1)}`),
+      }))
+    },
+  })
+  ctx.effect(() => () => { configureInstallBridge(undefined) })
   const t = ctx.locale.bind(NS)
   // The host's client-side form type is not resolvable here, so the shape this
   // panel consumes is stated explicitly.

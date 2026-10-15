@@ -10,3 +10,20 @@
 .holidayBox{width:100%;box-sizing:border-box;min-height:120px;padding:8px 10px;border:1px solid var(--dsw-border,#dde2e1);border-radius:8px;font:inherit;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:transparent;color:inherit;resize:vertical}
 .backendOptions{margin:14px 0 0;padding:12px 14px;border:1px solid var(--dsw-border,#dde2e1);border-radius:10px;display:flex;flex-direction:column;gap:8px}
 .backendOptions h4{font-size:13px;font-weight:600;margin:0;color:var(--dsw-text-secondary,#667477)}
+.installEntry{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:14px}
+.modalBackdrop{position:fixed;inset:0;background:rgba(0,0,0,.42);display:grid;place-items:center;z-index:60;padding:20px}
+.modal{width:min(720px,100%);max-height:86vh;overflow:auto;background:var(--dsw-surface,#fff);color:var(--dsw-text-primary,#252b2d);border:1px solid var(--dsw-border,#dde2e1);border-radius:12px;box-shadow:0 18px 48px rgba(0,0,0,.28)}
+.modalHead{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid var(--dsw-border,#dde2e1)}
+.modalHead h3{margin:0;font-size:15px}
+.modalBody{padding:14px 16px 18px;display:flex;flex-direction:column;gap:10px}
+.modalBody h4{margin:6px 0 0;font-size:13px;font-weight:600;color:var(--dsw-text-secondary,#586366)}
+.modeCards{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.modeCard{display:grid;gap:6px;padding:10px 12px;border:1px solid var(--dsw-border,#dde2e1);border-radius:10px;align-content:start}
+.modeCard strong{font-weight:600}
+.installBlock{display:flex;flex-direction:column;gap:8px;padding:10px 12px;border:1px solid var(--dsw-border,#dde2e1);border-radius:10px}
+.installProgress{display:flex;flex-direction:column;gap:6px}
+.steps{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:4px}
+.steps li{display:flex;gap:8px;align-items:baseline;font-size:12px}
+.logBox summary{cursor:pointer;font-size:12px;color:var(--dsw-text-secondary,#667477)}
+.log{white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto;background:var(--dsw-surface-secondary,#f5f7f6);padding:10px;border-radius:6px;font-size:12px;margin:6px 0 0}
+@media(max-width:700px){.modeCards{grid-template-columns:1fr}}

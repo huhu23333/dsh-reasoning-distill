@@ -243,3 +243,4 @@ export const REPORT_ROUTE = '/api/reasoning-distill/report'
 /** Same-origin route that stops a session's turn once a rewrite has landed. */
 export const HANDOFF_ROUTE = '/api/reasoning-distill/handoff'
 export const CATALOG_ROUTE = '/api/reasoning-distill/catalog'
+export const INSTALL_ROUTE = '/api/reasoning-distill/install'

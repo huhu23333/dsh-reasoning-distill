@@ -17,6 +17,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 import { Config, resolveRule } from './config.ts'
 import type { Config as PluginConfig } from './config.ts'
 import { ReasoningDistillEngine } from './engine.ts'
+import { InstallRunner, installerScript, scriptedSpawner } from './install.ts'
 import { registerRoutes } from './route.ts'
 import { SidecarStore } from './store.ts'
 
@@ -42,7 +43,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const store = new SidecarStore()
   const engine = new ReasoningDistillEngine(ctx, config, store)
   engine.start()
-  registerRoutes(ctx, config, store, engine)
+  // One installer at a time, in this process: the quick-install page can be closed and
+  // reopened without losing progress, and cancellation is a kill.
+  const runner = new InstallRunner(scriptedSpawner(installerScript()))
+  registerRoutes(ctx, config, store, engine, runner)
+  ctx.effect(() => () => { runner.cancel() })
   // The handle owns this session's writer until disposal; registering this
   // callback synchronously prevents the first compression racing the writer.
   const handles: Array<{ close?: () => Promise<void> }> = []

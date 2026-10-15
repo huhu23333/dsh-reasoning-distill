@@ -9,7 +9,9 @@ import type { Config } from './config.ts'
 import { buildCatalog, buildReport } from './report.ts'
 import type { ActiveCompression, BlockingReason } from './shared.ts'
 import type { SidecarStore } from './store.ts'
-import { CATALOG_ROUTE, HANDOFF_ROUTE, REPORT_ROUTE } from './shared.ts'
+import { CATALOG_ROUTE, HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE } from './shared.ts'
+import { INSTALLABLE_BACKENDS, INSTALL_STEPS, installableBackend } from './install-shared.ts'
+import { pluginRoot, type InstallRunner } from './install.ts'
 
 /** Minimal shape of the Connection fetch registry this plugin consumes. */
 interface FetchRouteRegistrar {
@@ -50,6 +52,7 @@ export function registerRoutes(
     stock(sessionId: string): { tokens: number; saved: number; ids: string[] } | undefined
     handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }>
   },
+  runner: InstallRunner,
 ): void {
   ctx.inject(['connection', 'sessions', 'llm', 'sessionPersistence'], (child) => {
     const connection = child.get('connection') as { fetch?: FetchRouteRegistrar } | undefined
@@ -96,6 +99,40 @@ export function registerRoutes(
         }
       },
     }), 'reasoning-distill: report route')
+
+    child.effect(() => register({
+      path: INSTALL_ROUTE,
+      methods: ['GET', 'POST'],
+      requestBody: 'buffered',
+      fetch: async (request: Request): Promise<Response> => {
+        try {
+          // GET is what a panel opening (or reopening) asks for: the job lives in the
+          // host process, so closing the page never lost it.
+          if (request.method === 'GET') {
+            return json({
+              job: runner.status() ?? null,
+              backends: INSTALLABLE_BACKENDS,
+              steps: INSTALL_STEPS,
+              repo: pluginRoot(),
+            })
+          }
+          const body = await request.json() as { action?: unknown; backendId?: unknown }
+          if (body.action === 'cancel') return json({ cancelled: runner.cancel(), job: runner.status() ?? null })
+          if (body.action !== 'start') return json({ error: 'action must be start or cancel' }, 400)
+          const backendId = typeof body.backendId === 'string' ? body.backendId : ''
+          const entry = installableBackend(backendId)
+          if (entry === undefined) return json({ error: `unknown backend: ${backendId}` }, 400)
+          // The page explains why (its locale table owns that wording); the route only
+          // refuses, so one backend cannot be "guessed at" by a stray request.
+          if (!entry.scripted) return json({ error: '这个后端没有程序化安装' }, 409)
+          const started = runner.start(backendId)
+          if (!started.ok) return json({ error: started.error }, 409)
+          return json({ job: started.job })
+        } catch (error: unknown) {
+          return json({ error: error instanceof Error ? error.message : String(error) }, 500)
+        }
+      },
+    }), 'reasoning-distill: install route')
 
     child.effect(() => register({
       path: CATALOG_ROUTE,

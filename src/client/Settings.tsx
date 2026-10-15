@@ -9,6 +9,7 @@ import {
   REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
+import { InstallBackendPanel } from './InstallBackend.tsx'
 import { FALLBACK_RULE, mergeRule, sparseOverride } from '../rule.ts'
 import css from './Settings.module.css'
 
@@ -245,6 +246,7 @@ export function ReasoningDistillSettings({ form, t }: Props) {
   const [catalog, setCatalog] = useState<CatalogReport | null>(null)
   const [catalogError, setCatalogError] = useState(false)
   const [catalogAttempt, setCatalogAttempt] = useState(0)
+  const [installOpen, setInstallOpen] = useState(false)
   const editRevision = useRef(0)
 
   useEffect(() => {
@@ -344,6 +346,12 @@ export function ReasoningDistillSettings({ form, t }: Props) {
           onChange={branchTimeoutMs => update(current => ({ ...current, branchTimeoutMs }))} />
         <p className={css.note}>{t('settings.branchTimeoutHint')}</p>
       </div>}
+      {/* Installing a backend is independent of the choice above, so the entry sits
+          beside the chooser rather than inside the branch-only options. */}
+      <div className={css.installEntry}>
+        <button type="button" className={css.secondary} onClick={() => setInstallOpen(true)}>{t('settings.installOpen')}</button>
+        <span className={css.note}>{t('settings.installHint')}</span>
+      </div>
     </section>
     <section className={css.section}><h3>{t('settings.default')}</h3><RuleFields rule={draft.defaultRule} catalog={catalog} t={t} onChange={defaultRule => update(current => ({ ...current, defaultRule }))} /></section>
     <section className={css.section}><div className={css.sectionHeading}><h3>{t('settings.models')}</h3>{catalogError && <button type="button" className={css.iconButton} title={t('settings.retry')} aria-label={t('settings.retry')} onClick={() => setCatalogAttempt(n => n + 1)}><IconRefreshOutlineRegular /></button>}</div>
@@ -401,5 +409,6 @@ export function ReasoningDistillSettings({ form, t }: Props) {
         onRemove={() => update(current => { const prices = { ...current.prices }; delete prices[model.id]; return { ...current, prices } })} />)}
     </section>
     <section className={css.section}><h3>{t('settings.prompt')}</h3><p className={css.note}>{t('settings.promptHint')}</p><textarea className={css.prompt} value={draft.prompt} onChange={event => update(current => ({ ...current, prompt: event.target.value }))} placeholder={catalog?.defaultPrompt ?? ''} /><div className={css.actions}><button type="button" className={css.secondary} onClick={() => update(current => ({ ...current, prompt: '' }))}>{t('settings.resetPrompt')}</button></div><details className={css.preview}><summary>{t('settings.preview')}</summary><pre>{catalog?.defaultPrompt ?? ''}</pre></details></section>
+    <InstallBackendPanel open={installOpen} onClose={() => setInstallOpen(false)} t={t} />
   </div>
 }

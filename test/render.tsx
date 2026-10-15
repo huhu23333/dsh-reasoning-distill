@@ -16,6 +16,8 @@ import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
 import { REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
+import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
+import { installPromptFor, type InstallJob } from '../src/install-shared.ts'
 import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
 let failures = 0
@@ -375,6 +377,44 @@ check('a report that could not be read never archives anything', !shouldArchiveS
 check('the backend-specific options belong to a branch backend only',
   backendOptionsVisible('message-edit') && !backendOptionsVisible('msg-edit') && !backendOptionsVisible(''))
 
+console.log('render: quick-install page')
+// The page is a view onto a host-side install: closing it must render nothing at all,
+// and reopening reads the job back from the route.
+check('the quick-install page is absent while it is closed',
+  tryRender(<InstallBackendPanel open={false} onClose={noop} t={t} />) === '')
+const installPage = tryRender(<InstallBackendPanel open onClose={noop} t={t} />)
+check('it lists the backends and says which one can be scripted',
+  installPage.includes('message-edit') && installPage.includes('install.scriptable')
+  && installPage.includes('install.notScriptable') && installPage.includes('install.note.message-edit'))
+check('it states the trade-off of both install routes',
+  installPage.includes('install.mode.script.pros') && installPage.includes('install.mode.script.cons')
+  && installPage.includes('install.mode.agent.pros') && installPage.includes('install.mode.agent.cons'))
+check('the scripted route offers start and cancel, and claims no progress yet',
+  installPage.includes('install.start') && installPage.includes('install.cancel')
+  && installPage.includes('install.stepBackend') && !installPage.includes('install.result.running'))
+// The agent section itself only renders once that mode is picked, which SSR cannot do;
+// its wording lives in the locale table and is covered by the mode cards above.
+const jobFixture: InstallJob = {
+  backendId: 'message-edit',
+  phase: 'running',
+  steps: [{ id: 'resolve', state: 'done' }, { id: 'install', state: 'running' }],
+  log: [],
+  startedAt: 1,
+}
+check('every step state and verdict has its own words',
+  stepMark('done', t).includes('install.stepDone') && stepMark('running', t).includes('install.stepRunning')
+  && stepMark('pending', t).includes('install.stepPending') && stepMark('failed', t).includes('install.stepFailed')
+  && jobVerdict(jobFixture, t).includes('install.result.running')
+  && jobVerdict({ ...jobFixture, phase: 'cancelled' }, t).includes('install.result.cancelled')
+  && jobVerdict({ ...jobFixture, phase: 'failed', error: 'boom' }, t).includes('boom'))
+// The prompt has to send the agent to the real instructions, and must not encourage it
+// to fake success on a backend this repository never verified.
+const verifiedPrompt = installPromptFor('message-edit', '/repo')
+const unverifiedPrompt = installPromptFor('msg-edit', '/repo')
+check('the agent prompt names the backend and points at the real instructions',
+  verifiedPrompt.includes('message-edit') && verifiedPrompt.includes('/repo/README.md') && verifiedPrompt.includes('/repo'))
+check('the prompt for an unverified backend says so instead of promising success',
+  unverifiedPrompt.includes('从未安装') && unverifiedPrompt.includes('不要伪造成功') && !unverifiedPrompt.includes('唯一验证过'))
 check('no render path threw', !rendered.some(markup => markup.includes('__THREW__')))
 
 // Effect-only regressions: the SSR checks above do not run the view's effects.
