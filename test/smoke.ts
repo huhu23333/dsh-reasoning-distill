@@ -1159,6 +1159,18 @@ const branchRecord37a = await store37a.load('session-idle-branch')
 check('the branch inherits the ledger so its panel reports the compression it was cut from',
   branchRecord37a.entries.length === 1 && branchRecord37a.entries[0]?.id === (await store37a.load(s37a.id)).entries[0]?.id,
   JSON.stringify({ branchEntries: branchRecord37a.entries.length }))
+// A second hand-off must carry the first one's rewrite forward: the newest branch
+// inherits the rewritten history, so that entry stays in force there instead of reading
+// as applied in an ancestor.
+await (engine37a as unknown as { carryLedgerToBranch(source: string, branch: string): Promise<void> })
+  .carryLedgerToBranch('session-idle-branch', 'session-idle-branch-2')
+const secondRecord37a = await store37a.load('session-idle-branch-2')
+const secondReport37a = buildReport('session-idle-branch-2', secondRecord37a, cfg10 as never)
+check('a branch copied again keeps the inherited rewrite in force',
+  secondRecord37a.entries[0]?.handoff?.branchId === 'session-idle-branch-2'
+  && secondRecord37a.entries[0]?.id === branchRecord37a.entries[0]?.id
+  && secondReport37a.succeeded === 1,
+  JSON.stringify({ handoff: secondRecord37a.entries[0]?.handoff, succeeded: secondReport37a.succeeded }))
 // The rewrite is in force in the branch, not in the conversation that keeps its own
 // pre-compression history: that one counts an attempt, the branch counts the success.
 const sourceReport37a = buildReport(s37a.id, await store37a.load(s37a.id), cfg10 as never)

@@ -734,7 +734,16 @@ export class ReasoningDistillEngine {
       await this.store.update(branchId, (record) => {
         record.epoch = source.epoch
         record.countedThroughSeq = source.countedThroughSeq
-        record.entries = source.entries.map(entry => ({ ...entry }))
+        record.entries = source.entries.map(entry => ({
+          ...entry,
+          // A rewrite handed off to *this* source is in force in the copy too: the copy
+          // inherits the rewritten history. Re-point its destination, or the copy reads
+          // it as applied elsewhere and stops substituting it — which is what happens on
+          // every hand-off after the first.
+          ...entry.handoff?.state === 'created' && entry.handoff.branchId === sourceId
+            ? { handoff: { ...entry.handoff, branchId } }
+            : {},
+        }))
       })
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: branch %s could not inherit the ledger: %o', branchId, error)
