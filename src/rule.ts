@@ -11,45 +11,6 @@
 import type { DistillRoute, ModelRule } from './config.ts'
 
 /** The slice of configuration that rule resolution reads. */
-/**
- * Fill the block-size limits of one stored rule that predates them.
- *
- * They used to live at the top level, so a document saved before the move still
- * carries the values there; a layer that never mentions them must inherit those
- * rather than silently jump to the built-in default.
- *
- * Only a real ceiling is inherited. The schema declares the retired limits with
- * a default of `0`, so every live document carries that key whether or not its
- * user ever touched it — treating that `0` as a value would freeze "no ceiling"
- * into a layer that should have kept inheriting a ceiling stated somewhere else.
- * @param rule - one stored rule layer.
- * @param legacy - the retired top-level limits, when the document still has them.
- * @returns the layer with the limits resolved.
- */
-export function withLimitDefaults(
-  rule: RuleOverride,
-  legacy: { maxInputChars?: number; maxOutputChars?: number },
-): RuleOverride {
-  const resolved: RuleOverride = { ...rule }
-  if (!Object.hasOwn(rule, 'maxInputChars') && isCeiling(legacy.maxInputChars)) {
-    resolved.maxInputChars = legacy.maxInputChars
-  }
-  if (!Object.hasOwn(rule, 'maxOutputChars') && isCeiling(legacy.maxOutputChars)) {
-    resolved.maxOutputChars = legacy.maxOutputChars
-  }
-  return resolved
-}
-
-/**
- * Whether a retired top-level limit states a preference rather than the
- * schema's own "no ceiling" default.
- * @param value - the stored legacy value, if any.
- * @returns true when the value is a ceiling the user could have meant.
- */
-function isCeiling(value: number | undefined): value is number {
-  return value !== undefined && value > 0
-}
-
 export interface RuleSource {
   defaultRule: { get(): RuleOverride | undefined }
   models: { get(): Record<string, RuleOverride> | undefined }
