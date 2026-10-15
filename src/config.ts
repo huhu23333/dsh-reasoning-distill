@@ -7,7 +7,7 @@
 import type { Volatile } from '@deepseek-ai/cosmokit'
 import z from '@deepseek-ai/schemastery'
 
-import { legacyOneShotSwitch, mergeRule, withKindDefaults, withLimitDefaults, type RuleOverride, type RuleSource } from './rule.ts'
+import { legacyOneShotSwitch, mergeRule, withKindDefaults, type RuleOverride, type RuleSource } from './rule.ts'
 
 /** One API price bucket, in currency units per million tokens. */
 export interface PriceBucket {
@@ -302,9 +302,15 @@ export function resolveRule(model: string, config: RuleSource): ModelRule {
     ...config.maxInputChars?.get() === undefined ? {} : { maxInputChars: config.maxInputChars.get() as number },
     ...config.maxOutputChars?.get() === undefined ? {} : { maxOutputChars: config.maxOutputChars.get() as number },
   }
+  // The retired top-level limits are the LOWEST layer, below the built-in rule:
+  // the stored layers above are sparse, so injecting the legacy value into them
+  // would let it — including the schema's own `0` default — shadow a ceiling the
+  // user set in the default rule or on one model. Sitting underneath, it still
+  // applies whenever no stored layer states a ceiling, which is what a document
+  // saved before the move relies on.
   return mergeRule(
-    DEFAULT_RULE,
-    withLimitDefaults(withKindDefaults(config.defaultRule.get() ?? {}, legacy), limits),
-    withLimitDefaults(withKindDefaults(config.models.get()?.[model] ?? {}, legacy), limits),
+    { ...DEFAULT_RULE, ...limits },
+    withKindDefaults(config.defaultRule.get() ?? {}, legacy),
+    withKindDefaults(config.models.get()?.[model] ?? {}, legacy),
   )
 }

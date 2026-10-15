@@ -25,8 +25,13 @@ const { registerRoutes } = await import('../src/route.ts')
 const { HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE } = await import('../src/shared.ts')
 const { InstallRunner } = await import('../src/install.ts')
 const { INSTALLABLE_BACKENDS, INSTALL_STEPS } = await import('../src/install-shared.ts')
-const { DEFAULT_RULE } = await import('../src/config.ts')
+const { DEFAULT_RULE, resolveRule } = await import('../src/config.ts')
 const { FALLBACK_RULE } = await import('../src/rule.ts')
+
+// Declared before the first `check` call below: the counter is read by `check`
+// itself, and a failing assertion near the top of the file must report as a FAIL
+// line rather than as a temporal-dead-zone reference error.
+let failures = 0
 
 // The panel's fallback rule and the host's default rule must stay identical: a panel
 // that renders different defaults than the engine applies is how a setting silently
@@ -42,6 +47,51 @@ check('the shipping defaults impose neither a distillation timeout nor an input 
 const { DEFAULT_ENABLED } = await import('../src/config.ts')
 check('a fresh install distils nothing until the master switch is turned on',
   DEFAULT_ENABLED === false, JSON.stringify({ DEFAULT_ENABLED }))
+
+/**
+ * Live-config shim for the pure rule resolver: plain getters over a stored
+ * document, so the retired-limit ordering is pinned without an engine, a
+ * session object or anything on disk.
+ */
+function ruleConfig(document: {
+  defaultRule?: Record<string, unknown>
+  models?: Record<string, Record<string, unknown>>
+  maxInputChars?: number
+  maxOutputChars?: number
+}): never {
+  return {
+    defaultRule: { get: () => document.defaultRule ?? {} },
+    models: { get: () => document.models ?? {} },
+    ...document.maxInputChars === undefined ? {} : { maxInputChars: { get: () => document.maxInputChars } },
+    ...document.maxOutputChars === undefined ? {} : { maxOutputChars: { get: () => document.maxOutputChars } },
+  } as never
+}
+
+// The schema materializes the retired top-level limits as `0` even in a document
+// whose user never set them. While that `0` was injected into the stored rule
+// layers it sat ABOVE them, so a ceiling the user set in the default rule never
+// reached a model without its own entry — the panel showed one value and the
+// engine applied another. The legacy value is a bottom fallback and nothing else.
+const explicitCeilings = resolveRule('any-model', ruleConfig({
+  defaultRule: { maxInputChars: 1000, maxOutputChars: 2000 },
+  maxInputChars: 0,
+  maxOutputChars: 0,
+}))
+check('a ceiling set in the default rule wins over the schema-default legacy 0',
+  explicitCeilings.maxInputChars === 1000 && explicitCeilings.maxOutputChars === 2000,
+  JSON.stringify({ maxInputChars: explicitCeilings.maxInputChars, maxOutputChars: explicitCeilings.maxOutputChars }))
+check('a model rule wins over the default rule and the legacy fallback',
+  resolveRule('any-model', ruleConfig({
+    defaultRule: { maxInputChars: 1000 },
+    models: { 'any-model': { maxInputChars: 500 } },
+    maxInputChars: 0,
+  })).maxInputChars === 500)
+check('a rule that lifts the ceiling wins over a legacy fallback',
+  resolveRule('any-model', ruleConfig({ defaultRule: { maxInputChars: 0 }, maxInputChars: 1000 })).maxInputChars === 0)
+const legacyOnly = resolveRule('any-model', ruleConfig({ maxInputChars: 1000, maxOutputChars: 1500 }))
+check('a legacy-only top-level ceiling still applies where no rule states one',
+  legacyOnly.maxInputChars === 1000 && legacyOnly.maxOutputChars === 1500,
+  JSON.stringify({ maxInputChars: legacyOnly.maxInputChars, maxOutputChars: legacyOnly.maxOutputChars }))
 
 /** Minimal in-memory session. */
 class FakeSession {
@@ -199,7 +249,6 @@ function makeConfig(overrides: Record<string, unknown> = {}): never {
   } as never
 }
 
-let failures = 0
 /** Assert one condition. */
 function check(label: string, condition: boolean, detail = ''): void {
   if (condition) {
@@ -219,6 +268,8 @@ check('Chinese- and English-heavy estimates use the supplied 0.6/0.3 token ratio
 const persisted = new Map<string, FakeSession['log']>()
 const auditSessions = new Map<string, FakeSession>()
 const auditWriters = new Map<string, { flush(): Promise<void> }>()
+/** How many times each audit writer's handle was released. */
+const auditCloses = new Map<string, number>()
 const auditHandlers = new Map<string, Function[]>()
 const auditLlm = { ...fakeLlm, calls: 0 }
 const auditCtx = { ...ctx, llm: auditLlm,
@@ -240,7 +291,7 @@ const auditCtx = { ...ctx, llm: auditLlm,
           const session = auditSessions.get(header.id)
           if (session !== undefined) persisted.set(header.id, [...session.log])
         },
-        async close() {},
+        async close() { auditCloses.set(header.id, (auditCloses.get(header.id) ?? 0) + 1) },
       }
       auditWriters.set(header.id, handle)
       return handle
@@ -282,6 +333,15 @@ await settleFor(async () => persisted.get(auditedEntry?.distill.sessionId ?? '')
 const persistedAudit = persisted.get(auditedEntry?.distill.sessionId ?? '')
 const reopenedAudit = persistedAudit === undefined ? undefined : new FakeSession(auditedEntry!.distill.sessionId, { id: auditedEntry!.distill.sessionId, cwd: '/tmp' })
 for (const event of persistedAudit ?? []) reopenedAudit!.append(event.type, event.data)
+// A compression session is written once and then settled, so its durable writer
+// must be released at that settle — one handle per compression held until unload
+// is a leak that grows with every distillation — and released exactly once, since
+// a host also sweeps at unload.
+const auditedWriterId = auditedEntry?.distill.sessionId ?? ''
+await settleFor(async () => (auditCloses.get(auditedWriterId) ?? 0) > 0)
+check('a settled compression session releases its durable writer, exactly once',
+  auditCloses.get(auditedWriterId) === 1,
+  JSON.stringify({ sessionId: auditedWriterId, closes: auditCloses.get(auditedWriterId) ?? 0 }))
 let reportHandler: ((request: Request) => Promise<Response>) | undefined
 let installHandler: ((request: Request) => Promise<Response>) | undefined
 const coldSessions = new Map([[audited.id, audited]])

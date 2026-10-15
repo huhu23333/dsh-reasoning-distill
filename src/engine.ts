@@ -96,6 +96,15 @@ interface DistillOutcome {
 }
 
 /**
+ * Releases the durable writer a compression session claimed.
+ *
+ * Idempotent by contract: the engine releases a settled session's writer, and
+ * the plugin's unload sweep releases whatever is left, so the same writer can be
+ * released twice.
+ */
+export type CompressionWriterRelease = () => Promise<void>
+
+/**
  * Owns every session-scoped effect of this plugin.
  */
 export class ReasoningDistillEngine {
@@ -187,7 +196,18 @@ export class ReasoningDistillEngine {
    * Claims a durable log writer for a freshly created compression session, once
    * a persistence backend is present. @see ReasoningDistillEngine.usePersistence
    */
-  private attachWriter: ((session: Session) => Promise<void>) | undefined
+  private attachWriter: ((session: Session) => Promise<CompressionWriterRelease | void>) | undefined
+
+  /**
+   * The release of each settled compression session's durable writer, keyed by
+   * that session's id.
+   *
+   * A compression session is written once and then finished or failed; after
+   * that nothing appends to it, so its writer must not stay claimed for the life
+   * of the process. The entry is dropped by the release itself, which makes a
+   * settle that arrives twice a no-op. @see releaseCompressionWriter
+   */
+  private readonly compressionWriters = new Map<string, CompressionWriterRelease>()
 
   /**
    * Whether this engine still rewrites prompts. Unloading flips it off instead
@@ -349,9 +369,17 @@ export class ReasoningDistillEngine {
 
   /**
    * Register the durable-writer hook for compression sessions.
-   * @param attach - claims a write handle for one freshly created session.
+   *
+   * The hook may return the release for the writer it just claimed. A
+   * compression session is written once and then settled, so returning the
+   * release is what lets the engine hand the handle back at that point instead
+   * of holding one open per compression for the whole life of the process. A
+   * host (or test double) that returns nothing keeps the unload-time sweep as
+   * the only release, which is what every writer used to get.
+   * @param attach - claims a write handle for one freshly created session and
+   *   returns its release, when the backend exposes one.
    */
-  usePersistence(attach: (session: Session) => Promise<void>): void {
+  usePersistence(attach: (session: Session) => Promise<CompressionWriterRelease | void>): void {
     this.attachWriter = attach
   }
 
@@ -1920,6 +1948,8 @@ export class ReasoningDistillEngine {
     // buy nothing.
     if (abandonedNow()) {
       this.ctx.logger.warn('reasoning-distill: not starting a distillation for %s: the wait bound already expired', target.model)
+      // Nothing will settle this session, so its writer has to come back here.
+      this.releaseCompressionWriter(opened.id)
       return
     }
     // The three shapes an attempt can be recorded in; the audit-link marker needs
@@ -2313,7 +2343,10 @@ export class ReasoningDistillEngine {
       // claiming that an unpersisted session will survive a restart.
       if (this.attachWriter !== undefined) {
         try {
-          await this.attachWriter(created)
+          const release = await this.attachWriter(created)
+          // Remembered per session id: the session is settled exactly once, and
+          // that settle is where the claimed handle is handed back.
+          if (typeof release === 'function') this.compressionWriters.set(id, release)
           durable = true
         } catch (error: unknown) {
           this.ctx.logger.warn('reasoning-distill: audit session %s stays in-memory only: %o', id, error)
@@ -2344,7 +2377,11 @@ export class ReasoningDistillEngine {
   private failCompressionSession(sessionId: string, reason: string, ownerId: string, entryId: string, origin: number): void {
     if (sessionId === '') return
     const session = this.ctx.sessions.get(sessionId as SessionId)
-    if (session === undefined) return
+    if (session === undefined) {
+      // Nothing can append to it any more either, so the writer is still due back.
+      this.releaseCompressionWriter(sessionId)
+      return
+    }
     try {
       session.append('step/end', { turn: 1, step: 1 })
       session.append('turn/end', {
@@ -2354,12 +2391,13 @@ export class ReasoningDistillEngine {
       void this.ctx.sessions.flush(session).catch((error: unknown) => {
         this.ctx.logger.warn('reasoning-distill: failed-compression session %s did not persist: %o', session.id, error)
         void this.markAuditUndurable(ownerId, entryId, origin)
-      })
+      }).finally(() => { this.releaseCompressionWriter(sessionId) })
     } catch (error: unknown) {
       // The append itself can fail (a writer that rejects mid-stream): the audit
       // link is then no more durable than a failed flush, so say so too.
       this.ctx.logger.warn('reasoning-distill: could not settle a failed compression session: %o', error)
       void this.markAuditUndurable(ownerId, entryId, origin)
+      this.releaseCompressionWriter(sessionId)
     }
   }
 
@@ -2367,7 +2405,10 @@ export class ReasoningDistillEngine {
   private finishCompressionSession(sessionId: string, text: string, provider: string, model: string, ownerId: string, entryId: string, origin: number): void {
     if (sessionId === '') return
     const session = this.ctx.sessions.get(sessionId as SessionId)
-    if (session === undefined) return
+    if (session === undefined) {
+      this.releaseCompressionWriter(sessionId)
+      return
+    }
     try {
       session.append('assistant/message', {
         turn: 1,
@@ -2380,14 +2421,35 @@ export class ReasoningDistillEngine {
       }, { surfaceOp: 'append' })
       session.append('step/end', { turn: 1, step: 1 })
       session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
+      // Released only once the flush has settled: a writer handed back before its
+      // last events drained is exactly how an audit record goes missing.
       void this.ctx.sessions.flush(session).catch((error: unknown) => {
         this.ctx.logger.warn('reasoning-distill: audit session %s did not persist: %o', session.id, error)
         void this.markAuditUndurable(ownerId, entryId, origin)
-      })
+      }).finally(() => { this.releaseCompressionWriter(sessionId) })
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not settle a compression session: %o', error)
       void this.markAuditUndurable(ownerId, entryId, origin)
+      this.releaseCompressionWriter(sessionId)
     }
+  }
+
+  /**
+   * Hand back the durable writer a settled compression session claimed.
+   *
+   * One handle per compression held until unload is a leak that grows with every
+   * distillation, and nothing appends to a compression session after it is
+   * finished or failed. The map entry is removed before the release runs, so a
+   * second settle (or the unload sweep) cannot release the same writer twice.
+   * @param sessionId - the settled compression session.
+   */
+  private releaseCompressionWriter(sessionId: string): void {
+    const release = this.compressionWriters.get(sessionId)
+    if (release === undefined) return
+    this.compressionWriters.delete(sessionId)
+    void release().catch((error: unknown) => {
+      this.ctx.logger.warn('reasoning-distill: could not release the writer of audit session %s: %o', sessionId, error)
+    })
   }
 }
 

@@ -16,7 +16,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 
 import { Config, resolveRule } from './config.ts'
 import type { Config as PluginConfig } from './config.ts'
-import { ReasoningDistillEngine } from './engine.ts'
+import { ReasoningDistillEngine, type CompressionWriterRelease } from './engine.ts'
 import { InstallRunner, installerScript, scriptedSpawner } from './install.ts'
 import { registerRoutes } from './route.ts'
 import { SETTINGS_NS } from './shared.ts'
@@ -87,12 +87,25 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const runner = new InstallRunner(scriptedSpawner(installerScript()))
   registerRoutes(ctx, config, store, engine, runner)
   ctx.effect(() => () => { runner.cancel() })
-  // The handle owns this session's writer until disposal; registering this
-  // callback synchronously prevents the first compression racing the writer.
-  const handles: Array<{ close?: () => Promise<void> }> = []
-  ctx.effect(() => async () => { for (const handle of handles.splice(0)) await handle.close?.() })
+  // The handle owns this session's writer until it is released. Registering this
+  // callback synchronously prevents the first compression racing the writer; the
+  // engine releases the writer when its compression session settles, and this
+  // sweep releases whatever is left at unload. A release removes itself from the
+  // set, so a settled writer is neither closed twice nor kept reachable through
+  // its own closure.
+  const releases = new Set<CompressionWriterRelease>()
+  ctx.effect(() => async () => { for (const release of [...releases]) await release() })
   engine.usePersistence(async (session) => {
-    handles.push(await persistence.create(session.header))
+    const handle = await persistence.create(session.header)
+    const release = async (): Promise<void> => {
+      // Dropping the registration IS the idempotence check: a second release
+      // finds nothing left to do, whether it comes from the engine or from the
+      // unload sweep above.
+      if (!releases.delete(release)) return
+      await handle.close?.()
+    }
+    releases.add(release)
+    return release
   })
   // This plugin ships its own Settings page, so the generic schema form is off.
   // The settings service is part of the host shell and ships no standalone types
