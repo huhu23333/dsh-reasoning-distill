@@ -104,13 +104,23 @@ export function backendOptionsVisible(id: string): boolean {
 }
 
 /**
- * Whether the master switch may be on: it needs a backend to apply the result.
+ * Whether the master switch may be on: it needs a backend that can apply the result.
+ *
+ * A backend that is unavailable is as unusable as an unknown id: its plugin was uninstalled but
+ * the stored selection still names it, and leaving the switch openable would promise a hand-off
+ * that cannot happen. The caller passes what its probe saw; an unanswered probe (undefined) must
+ * NOT lock anything, or the first render of a healthy profile would grey the switch out.
  * @param backend - the stored backend id.
  * @param enabled - the stored master switch.
+ * @param installed - whether the selected backend answered its probe; undefined while unknown.
  * @returns the switch the panel should show and save.
  */
-export function masterSwitchState(backend: string, enabled: boolean): { checked: boolean; locked: boolean } {
-  const locked = backendById(backend) === undefined
+export function masterSwitchState(
+  backend: string,
+  enabled: boolean,
+  installed?: boolean,
+): { checked: boolean; locked: boolean } {
+  const locked = backendById(backend) === undefined || installed === false
   return { checked: locked ? false : enabled, locked }
 }
 

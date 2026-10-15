@@ -14,7 +14,7 @@
 
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { FALLBACK_RULE, mergeRule, withKindDefaults, withLimitDefaults, type RuleOverride, type RuleSource } from '../rule.ts'
-import { backendById } from '../backends.ts'
+import { backendById, backendInstalled, masterSwitchState, type ProbeAnswer, type RewriteBackend } from '../backends.ts'
 import { entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
 
 /** Sparse per-model rule as stored, matching what the host schema accepts. */
@@ -129,6 +129,53 @@ export {
   REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, masterSwitchState, nextBackend, rewriteRequest,
 } from '../backends.ts'
 export type { ProbeAnswer, RewriteBackend } from '../backends.ts'
+
+/**
+ * Whether a stored master switch must be written back as off.
+ *
+ * A locked switch is shown off, so leaving the stored value on would show one thing and run
+ * another: the engine reads the stored value, and a backend that cannot apply anything would keep
+ * attempting a hand-off that fails. Both an unknown id and a backend the probe reports missing
+ * lock it.
+ * @param backend - the stored backend id.
+ * @param enabled - the stored master switch.
+ * @param installed - what the probe saw; undefined while it has not answered.
+ * @returns true when the stored value has to be turned off to match the locked switch.
+ */
+export function forcesMasterOff(backend: string, enabled: boolean, installed?: boolean): boolean {
+  return masterSwitchState(backend, enabled, installed).locked && enabled
+}
+
+/**
+ * Ask one backend whether it is installed, the way the chooser's table does.
+ *
+ * The same rule the panel's checklist uses, in one place so the master switch can ask about the
+ * selected backend without knowing the chooser's table: probe the backend's own path and a sibling
+ * path that cannot exist, and treat only a *different* answer as proof the backend replied.
+ * @param backend - registry entry to probe.
+ * @returns whether the backend answered as itself; false when the request itself failed.
+ */
+export async function backendReachable(backend: RewriteBackend): Promise<boolean> {
+  const probe = async (path: string): Promise<ProbeAnswer> => {
+    const response = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(backend.probe.body),
+    })
+    return {
+      status: response.status,
+      contentType: response.headers.get('content-type'),
+      body: (await response.text()).slice(0, 200),
+    }
+  }
+  try {
+    const answer = await probe(backend.probe.path)
+    const absent = await probe(backend.probe.path + '-absent')
+    return backendInstalled(answer, absent)
+  } catch {
+    return false
+  }
+}
 
 /** Get this tab's storage without letting a blocked property getter crash the panel. */
 export function availableSessionStorage(source: Pick<Window, 'sessionStorage'> = window): Storage | undefined {

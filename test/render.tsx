@@ -14,7 +14,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, claimRewriteAttempt, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, claimRewriteAttempt, forcesMasterOff, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
 import { installPromptFor, type InstallJob } from '../src/install-shared.ts'
@@ -228,6 +228,17 @@ check('no backend locks the master switch off', masterSwitchState('', true).lock
 check('a selected backend unlocks it and keeps the user value',
   !masterSwitchState('message-edit', true).locked && masterSwitchState('message-edit', true).checked === true)
 check('and an uninstalled/unknown id does not unlock it', masterSwitchState('nope', true).locked)
+// Removing the plugin leaves the selection in storage, so what the *probe* saw has to decide.
+check('a selected backend the probe reports missing locks the switch off',
+  masterSwitchState('msg-edit', true, false).locked && masterSwitchState('msg-edit', true, false).checked === false)
+check('an answered probe for an installed backend keeps the switch openable',
+  !masterSwitchState('msg-edit', true, true).locked && masterSwitchState('msg-edit', true, true).checked === true)
+check('a probe that has not answered yet locks nothing', !masterSwitchState('msg-edit', true).locked)
+// A locked switch shows off, so the stored value has to follow it into storage.
+check('a stored on switch is written back off when its backend is missing',
+  forcesMasterOff('msg-edit', true, false) && forcesMasterOff('', true) && forcesMasterOff('nope', true))
+check('and a usable backend leaves the stored value alone',
+  !forcesMasterOff('message-edit', true, true) && !forcesMasterOff('msg-edit', false, false))
 // Requests: branch backend needs seq + block index, in-place backend needs the message id.
 const target = { targetSeq: 12, targetMessageId: 'm-12', targetBlockIndex: 2 }
 const branchCall = rewriteRequest('message-edit', 'session-1', target, 'short')

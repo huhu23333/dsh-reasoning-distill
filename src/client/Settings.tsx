@@ -6,7 +6,7 @@ import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
+  REWRITE_BACKENDS, backendById, backendInstalled, backendReachable, backendOptionsVisible, forcesMasterOff, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
   type ProbeAnswer,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
@@ -313,6 +313,30 @@ export function ReasoningDistillSettings({ form, t }: Props) {
     } catch { setState('failure') }
   }
 
+  // Probed availability of the *selected* backend: a backend whose plugin was removed stays
+  // selected in storage, and the switch must follow the probe rather than the stored id. Declared
+  // above the loading return -- hooks may never follow an early return, or the panel would crash
+  // on the transition from loading to ready and render nothing at all.
+  const selectedBackendId = draft?.rewriteBackend
+  const [selectedReachable, setSelectedReachable] = useState<boolean | undefined>(undefined)
+  useEffect(() => {
+    const selected = selectedBackendId === undefined ? undefined : backendById(selectedBackendId)
+    if (selected === undefined) {
+      setSelectedReachable(undefined)
+      return
+    }
+    let alive = true
+    void backendReachable(selected).then(reachable => { if (alive) setSelectedReachable(reachable) })
+    return () => { alive = false }
+  }, [selectedBackendId])
+  // A switch locked because its backend cannot apply anything must not stay on in storage: the
+  // panel would show off while the engine kept attempting a hand-off that fails.
+  useEffect(() => {
+    if (draft == null) return
+    if (!forcesMasterOff(draft.rewriteBackend, draft.enabled, selectedReachable)) return
+    setDraft(current => current == null ? current : { ...current, enabled: false })
+  }, [draft, selectedReachable])
+
   if (snapshot.status === 'loading' || !draft) return <div className={css.page}>{t('settings.loading')}</div>
   const writable = snapshot.status === 'ready' && snapshot.writable
   // Only what the user added is listed; a configured id that the catalog no
@@ -321,7 +345,7 @@ export function ReasoningDistillSettings({ form, t }: Props) {
   const priceIds = Object.keys(draft.prices)
   const resolveModel = (id: string): CatalogModel =>
     (catalog?.models ?? []).find(model => model.id === id) ?? { provider: '', id, name: id, reasoningEfforts: [] }
-  const master = masterSwitchState(draft.rewriteBackend, draft.enabled)
+  const master = masterSwitchState(draft.rewriteBackend, draft.enabled, selectedReachable)
   const ruleModels = ruleIds.map(resolveModel)
   const priceModels = priceIds.map(resolveModel)
   // Exactly what the engine will resolve, so the panel cannot show a rule the
