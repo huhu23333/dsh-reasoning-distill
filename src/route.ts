@@ -1,5 +1,6 @@
 /**
- * Host↔browser transport: two exact Fetch routes on the shared `/api` channel.
+ * Host↔browser transport: the plugin's exact Fetch routes on the shared `/api` channel
+ * (report, install, catalog and hand-off — see `registerRoutes`).
  * @module dsh-reasoning-distill/route
  */
 
