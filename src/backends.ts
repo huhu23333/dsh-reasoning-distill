@@ -43,20 +43,32 @@ export const REWRITE_BACKENDS: readonly RewriteBackend[] = [
   },
 ]
 
+/** What one probe request saw; two of these are compared, so it is only the shape. */
+export interface ProbeAnswer {
+  status: number
+  contentType: string | null
+  /** Body text; these probes answer with a few words at most. */
+  body: string
+}
+
 /**
  * Whether a probe response proves the backend is installed.
  *
- * A missing route is answered by the web server itself, while an installed
- * backend answers even its own refusals (unknown session, bad body) with the
- * JSON envelope of its API. `404` alone therefore cannot decide: the backends
- * use it for "no such session" too.
- * @param status - probe status code.
- * @param contentType - probe content type, when the response carried one.
- * @returns true when the backend answered as an API.
+ * A missing route is answered by the web server, not by the backend — and measured against
+ * a live host, its two shapes are `404` for some paths and an empty-bodied `405` for
+ * others, while an absent `/api/*` route is stopped earlier by the shell's own
+ * `401 unauthorized`. Status codes alone therefore prove nothing, and so does JSON alone:
+ * the caller probes a sibling path that cannot exist and treats an identical answer as
+ * "not installed", whatever that answer happens to be. Anything different means the
+ * backend itself replied — including its own refusals (unknown session, bad body).
+ * @param answer - the backend path's answer.
+ * @param baseline - an impossible sibling path's answer.
+ * @returns true when the backend answered as itself.
  */
-export function backendInstalled(status: number, contentType: string | null): boolean {
-  if (status !== 404) return true
-  return (contentType ?? '').toLowerCase().includes('application/json')
+export function backendInstalled(answer: ProbeAnswer, baseline: ProbeAnswer): boolean {
+  return answer.status !== baseline.status
+    || (answer.contentType ?? '') !== (baseline.contentType ?? '')
+    || answer.body.trim() !== baseline.body.trim()
 }
 
 /**

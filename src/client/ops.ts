@@ -126,7 +126,7 @@ export function messageEditRequest(
 export {
   REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, masterSwitchState, nextBackend, rewriteRequest,
 } from '../backends.ts'
-export type { RewriteBackend } from '../backends.ts'
+export type { ProbeAnswer, RewriteBackend } from '../backends.ts'
 
 /** Get this tab's storage without letting a blocked property getter crash the panel. */
 export function availableSessionStorage(source: Pick<Window, 'sessionStorage'> = window): Storage | undefined {

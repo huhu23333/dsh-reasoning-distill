@@ -7,6 +7,7 @@ import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
   REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
+  type ProbeAnswer,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
 import { InstallBackendPanel } from './InstallBackend.tsx'
@@ -74,17 +75,31 @@ function BackendChooser({ value, onSelect, t }: {
   const [available, setAvailable] = useState<Record<string, boolean>>({})
   useEffect(() => {
     let alive = true
-    for (const backend of REWRITE_BACKENDS) {
-      void fetch(backend.probe.path, {
-        method: backend.probe.method,
+    /** One probe: status, content type and a short body — everything worth comparing. */
+    const probe = async (path: string, body: Record<string, unknown>): Promise<ProbeAnswer> => {
+      const response = await fetch(path, {
+        method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(backend.probe.body),
-      }).then(response => {
-        const installed = backendInstalled(response.status, response.headers.get('content-type'))
-        if (alive) setAvailable(current => ({ ...current, [backend.id]: installed }))
-      }).catch(() => {
-        if (alive) setAvailable(current => ({ ...current, [backend.id]: false }))
+        body: JSON.stringify(body),
       })
+      return {
+        status: response.status,
+        contentType: response.headers.get('content-type'),
+        body: (await response.text()).slice(0, 200),
+      }
+    }
+    for (const backend of REWRITE_BACKENDS) {
+      // A sibling path in the same namespace cannot exist: its answer is what the web
+      // server says for "no such route here", which is the yardstick this backend's own
+      // answer has to differ from. Both are probed with the same body and method.
+      void probe(backend.probe.path, backend.probe.body)
+        .then(async answer => {
+          const absent = await probe(`${backend.probe.path}-absent`, backend.probe.body)
+          if (alive) setAvailable(current => ({ ...current, [backend.id]: backendInstalled(answer, absent) }))
+        })
+        .catch(() => {
+          if (alive) setAvailable(current => ({ ...current, [backend.id]: false }))
+        })
     }
     return () => { alive = false }
   }, [])

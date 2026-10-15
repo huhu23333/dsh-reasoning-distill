@@ -180,10 +180,19 @@ check('three backends are offered: one branching, two in place',
   && backendById('context-shaping')?.kind === 'in-place')
 // Detection must not confuse a backend's own 404 ("no such session") with a
 // missing route: the former answers with its JSON envelope.
-check('a JSON 404 still proves the backend is installed', backendInstalled(404, 'application/json; charset=utf-8'))
-check('a plain 404 means the route is absent', !backendInstalled(404, 'text/html'))
-check('and a 404 without a content type is absent too', !backendInstalled(404, null))
-check('any non-404 answer proves it is installed', backendInstalled(400, null) && backendInstalled(409, 'text/plain'))
+// Measured on a live host: a route that does not exist is answered by the web server —
+// 405 with an empty body for some paths, the shell's own 401 for an absent /api/* one — so
+// the probe compares the backend's answer against a sibling path that cannot exist.
+const absentShell = { status: 405, contentType: null, body: '' }
+const absentApi = { status: 401, contentType: 'text/plain', body: 'unauthorized' }
+check("the shell's own answer for a missing route means the backend is not installed",
+  !backendInstalled(absentShell, absentShell) && !backendInstalled(absentApi, absentApi))
+check('a backend that answers differently — even with its own refusal — is installed',
+  backendInstalled({ status: 404, contentType: 'application/json; charset=utf-8', body: '{"error":"no such session"}' }, absentShell)
+  && backendInstalled({ status: 400, contentType: 'text/plain', body: 'bad body' }, absentShell)
+  && backendInstalled({ status: 200, contentType: 'application/json', body: '{"sessionId":"branch"}' }, absentShell))
+check('an identical answer is still absence, whatever the status', !backendInstalled(absentShell, absentShell)
+  && !backendInstalled({ status: 405, contentType: null, body: ' ' }, absentShell))
 check('an empty or unknown id resolves to no backend',
   backendById('') === undefined && backendById('nope') === undefined)
 // Master switch: locked off with no backend, the user's choice otherwise.

@@ -383,6 +383,11 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 | `msg-edit` | `@moton16/dsh-msg-edit` | ❌ **完全未验证** |
 | `context-shaping` | `zeranhub/dsh-context-shaping` | ❌ **完全未验证** |
 
+**⚠️ message-edit 的已知残缺（选它之前先读）**：它是「**不想给 DSH 打补丁时**的残缺方案」。宿主目前**没有**把运行中的工作交给另一个会话的 API，所以：
+
+- **不支持子代理、团队成员、后台任务**：分支是源会话的副本，而子代理/后台作业在宿主里**绑定创建它的那个会话**（作业的 owner 是活的 Agent，只有它自己的会话能看见；子代理的父关系由 provider 创建时写死，**只有祖先能 interrupt、只有相邻 Agent 能 sendMessage**）→ 分支**既不能接管、也不能指挥或停止它们**。已经在跑的话，默认靠 `skipWhileBusy` 让这种会话**不触发压缩**来回避；真要迁移必须等宿主加 API（例如 `subagents.reparent` / `jobs.reassign`）。
+- 因此它只适合「单会话、不开子代理、不开后台任务」的场景；要做这些事请用**原位编辑**型后端（`msg-edit` / `context-shaping`）——它们改的是同一个会话本身，不存在「工作被留在旧会话」的问题。
+- 另：即使插件被停用，宿主对不存在的路由回的是 **405 空体**（`/api/*` 则是平台自己的 **401 unauthorized**）而不是 404，所以可用性判定必须**跟一个不可能存在的同级路径对比**（`backendInstalled` 已按实测改成这样）——这正是此前「停用了却还能选」的原因。
 **"完全未验证"的具体含义**（不是"可能有点小问题"，而是**极可能完全不能用**）：
 
 - 这两个插件在本仓库里**从未被安装、从未被修补、从未被探测、从未发起过任何一次真实调用**；
@@ -490,6 +495,16 @@ node scripts/scan-session-logs.mjs               # 期望：VALID 全部、INVAL
 
 脚本的失败语义：任一步失败即以 `##FAIL` 结束并保留输出；进度只有成功/失败/已取消三种终态，不会假装成功。
 
+
+**已核实（2026-10-15）**：`msg-edit` 的后端仓库是 GitHub 上的 `moton16/dsh-msg-edit`（MIT，自带预构建 `lib/`），**没有发布到 npm**，只能从 GitHub 装：
+
+```bash
+# 它声明的 peer 是 @deepseek-ai/dsh-base / dsh-web-app ^0.1.0-rc.6，而当前宿主是 0.2.1-alpha.1 → 必须显式接受这个风险
+pnpm dsh plugin --profile web allow-version @moton16/dsh-msg-edit@0.1.0 --dsh-version 0.2.1-alpha.1 --accept-risk
+pnpm dsh plugin --profile web add github:moton16/dsh-msg-edit
+```
+
+好消息：它的客户端产物只 require `react` 与 `@deepseek-ai/dsh-client-ui-primitives`，**不需要** message-edit 那种模块表补丁；端点与我们的映射**完全一致**——`POST /api/msg-edit/rewrite-message {sessionId, messageId, reasoning?}`、`POST /api/msg-edit/get-message {sessionId, messageId}`（另有 `edit-message`/`regenerate` 未使用）。已在临时 profile 里验证能装上。
 ### 若一定要尝试另外两个后端（未验证，失败概率极高）
 
 **本仓库没有它们的可用流程**：既没有验证过的版本，也没有适配过的补丁。只能按下面的思路自行探索，**每一步都可能失败**，而且失败可能是**静默**的（探针通过、实际改写不生效，或写坏会话日志）：
