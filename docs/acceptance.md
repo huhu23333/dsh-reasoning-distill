@@ -27,7 +27,7 @@
 
 | id | 前置插件 | 请求 | 语义 | 谁来调用 |
 |---|---|---|---|---|
-| `message-edit` | `dsh-message-edit`（或 `@yunyv/dsh-message-edit`） | `POST /message-edit {action:'edit', sessionId, eventSeq, blockIndex, text, cascade:'truncate'}` | **另开分支会话**（新版本，原会话不动） | **宿主**（`127.0.0.1:<webServer.port>`，无需浏览器凭据）→ 源 Agent 完成当前回合进入 idle 后才能调用；原回合正常答复 |
+| `message-edit` | `dsh-message-edit`（或 `@yunyv/dsh-message-edit`） | `POST /message-edit {action:'splice', sessionId, eventSeq, blockIndex, text}`（`edit` 会丢工具调用与后续步骤，故不用） | **另开分支会话**（新版本，原会话不动） | **宿主**（`127.0.0.1:<webServer.port>`，无需浏览器凭据）→ 在 `agent/pre-step` 内提交；成功后当前回合被 reject、由新分支接管，失败则原回合正常答复 |
 | `placeholder` | —（无） | —（不发任何请求，`rewriteRequest` 对它返回 undefined） | **无实际内容**：只占住 in-place 那个槽位，将来接真后端时改这一条 | —（无从调用：没有路由、没有插件名，行内显示「占位（尚未实现，不可选）」且恒不可选） |
 
 **安装探测**（界面挂载时对每个**有探针**的后端发一次探针）：**`404` 且响应不是 JSON** 才算"未安装"——已安装的后端连自己的错误（会话不存在、请求体不合法）也是用自己的 JSON 信封回答 404。占位条目没有 `probe`，因此既不发探针也不可能变"已安装"，永远不会被选中。
@@ -156,12 +156,12 @@
 
 ### E. 请求前等待与空闲时分支交接（`agent/pre-step`）
 0. **每个进程一次的启动自检**（在任何规则判定之前，与本次是否触发压缩无关）：按 `<profile>/package.json` 的 `dsh.profile.bundles`（经 `profileContext.dir` 定位）判断存的那个后端还能不能用——只读 `bundles` 不读 `dependencies`，因为后者里的包可能只是装了但没启用、不提供路由；宿主够不到后端路由（`/api/*` 要浏览器凭据，宿主自己问只有 401），所以宿主侧只能看这份清单加上自己的注册表。**用不了**有三种（纯函数 `backendUnusable`）：① 该 id **本版本不认识**（被删掉的后端、别的版本写的值）；② 该 id 是**占位条目**（没有实现，且它那行是禁用的，面板自己清不掉，只有宿主能清）；③ 它登记了插件名而清单里没有。此时：打一条 warn，并**写一次**设置（`settings.update('reasoning-distill', …)`，与面板保存同一条路径、同样落盘）——**清空选定后端 `rewriteBackend: ''`**，总开关仍为开则**同时**写 `enabled: false`，已关则只清空选择（`missingBackendFixup` 纯函数决定这组字段；选中的名字比它依赖的东西活得久）。**读不到清单 → 一律不改配置**（对这个宿主没有任何证据）。「装着但已停用」等同于用不了。自检由 `backendChecked` 保证进程内只跑一次；它排在同步序言（单飞登记与等待上限的计算）之后、本次请求任何规则判定之前。
-1. `await ensureLoaded()`：确保记录可读（读不到则本步不压缩）；有限规则的等待亦有 `timeoutMs + 30 秒` 截止，重入不重新计时，过期后放行原请求并禁止同一挂起门闩迟到启动。
+1. `await ensureLoaded()`：确保记录可读（读不到则本步不压缩）；有限规则的等待也以该规则自己的 `timeoutMs` 为截止（**不加任何宽限**；`ruleBackstopMs()` 取各规则上限的最大值，任一条为 0 即视为不限），重入不重新计时，过期后放行原请求并禁止同一挂起门闩迟到启动。
 2. `await settle()`：**等这次蒸馏彻底结束**（原回合在此期间等待；活动指示器显示原因与已等待时间）。
-3. **分支型后端**：压缩成功后，当前回合不 reject，原请求正常执行并回复用户；等源 Agent `whenIdle()` 后才向后端提交一次非幂等 POST（等待上限 = `branchTimeoutMs`，0=永不超时），历史仍按原目标 `cascade:'truncate'` 截断；下一次请求的 `deriveMessages` 替换与建分支成功与否无关：
-   - **成功** → 记录 `handoff: created` + `branchId`，面板轮询后**自动打开新分支**；原回合既不重排输入，也不追加合成消息。
-   - **失败/拒绝/超时** → 如实记录 `handoff: failed`（或尚未 POST 前等待耗尽时 `skipped`）；不唤醒、不重发用户输入，原会话继续；历史重放替换仍生效。宿主若不暴露 `whenIdle`，**不 POST**，记录 `host agent exposes no whenIdle` 失败原因并清理待办。
-   - **宿主边界，非插件缺陷**：分支 POST 的后端在源 Agent `idle` 时才能调用 `runMaintenance`（`/home/huhu233/otherProject/deepseek-harness/packages/core/agent-loop/src/agent.ts:183-185`），但 `agent/pre-step` 前已 claim 输入（同文件 `:267-277`），期间必然非 idle；`reject` 会封闭当前 turn（`:317-319`），新的驱动必定建立新 turn（`:295-326`）。故旧设计的“先停回合再建分支”不可达；若失败后试图续行，就必然是新 turn 且可能落一条额外用户消息。本方案完全不 reject、重排 inbox 或合成消息，避免这些副作用。idle 到领取 maintenance 之间的 Stop 在宿主层是 no-op（`packages/core/agent/src/runtime-types.ts:176-179`），属于已知宿主边界，非本插件能修复。
+3. **分支型后端**：压缩成功后，在**当前 `agent/pre-step` 内**直接向后端提交一次非幂等 POST（`action:'splice'`，等待上限 = `branchTimeoutMs`，0=永不超时）；下一次请求的 `deriveMessages` 替换与建分支成功与否无关：
+   - **成功** → 记录 `handoff: created` + `branchId`，面板轮询后**自动打开新分支**；当前回合当场 `return {kind:'reject'}`，后续步骤在新分支里带着压缩后的上下文继续（原回合不重排输入、也不追加合成消息）。
+   - **失败/拒绝/超时** → 如实记录 `handoff: failed`（或尚未 POST 前等待耗尽时 `skipped`）；不唤醒、不重发用户输入，**原回合照常继续**；历史重放替换仍生效。另有空闲兜底代码（`scheduleBranchAtIdle`：`whenIdle()` 之后再试一次 POST；宿主不暴露 `whenIdle` 时由 `failMissingIdleAgent` 记原因），但**当前实现里这两个函数都走不到**：`handOffToBranch` 的每个真实失败出口都会先清掉待交接条目，而 `failMissingIdleAgent` 没有任何调用者（见审查台账 B14；属待决策的死代码清理，不是行为差异）。
+   - **宿主边界，非插件缺陷**：分支后端在 `agent/pre-step` 阶段读源会话日志，不需要宿主的 maintenance 阶段，所以分支能在当前回合内就建好——这正是「在 pre-step 内 POST、成功即 reject」这一设计的原因（旧设计「先停回合再建分支」不可达：`runMaintenance` 在源 Agent 非 `idle` 时会直接抛错，`/home/huhu233/otherProject/deepseek-harness/packages/core/agent-loop/src/agent.ts:183-185`）。idle 到领取 maintenance 之间的 Stop 在宿主层是 no-op（`packages/core/agent/src/runtime-types.ts:176-179`），属于已知宿主边界，非本插件能修复。
 4. **就地型后端**（当前只有占位条目，没有实现）：宿主不调（这些端点需要浏览器凭据）→ 由面板在轮询中应用，随后调用 `handoff {cancel:false}` 清标记，**不打断你的回合**（它要发的那次请求已因重放替换而变短）。占位条目发不出请求（`rewriteRequest` 返回 undefined），所以驱动在认领之前就跳过它：既不 POST、也不清标记。
 5. 无待办 → `next()` 正常进入模型调用。
 
@@ -189,9 +189,9 @@
 
 ## 五、第 2 轮评审后的补充契约
 
-**取消优先于请求前等待**：`agent/pre-step` 里的读记录 `ensureLoaded`、等蒸馏 `settle` 都并入宿主中止信号；空闲分支 POST 在当前回合正常结束之后另行进行，绝不把待答用户输入丢在 blocked turn。宿主的信号只在 `agent/pre-step` 返回后才检查，所以插件必须自己把信号并进等待，否则"停止"会排在压缩后面 ✗（第 2 轮评审 high 级发现，已修）。
+**取消优先于请求前等待**：`agent/pre-step` 里的读记录 `ensureLoaded`、等蒸馏 `settle` 都并入宿主中止信号；分支 POST 就在同一个 `agent/pre-step` 内进行，成功即 `{kind:'reject'}` 结束当前回合、由新分支接管，不把待答用户输入丢在 blocked turn。宿主的信号只在 `agent/pre-step` 返回后才检查，所以插件必须自己把信号并进等待，否则"停止"会排在压缩后面 ✗（第 2 轮评审 high 级发现，已修）。
 
-**"卡住"的上限从哪来**：由**该次压缩自己的规则**决定——`timeoutMs > 0` 时蒸馏调用本身在该值处中止，等待再多 30 秒作为"适配器不理会 abort"的兜底；`timeoutMs = 0`（文档语义为"不限"）时**没有自动上限**，但**停止依然随时有效** ✓。
+**"卡住"的上限从哪来**：由**该次压缩自己的规则**决定——`timeoutMs > 0` 时蒸馏调用本身在该值处中止，等待也以**同一 `timeoutMs`** 为上限（`ruleBackstopMs()` 取各规则上限的最大值，**不额外加宽限**，作为"适配器不理会 abort"的兜底）；`timeoutMs = 0`（文档语义为"不限"）时**没有自动上限**，但**停止依然随时有效** ✓。
 
 **会话世代**：会话对象只 attach 一次，但**同一个会话 id 可能再次出现**（清空/重建/重载）。每次 attach 会递增该 id 的**世代号**并清空它的全部状态（`pending`/`inFlight`/`running`/`waitBound`/`applied`/`rawDerive`/`pendingBranch`/`expectRequest`/`blocked`/`storageBroken`）；上一世代仍在跑的压缩在**每次落盘或标记交接前**校验世代号，不符即**放弃写入** ✓。否则旧世代的压缩会让新会话的请求平白等待（`settle` 按 id 前缀匹配 ✗）并把陈旧改写写进新会话记录 ✗。
 
