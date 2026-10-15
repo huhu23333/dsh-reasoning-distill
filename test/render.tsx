@@ -241,9 +241,10 @@ check('the placeholder has no plugin name, so nothing host-side is ever closed d
   backendMissingFrom(backendById('placeholder')?.plugin, active) === false)
 check('no plugin name — no backend, or one this host does not know — closes nothing',
   !backendMissingFrom('', active) && !backendMissingFrom(undefined, active))
-// What the host acts on is the selection, not just the plugin: an id from another build and the
-// placeholder are both unusable, and the placeholder's row is disabled, so the host is the only
-// one that can drop it. No readable profile ⇒ nothing is written, whatever the id is.
+// What the host acts on is the selection, not just the plugin: an id this build does not have
+// (`msg-edit` is the removed backend the live profile still stores) and the placeholder are both
+// unusable, and the placeholder's row is disabled, so the host is the only one that can drop it.
+// No readable profile ⇒ nothing is written, whatever the id is.
 check('a selection this build cannot drive is unusable',
   backendUnusable('msg-edit', active) && backendUnusable('placeholder', active)
   && backendUnusable('message-edit', ['dsh-base']))
