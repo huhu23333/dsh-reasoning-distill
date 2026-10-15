@@ -1716,9 +1716,10 @@ const s64 = new FakeSession('session-busy-64')
 sessions.set(s64.id, s64)
 await fire('session/created', s64)
 // The host's job registry owns background tasks and subagent runs alike; one running job
-// must keep this conversation's compression from triggering at all.
+// *this session owns* must keep its compression from triggering at all. The fixture names the
+// owner because `list(caller)` also returns unowned jobs, which belong to no session.
 const jobsFace64 = ctx as unknown as { jobs?: unknown }
-jobsFace64.jobs = { list: () => [{ status: 'running' }] }
+jobsFace64.jobs = { list: () => [{ status: 'running', owner: s64.id }] }
 await runStep40(engine64, s64, '64a')
 await new Promise<void>(resolve => setTimeout(resolve, 40))
 check('a running background job keeps the compression from triggering',
@@ -1728,6 +1729,15 @@ jobsFace64.jobs = { list: () => [{ status: 'settled' }] }
 await runStep40(engine64, s64, '64b')
 await settleFor(async () => (await store64.load(s64.id)).entries.length === 1)
 check('and it triggers again once that work settles', (await store64.load(s64.id)).entries.length === 1)
+// An unowned job belongs to nobody: the host's own activity predicate drops it for the same
+// question (`packages/jobs/jobs/src/archive-admission.ts`), and every caller may still read or
+// kill it, so a branch leaves nothing behind by compressing here. It must not pause anything.
+jobsFace64.jobs = { list: () => [{ status: 'running' }] }
+await runStep40(engine64, s64, '64c')
+await settleFor(async () => (await store64.load(s64.id)).entries.length === 2)
+check('an unowned job does not pause this conversation',
+  (await store64.load(s64.id)).entries.length === 2,
+  JSON.stringify((await store64.load(s64.id)).entries.map(entry => entry.id)))
 delete jobsFace64.jobs
 console.log('scenario 59b: sparse rules inherit the finite built-in read backstop')
 handlers.clear()

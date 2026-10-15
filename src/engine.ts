@@ -912,18 +912,24 @@ export class ReasoningDistillEngine {
    * Whether this conversation still has background work of its own.
    *
    * The host's job registry owns every background task — bash jobs and subagent runs
-   * alike, keyed by their owning session — so one lookup answers both. A host without
-   * that service is never busy, and a read that fails must not stop compression.
+   * alike, keyed by their owning session — so one lookup answers both. Its `list` also
+   * returns unowned jobs, which belong to nobody: the host's own activity predicate drops
+   * them for the same question, and they stay reachable from any caller, so a branch would
+   * not leave them behind. Counting them would pause every conversation while unrelated
+   * work runs. A host without that service is never busy, and a read that fails must not
+   * stop compression.
    * @param session - conversation being considered.
    * @returns whether work is running under it.
    */
   private busyWithWork(session: Session): boolean {
     if (!this.config.skipWhileBusy.get()) return false
     const jobs = (this.ctx as unknown as { get(key: string): unknown }).get('jobs') as
-      { list?(caller?: unknown): readonly { status?: string }[] } | undefined
+      { list?(caller?: unknown): readonly { status?: string; owner?: string }[] } | undefined
     if (jobs?.list === undefined) return false
+    const sessionId = String(session.id)
     try {
-      return jobs.list(String(session.id)).some(job => job.status === 'running' || job.status === 'stopping')
+      return jobs.list(sessionId).some(job =>
+        job.owner === sessionId && (job.status === 'running' || job.status === 'stopping'))
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not read the job list for %s: %o', session.id, error)
       return false
