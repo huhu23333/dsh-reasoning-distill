@@ -102,7 +102,8 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
   const backends = status?.backends ?? INSTALLABLE_BACKENDS
   const steps = status?.steps ?? INSTALL_STEPS
   const job = status?.job ?? null
-  const running = job?.phase === 'running'
+  // A ##FAIL verdict can arrive before the child exits; only settlement releases it.
+  const running = job !== null && job.endedAt === undefined
   const chosen = backends.find(item => item.id === backendId) ?? backends[0]
 
   /** Ask the host to start the scripted install. */

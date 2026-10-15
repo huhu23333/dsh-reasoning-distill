@@ -82,17 +82,7 @@ function findLogs(dir) {
  * @param wire - the stored `session` record, exactly as it will be written back.
  * @returns `undefined` when the line is one the read path accepts, else why the write is refused.
  */
-function headerLineRefusal(wire) {
-  const required = ['type', 'version', 'id', 'createdAt', 'isSeeded', 'delegationDepth'];
-  const allowed = new Set([...required, 'cwd', 'parentSession', 'origin', 'agentPreset']);
-  const stray = Object.keys(wire).filter(key => !allowed.has(key));
-  if (stray.length > 0) {
-    return `SKIP writing: the physical header line carries ${stray.join(',')} the read path refuses; run repair-header-fields.mjs first (add --line-only when this log also carries event-level defects)`;
-  }
-  const missing = required.filter(key => !(key in wire));
-  if (missing.length > 0) return `SKIP writing: the physical header line lacks ${missing.join(',')}`;
-  return undefined;
-}
+import { headerLineRefusal } from './repair-header-gate.mjs';
 
 /** The reason the host's released-v4 validation refuses this log, or undefined. */
 function formatRejects(raw, events) {

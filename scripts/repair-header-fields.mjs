@@ -68,8 +68,7 @@ try {
 // it loads fine; a check stricter than the reader would refuse a repair the host would accept.
 const known = new Set([...session.KNOWN_SESSION_EVENT_TYPES, 'message-edit/version']);
 
-const required = ['type', 'version', 'id', 'createdAt', 'isSeeded', 'delegationDepth'];
-const allowed = new Set([...required, 'cwd', 'parentSession', 'origin', 'agentPreset']);
+import { requiredHeaderKeys as required, allowedHeaderKeys as allowed, headerLineRefusal } from './repair-header-gate.mjs';
 
 function findLogs(dir) {
   const found = [];
@@ -159,8 +158,9 @@ for (const file of findLogs(root)) {
   const encoded = zlib.zstdCompressSync(Buffer.from([header, ...records.slice(1)].map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8'));
   const candidate = zlib.zstdDecompressSync(encoded).toString('utf8').trim().split('\n').map(line => JSON.parse(line));
   const check = candidate[0];
-  if (Object.keys(check).some(key => !allowed.has(key)) || required.some(key => !(key in check))) {
-    console.log('  ABORT (verification failed)');
+  const headerError = headerLineRefusal(check);
+  if (headerError !== undefined) {
+    console.log(`  ${headerError}`);
     continue;
   }
   // The encode above proves the bytes round-trip and the keys are clean; this is the host's

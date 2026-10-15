@@ -265,7 +265,7 @@ export class ReasoningDistillEngine {
       }
       // A conversation whose running work refused the archive is retried here: its work
       // settling is exactly the moment the host will accept the archive.
-      if (this.pendingArchive.has(session.id)) void this.archiveSuperseded(session.id)
+      if (this.current.get(session.id) === session && this.pendingArchive.has(session.id)) void this.archiveSuperseded(session.id)
     })
     // Await any distillation queued by the previous step before the next request
     // is assembled, so a compression lands before the reasoning would be resent.
@@ -1001,7 +1001,7 @@ export class ReasoningDistillEngine {
         if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
         this.ctx.logger.warn('reasoning-distill: deferred branch failed for %s: %o', session.id, error)
       } finally {
-        this.deferredBranch.delete(session.id)
+        if ((this.generation.get(session.id) ?? 0) === generation) this.deferredBranch.delete(session.id)
       }
     })()
   }
@@ -1054,10 +1054,12 @@ export class ReasoningDistillEngine {
       this.pendingArchive.delete(sessionId)
       return
     }
+    const generation = this.generation.get(sessionId) ?? 0
     try {
       await archive(sessionId)
-      this.pendingArchive.delete(sessionId)
+      if ((this.generation.get(sessionId) ?? 0) === generation) this.pendingArchive.delete(sessionId)
     } catch (error: unknown) {
+      if (!this.active || (this.generation.get(sessionId) ?? 0) !== generation) return
       this.pendingArchive.add(sessionId)
       this.ctx.logger.warn(
         'reasoning-distill: %s is not archived yet (%s); it stays listed until its work ends',
@@ -1618,7 +1620,10 @@ export class ReasoningDistillEngine {
     // built only after the rewrite is in place, or after that compression gave up.
     // The wait is published so the UI can say why a step has not been sent.
     const startedAt = Date.now()
-    this.blocked.set(sessionId, { since: startedAt, reason: blockingReason(session) })
+    const generation = this.generation.get(sessionId) ?? 0
+    const current = (): boolean => this.active && (this.generation.get(sessionId) ?? 0) === generation
+    const indicator = { since: startedAt, reason: blockingReason(session) }
+    this.blocked.set(sessionId, indicator)
     try {
       // Waiting is the contract: the next request is assembled only once the
       // rewrite is in place. A compression whose rule sets a timeout is already
@@ -1643,7 +1648,7 @@ export class ReasoningDistillEngine {
         if (remaining <= 0) {
           // Stop waiting *and* refuse a later adoption: otherwise a finally-launched
           // attempt could reset its own clock and land after the raw request.
-          this.abandoned.add(key)
+          if (current()) this.abandoned.add(key)
           void promise.catch(() => undefined)
           return
         }
@@ -1662,17 +1667,17 @@ export class ReasoningDistillEngine {
         } finally {
           if (timer !== undefined) clearTimeout(timer)
         }
-        if (timedOut || Date.now() >= bound.launchedAt + bound.timeoutMs) this.abandoned.add(key)
+        if (current() && (timedOut || Date.now() >= bound.launchedAt + bound.timeoutMs)) this.abandoned.add(key)
       })
       await this.untilAborted(Promise.all(waits), signal)
-      if (signal?.aborted) {
+      if (signal?.aborted && current()) {
         for (const [key] of mine) this.abandoned.add(key)
       }
-      return signal === undefined || !signal.aborted
+      return current() && (signal === undefined || !signal.aborted)
     } finally {
       // Only clear the indicator this wait published: a successor generation may
       // already have published its own.
-      if (this.blocked.get(sessionId)?.since === startedAt) this.blocked.delete(sessionId)
+      if (this.blocked.get(sessionId) === indicator) this.blocked.delete(sessionId)
     }
   }
 

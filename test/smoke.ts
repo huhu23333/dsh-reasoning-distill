@@ -2089,6 +2089,81 @@ check('a throwing finalize cannot publish its unapproved candidate',
   (await store68.load(id68)).entries.length === 0 && disk68.entries.length === 0,
   JSON.stringify(disk68.entries.map(entry => entry.id)))
 
+console.log('scenario 69: asynchronous cleanup belongs to the session generation that started it')
+handlers.clear()
+const s69 = new FakeSession('session-generation-cleanup-69')
+sessions.set(s69.id, s69)
+let rejectArchive69: (error: Error) => void = () => undefined
+const archiveGate69 = new Promise<void>((_resolve, reject) => { rejectArchive69 = reject })
+const engine69 = new ReasoningDistillEngine(ctx as never, cfg10 as never, new SidecarStore(), () => archiveGate69)
+engine69.start()
+const face69 = engine69 as unknown as {
+  archiveSuperseded(id: string): Promise<void>
+  pendingArchive: Set<string>
+  pendingBranch: Map<string, string>
+  deferredBranch: Set<string>
+  scheduleBranchAtIdle(agent: { whenIdle(): Promise<void> }, session: FakeSession): void
+  settle(session: FakeSession, signal?: AbortSignal): Promise<boolean>
+  inFlight: Map<string, Promise<void>>
+  abandoned: Set<string>
+  blocked: Map<string, { since: number; reason: string }>
+}
+const archive69 = face69.archiveSuperseded(s69.id)
+let idle69: () => void = () => undefined
+face69.pendingBranch.set(s69.id, 'old-entry')
+face69.scheduleBranchAtIdle({ whenIdle: () => new Promise<void>(resolve => { idle69 = resolve }) }, s69)
+const key69 = `${s69.id}:1:1`
+let complete69: () => void = () => undefined
+face69.inFlight.set(key69, new Promise<void>(resolve => { complete69 = resolve }))
+const stop69 = new AbortController()
+const wait69 = face69.settle(s69, stop69.signal)
+const started69 = face69.blocked.get(s69.id)!.since
+const successor69 = new FakeSession(s69.id)
+sessions.set(s69.id, successor69)
+await fire('session/created', successor69)
+face69.pendingBranch.set(s69.id, 'successor-entry')
+face69.deferredBranch.add(s69.id)
+// A timestamp is presentation data, not identity: the successor can start in the same millisecond.
+const successorBlocked69 = { since: started69, reason: 'tool' }
+face69.blocked.set(s69.id, successorBlocked69)
+rejectArchive69(new Error('old generation archive refusal'))
+await archive69
+check('a late archive refusal cannot rearm an archive retry for the successor', !face69.pendingArchive.has(s69.id))
+idle69()
+await new Promise<void>(resolve => setTimeout(resolve, 0))
+check('an obsolete idle waiter cannot clear the successor guard', face69.deferredBranch.has(s69.id))
+stop69.abort()
+await wait69
+check('an obsolete pre-step abort cannot abandon the successor compression key', !face69.abandoned.has(key69))
+check('an obsolete waiter cannot clear a same-millisecond successor indicator', face69.blocked.get(s69.id) === successorBlocked69)
+complete69()
+
+console.log('scenario 70: a failed installer still owns its live child until settlement')
+const children70: Array<{ line: (line: string) => void; exit: (code: number | null) => void; killed: boolean }> = []
+const runner70 = new InstallRunner(() => {
+  const child = { line: (_line: string) => undefined, exit: (_code: number | null) => undefined, killed: false }
+  children70.push(child)
+  return {
+    onLine: handler => { child.line = handler },
+    onExit: handler => { child.exit = handler },
+    kill: () => { child.killed = true },
+  }
+})
+const first70 = runner70.start('message-edit')
+children70[0]!.line('##FAIL verify broken artifact')
+check('a failure marker cannot permit concurrent installer processes', runner70.start('message-edit').ok === false)
+check('a failed but live installer remains cancellable', runner70.cancel() && children70[0]!.killed)
+children70[0]!.exit(1)
+const next70 = runner70.start('message-edit')
+check('restart is permitted after the previous process settled', next70.ok)
+const last70 = children70.at(-1)!
+last70.line('##DONE verify')
+last70.exit(0)
+const ended70 = first70.ok ? JSON.stringify(first70.job) : ''
+children70[0]!.line('##STEP verify')
+children70[0]!.exit(0)
+check('late lines and duplicate exit cannot change a terminal job', first70.ok && JSON.stringify(first70.job) === ended70)
+
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

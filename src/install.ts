@@ -112,7 +112,7 @@ function pendingSteps(): InstallStep[] {
 export class InstallRunner {
   private job: InstallJob | undefined
   private child: InstallProcess | undefined
-  private cancelled = false
+  private readonly cancelled = new WeakSet<InstallJob>()
 
   /**
    * @param spawner - starts the installer child.
@@ -131,7 +131,7 @@ export class InstallRunner {
    * @returns the started job, or why it could not start.
    */
   start(backendId: string): { ok: true; job: InstallJob } | { ok: false; error: string } {
-    if (this.job?.phase === 'running') return { ok: false, error: `已有安装在进行中（${this.job.backendId}）` }
+    if (this.job !== undefined && this.job.endedAt === undefined) return { ok: false, error: `已有安装在进行中（${this.job.backendId}）` }
     const job: InstallJob = {
       backendId,
       phase: 'running',
@@ -140,7 +140,6 @@ export class InstallRunner {
       startedAt: this.now(),
     }
     this.job = job
-    this.cancelled = false
     try {
       const child = this.spawner(backendId)
       this.child = child
@@ -157,8 +156,8 @@ export class InstallRunner {
 
   /** Ask the running installer to stop; the panel sees `cancelled` once it is gone. */
   cancel(): boolean {
-    if (this.job?.phase !== 'running' || this.child === undefined) return false
-    this.cancelled = true
+    if (this.job === undefined || this.job.endedAt !== undefined || this.child === undefined) return false
+    this.cancelled.add(this.job)
     try {
       this.child.kill()
     } catch {
@@ -169,6 +168,7 @@ export class InstallRunner {
 
   /** Fold one output line into the job. */
   private consume(job: InstallJob, line: string): void {
+    if (job.endedAt !== undefined) return
     const marker = /^##(STEP|DONE|FAIL)\s+(\S+)(?:\s+(.*))?$/.exec(line)
     if (marker === null) {
       job.log.push(line)
@@ -200,10 +200,10 @@ export class InstallRunner {
    *
    * Only the job that is still current unregisters its child, and only when this call
    * is the one that ends it. A failed spawn reports `error` first and `close`
-   * afterwards, and a `##FAIL` marker fails the job while its process is still alive;
-   * either way the user can start another install in between, and that predecessor's
-   * late settle must not clear the *new* job's child — `cancel()` would then find
-   * nothing to kill and the installer would keep running.
+   * afterwards; its late close must not clear a successor's child. `##FAIL` is
+   * only a failure verdict, not proof the process exited: it retains the slot
+   * and remains cancellable until settlement. Cancellation belongs to this
+   * job, never to whichever job happens to be current when a callback arrives.
    * @param job - job to end.
    * @param code - exit code, or null when the child never ran.
    * @param error - the spawn failure to report, when there was one.
@@ -212,7 +212,7 @@ export class InstallRunner {
     if (job.endedAt !== undefined) return
     if (this.job === job) this.child = undefined
     job.endedAt = this.now()
-    if (this.cancelled) {
+    if (this.cancelled.has(job)) {
       job.phase = 'cancelled'
       return
     }

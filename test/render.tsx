@@ -647,6 +647,21 @@ try {
       backendPosts === 0 && settles === 0 && !storageData.has('reasoning-distill:handoff:session-1:in-place-1'),
       JSON.stringify({ backendPosts, settles, storage: [...storageData] }))
   } finally { inPlace.stop() }
+  // A failure marker is not a child-exit notification. The panel must keep Stop enabled.
+  globals.fetch = async () => ({ ok: true, json: async () => ({
+    job: { ...jobFixture, phase: 'failed', error: 'verify failed' },
+    backends: [{ id: 'message-edit' }], steps: [], repo: '/repo',
+  }) }) as Response
+  let installMarkup = ''
+  const installer = effectHarness(() => {
+    installMarkup = renderToStaticMarkup(InstallBackendPanel({ open: true, onClose: noop, t }))
+  })
+  try {
+    await installer.tick()
+    check('a failed live installer disables Start and still enables Cancel',
+      /<button[^>]*disabled=""[^>]*>install.start<\/button>/.test(installMarkup)
+      && /<button(?![^>]*disabled)[^>]*>install.cancel<\/button>/.test(installMarkup))
+  } finally { installer.stop() }
 } finally {
   globals.fetch = priorFetch
   globals.window = priorWindow
