@@ -179,4 +179,4 @@ for (const file of findLogs(root)) {
   repaired += 1;
   if (lineOnly) console.log('  LINE-ONLY: wrote the stripped first line without a whole-log verdict; run the event repair script next (it writes only after its own self-check passes)');
 }
-console.log(`${apply ? 'REPAIRED' : 'CANDIDATES'} ${apply ? repaired : candidates}`);
+console.log(`${!apply ? 'CANDIDATES' : lineOnly ? 'HEADER LINES STRIPPED (LOG NOT YET VALIDATED)' : 'REPAIRED'} ${apply ? repaired : candidates}`);

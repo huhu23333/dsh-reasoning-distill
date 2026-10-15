@@ -11,7 +11,8 @@
  */
 
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
+import { renameSync, rmSync } from 'node:fs'
+import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -249,17 +250,15 @@ export class SidecarStore {
   }
 
   /**
-   * Persist one record to its session's sidecar, atomically.
+   * Stage one private sidecar write without making it readable as the current record.
    *
-   * Private by construction: these files hold original reasoning, distiller
-   * prompts/responses and tool output, so neither the directory nor the record
-   * may be readable by other users on the host. Extracted from `update` so the
-   * commit sits in one place — and so a test double can widen the window between
-   * the mutation and the publication (the C1 race lives exactly there).
+   * The caller decides which candidate to publish after all asynchronous I/O:
+   * a deadline or session replacement can occur while this temporary file is
+   * written. The synchronous rename and cache publication then share a JS turn.
    * @param target - the session's sidecar path.
    * @param record - the record to persist.
    */
-  protected async commitToDisk(target: string, record: SessionRecord): Promise<void> {
+  protected async prepareCommit(target: string, record: SessionRecord): Promise<{ publish: () => void; discard: () => void }> {
     const dir = rootDir()
     await mkdir(dir, { recursive: true, mode: 0o700 })
     // `mkdir` does not tighten a directory that already exists, and this one
@@ -278,28 +277,32 @@ export class SidecarStore {
     // otherwise pick the same name in the same millisecond and one rename then
     // loses its source file.
     const tmp = `${target}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`
-    await writeFile(tmp, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 })
-    await rename(tmp, target)
+    try {
+      await writeFile(tmp, JSON.stringify(record), { encoding: 'utf8', mode: 0o600 })
+    } catch (error: unknown) {
+      rmSync(tmp, { force: true })
+      throw error
+    }
+    return {
+      publish: () => { renameSync(tmp, target) },
+      discard: () => { rmSync(tmp, { force: true }) },
+    }
   }
 
   /**
    * Mutate and persist one session's record behind its own write queue.
    *
-   * The rename is the commit point. `finalize` runs synchronously right after
-   * it and before the record becomes visible: the deadline a caller is racing
-   * (or the generation of a session it acted for) can expire during the I/O
-   * between the mutation and the rename, and by then the decision is already
-   * committed to disk. `finalize` is that caller's last chance to substitute a
-   * different record — typically the same content with the entry rolled back —
-   * before any request can derive from the committed one. Returning the
-   * replacement publishes it first and then makes the disk agree, so no read
-   * ever sees the entry in between.
+   * `finalize` runs after the asynchronous staging but before the one rename
+   * that commits the selected record. A deadline or a session generation can
+   * change during staging; the check and synchronous rename/cache publication
+   * run without yielding to another request. If a replacement is selected,
+   * stage it while the old record is still on disk and publish only that one.
    * @param sessionId - owning session id.
    * @param mutate - synchronous mutation of a private record copy.
-   * @param finalize - optional post-rename, pre-publication verification. It
-   *   receives the committed record and the pre-mutation snapshot, and returns
-   *   `undefined` to publish the record as committed, or a replacement record
-   *   to publish (and persist) instead.
+   * @param finalize - optional post-staging, pre-commit verification. It
+   *   receives the candidate and the pre-mutation snapshot, and returns
+   *   `undefined` to commit the candidate, or a replacement record to stage
+   *   and commit instead.
    */
   update(sessionId: string, mutate: (record: SessionRecord) => void, finalize?: (record: SessionRecord, before: SessionRecord) => SessionRecord | undefined): Promise<void> {
     // The epoch this write belongs to, captured before it queues: `forget` may evict it
@@ -314,32 +317,31 @@ export class SidecarStore {
         const before = structuredClone(record)
         mutate(record)
         const target = fileFor(sessionId)
-        await this.commitToDisk(target, record)
-        // The rename has landed. Between it and this check there is no await, so a
-        // deadline can only fall on one side of the decision: it was already known
-        // when `finalize` ran, or it fires after the record is published — either
-        // way the request the deadline released and the ledger agree.
-        let published = record
-        if (finalize !== undefined) {
-          let decided: SessionRecord | undefined
-          try {
-            decided = finalize(record, before)
-          } catch {
-            // A verification that cannot run must not let the committed candidate
-            // become visible: roll back to the snapshot taken before the mutation.
-            decided = before
+        let staged = await this.prepareCommit(target, record)
+        try {
+          let published = record
+          if (finalize !== undefined) {
+            let decided: SessionRecord | undefined
+            try {
+              decided = finalize(record, before)
+            } catch {
+              // A failed verification cannot make the candidate visible.
+              decided = before
+            }
+            if (decided !== undefined) {
+              published = decided
+              staged.discard()
+              // The replacement is conservative (a failed attempt or the old
+              // snapshot). If this write fails, disk and cache retain the old
+              // version; neither ever sees the unapproved candidate.
+              staged = await this.prepareCommit(target, published)
+            }
           }
-          if (decided !== undefined) {
-            published = decided
-            // Publish the rolled-back shape first: a request that arrives while the
-            // disk is being brought in line must not derive from the entry that was
-            // just revoked. The snapshot is the committed pre-mutation state, so
-            // nothing the caller has not seen can be lost by this second write.
-            this.cache.set(sessionId, published)
-            await this.commitToDisk(target, published)
-          }
+          staged.publish()
+          this.cache.set(sessionId, published)
+        } finally {
+          staged.discard()
         }
-        this.cache.set(sessionId, published)
       } finally {
         // Publishing above can resurrect a record `forget` already dropped -- and `load`
         // repopulated the cache mid-write for the same reason. Evicting the epoch is what

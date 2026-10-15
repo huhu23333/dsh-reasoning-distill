@@ -1955,16 +1955,16 @@ check('cancelling through the route reaches the runner',
 
 console.log('scenario 65: a commit landing after the wait deadline rolls back instead of flipping the ledger')
 handlers.clear()
-/** A store whose first commit stalls between the mutation and the rename, so the wait deadline can expire inside the commit window (C1). */
+/** A store whose first staging stalls before the rename, so the wait deadline can expire inside the commit window (C1). */
 class StallingCommitStore extends SidecarStore {
   stallMs = 0
   private stalled = false
-  protected override async commitToDisk(target: string, record: SessionRecord): Promise<void> {
+  protected override async prepareCommit(target: string, record: SessionRecord): Promise<{ publish: () => void; discard: () => void }> {
     if (this.stallMs > 0 && !this.stalled) {
       this.stalled = true
       await new Promise(resolve => setTimeout(resolve, this.stallMs))
     }
-    await super.commitToDisk(target, record)
+    return super.prepareCommit(target, record)
   }
 }
 const rule65 = {
@@ -1994,9 +1994,8 @@ await fire('agent/pre-step', { agent: { session: s65 } }, async () => undefined)
 const elapsed65 = Date.now() - started65
 check('the pre-step still releases the request at the deadline, not after the commit',
   elapsed65 >= 100 && elapsed65 < 300, `${elapsed65}ms`)
-// The rollback publishes the failed entry to the cache before it rewrites the
-// file, so the ledger is consistent from the first read; wait for the disk to
-// catch up before asserting it.
+// The final decision publishes only the failed entry. Wait for its staged
+// write and atomic commit before asserting both cache and disk.
 await settleFor(async () => {
   const cached = (await store65.load(s65.id)).entries
   if (cached.length !== 1 || cached[0]!.failed !== true) return false
@@ -2018,6 +2017,77 @@ check('and the ledger never flips: the deadline-released request and later ones 
   (s65.deriveMessages() as Array<{ content: Array<{ type: string; text?: string }> }>)
     .find(message => message.content.some(block => block.type === 'reasoning' && block.text === fatReasoning)) !== undefined,
   'derivation no longer carries the raw reasoning')
+
+console.log('scenario 66: a failed rollback must not leave the adopted entry on disk')
+class FailedRollbackStore extends SidecarStore {
+  preparations = 0
+  protected override async prepareCommit(target: string, record: SessionRecord): Promise<{ publish: () => void; discard: () => void }> {
+    if (++this.preparations === 2) throw new Error('injected replacement write failure')
+    return super.prepareCommit(target, record)
+  }
+}
+const store66 = new FailedRollbackStore()
+const id66 = 'session-c1-rollback-failure'
+await new SidecarStore().update(id66, () => undefined)
+await store66.load(id66)
+let rejected66 = false
+try {
+  await store66.update(id66, record => {
+    record.entries.push({ ...rec65, id: 'adopted-66', failed: undefined })
+  }, (_record, before) => before)
+} catch { rejected66 = true }
+const disk66 = JSON.parse(readFileSync(sidecarPath(id66), 'utf8')) as SessionRecord
+const restart66 = await new SidecarStore().load(id66)
+check('a failed rollback cannot make a fresh process adopt the revoked rewrite',
+  rejected66 && disk66.entries.length === 0 && restart66.entries.length === 0,
+  JSON.stringify({ rejected66, onDisk: disk66.entries.map(entry => entry.id), restarted: restart66.entries.map(entry => entry.id) }))
+
+console.log('scenario 67: a successor must not load an unfinalized disk candidate')
+class StalledBeforePublishStore extends SidecarStore {
+  written: Promise<void>
+  release: () => void = () => undefined
+  private notify: () => void = () => undefined
+  private stalled = false
+  constructor() {
+    super()
+    this.written = new Promise(resolve => { this.notify = resolve })
+  }
+  protected override async prepareCommit(target: string, record: SessionRecord): Promise<{ publish: () => void; discard: () => void }> {
+    const staged = await super.prepareCommit(target, record)
+    if (!this.stalled) {
+      this.stalled = true
+      this.notify()
+      await new Promise<void>(resolve => { this.release = resolve })
+    }
+    return staged
+  }
+}
+const store67 = new StalledBeforePublishStore()
+const id67 = 'session-c1-successor-read'
+await store67.load(id67)
+const writing67 = store67.update(id67, record => {
+  record.entries.push({ ...rec65, id: 'unfinalized-67', failed: undefined })
+}, (_record, before) => before)
+await store67.written
+store67.forget(id67)
+const leaked67 = await store67.load(id67)
+store67.release()
+await writing67
+check('forget and reload cannot expose a candidate awaiting its final decision',
+  leaked67.entries.length === 0,
+  JSON.stringify(leaked67.entries.map(entry => entry.id)))
+
+console.log('scenario 68: a failed final decision publishes the old record instead')
+const id68 = 'session-c1-finalize-throw'
+const store68 = new SidecarStore()
+await store68.load(id68)
+await store68.update(id68, record => {
+  record.entries.push({ ...rec65, id: 'unapproved-68', failed: undefined })
+}, () => { throw new Error('injected finalize failure') })
+const disk68 = JSON.parse(readFileSync(sidecarPath(id68), 'utf8')) as SessionRecord
+check('a throwing finalize cannot publish its unapproved candidate',
+  (await store68.load(id68)).entries.length === 0 && disk68.entries.length === 0,
+  JSON.stringify(disk68.entries.map(entry => entry.id)))
 
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)

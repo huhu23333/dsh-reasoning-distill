@@ -2128,14 +2128,11 @@ export class ReasoningDistillEngine {
       record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq)
       record.entries.push(entry)
       adopted = true
-    }, (committed, before) => {
-      // The rename has landed, so the decision is durable; it is not yet visible.
-      // The wait bound (or the launch timer, or a superseding session) can expire
-      // during the I/O between the mutation above and this point. The pre-step was
-      // then released and the next request has already gone out with the raw
-      // reasoning — publishing the adopted entry now would flip every later
-      // request to the distilled text while the request that just escaped paid
-      // for nothing (C1). Roll the entry back before it becomes visible.
+    }, (_candidate, before) => {
+      // The candidate is staged but not yet committed or visible. The wait bound
+      // (or a superseding session) can change during staging; the pre-step may
+      // have released a raw request. Select the failed entry before any rename,
+      // so a replacement write failure cannot strand an adopted entry on disk.
       if ((this.generation.get(session.id) ?? 0) !== generation) return before
       if (adopted && abandonedNow()) {
         const rolled = structuredClone(before)
