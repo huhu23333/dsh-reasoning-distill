@@ -1,6 +1,6 @@
 # 验收说明：设置项 / 显示项 / 后台处理逻辑
 
-> 对照版本：git `dd1d94e`（宿主 208 项 + 客户端 94 项测试全绿，`npm run typecheck` 宿主+客户端 0 错误）
+> 对照版本：git `a0c60a9`（`npm run check` 全绿：宿主 smoke 165 项 + 客户端 render 99 项，`npm run typecheck` 宿主+客户端 0 错误）
 
 ---
 
