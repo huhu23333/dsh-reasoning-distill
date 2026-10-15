@@ -11,7 +11,12 @@
 // event, so a header field here would itself invalidate the first line.
 //
 // Every candidate is validated with the host's own Session constructors before it is written,
-// and every file is backed up first.
+// and every file is backed up first. Those constructors are handed a header this script
+// *rebuilds* from the fields it knows, so the stored first line never reaches them: it is
+// written back verbatim, and a stray or missing key on it would pass the gate above while the
+// read path still refuses the whole log over that line alone. The line is therefore checked on
+// its own, against the same guard the read path applies to it (see `headerLineRefusal`), and a
+// log whose line fails that guard is refused here and left byte-identical.
 //
 // Usage: node scripts/repair-branch-cuts.mjs [--apply] [--root <sessions dir>] [--host <session package>]
 import { execFileSync } from 'node:child_process';
@@ -51,6 +56,30 @@ function findLogs(dir) {
   return found;
 }
 
+/**
+ * The physical first line's own admissibility to the read path.
+ *
+ * Both gates below (`formatRejects`, `hostAccepts`) hand the host a header this script
+ * *rebuilds* from the fields it knows, so the stored line is never judged by a reader; it is
+ * written back verbatim, so a stray key on it survives the write and the read path refuses the
+ * whole log over that line alone (`isHeaderLine` in session-persistence-jsonl/src/format.ts
+ * accepts exactly the required keys plus `cwd`/`parentSession`/`origin`/`agentPreset`). The key
+ * set is the same one the sibling `repair-header-fields.mjs` repairs against.
+ * @param wire - the stored `session` record, exactly as it will be written back.
+ * @returns `undefined` when the line is one the read path accepts, else why the write is refused.
+ */
+function headerLineRefusal(wire) {
+  const required = ['type', 'version', 'id', 'createdAt', 'isSeeded', 'delegationDepth'];
+  const allowed = new Set([...required, 'cwd', 'parentSession', 'origin', 'agentPreset']);
+  const stray = Object.keys(wire).filter(key => !allowed.has(key));
+  if (stray.length > 0) {
+    return `SKIP writing: the physical header line carries ${stray.join(',')} the read path refuses; run repair-header-fields.mjs first`;
+  }
+  const missing = required.filter(key => !(key in wire));
+  if (missing.length > 0) return `SKIP writing: the physical header line lacks ${missing.join(',')}`;
+  return undefined;
+}
+
 /** The reason the host's released-v4 validation refuses this log, or undefined. */
 function formatRejects(raw, events) {
   const artifact = {
@@ -79,6 +108,11 @@ function formatRejects(raw, events) {
 
 /** Load the candidate through both host paths, exactly as the host would. */
 function hostAccepts(raw, events) {
+  // The stored first line is written back verbatim and neither host path below ever sees it, so
+  // its own admissibility is the one thing this gate cannot learn from the host; `repair-branch-cuts`
+  // must not report a log the read path still refuses over that line.
+  const line = headerLineRefusal(raw);
+  if (line !== undefined) return { ok: false, detail: line };
   if (host === undefined) return { ok: true, detail: 'structural only' };
   const header = {
     version: host.SESSION_FORMAT_VERSION,

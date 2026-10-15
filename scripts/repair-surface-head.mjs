@@ -16,7 +16,12 @@
 // the host loads with its references pointing at the wrong events.
 //
 // Every candidate is validated with the host's own released-v4 validator before it is
-// written, and every file is backed up first.
+// written, and every file is backed up first. That validator is handed a header this script
+// *rebuilds* from the fields it knows, so the stored first line never reaches it: the line is
+// written back verbatim, and a stray or missing key on it passes the validator while the read
+// path still refuses the whole log over that line alone. The line is therefore checked on its
+// own, against the same guard the read path applies to it (see `headerLineRefusal`), and a file
+// whose line fails that guard is refused here and left byte-identical.
 //
 // Usage: node scripts/repair-surface-head.mjs [--apply] [--root <sessions dir>] [--checkout <dsh checkout>]
 import { execFileSync } from 'node:child_process';
@@ -82,6 +87,30 @@ function artifactOf(wire, events) {
     // the physical header has no such field (a stray one makes the first line invalid).
     inheritedEventCount: events.filter(event => event.type === 'session/end-seed' && event.data?.inherited === true).at(-1)?.seq ?? 0,
   };
+}
+
+/**
+ * The physical first line's own admissibility to the read path.
+ *
+ * The validator in {@link rejection} is handed a header this script *rebuilds* from the fields
+ * it knows, so the stored line is never judged by it; the line is written back verbatim, so a
+ * stray key on it survives the write and the read path refuses the whole log over that line
+ * alone (`isHeaderLine` in session-persistence-jsonl/src/format.ts accepts exactly the required
+ * keys plus `cwd`/`parentSession`/`origin`/`agentPreset`). The key set is the same one the
+ * sibling `repair-header-fields.mjs` repairs against.
+ * @param wire - the stored `session` record, exactly as it will be written back.
+ * @returns `undefined` when the line is one the read path accepts, else why the write is refused.
+ */
+function headerLineRefusal(wire) {
+  const required = ['type', 'version', 'id', 'createdAt', 'isSeeded', 'delegationDepth'];
+  const allowed = new Set([...required, 'cwd', 'parentSession', 'origin', 'agentPreset']);
+  const stray = Object.keys(wire).filter(key => !allowed.has(key));
+  if (stray.length > 0) {
+    return `SKIP writing: the physical header line carries ${stray.join(',')} the read path refuses; run repair-header-fields.mjs first`;
+  }
+  const missing = required.filter(key => !(key in wire));
+  if (missing.length > 0) return `SKIP writing: the physical header line lacks ${missing.join(',')}`;
+  return undefined;
 }
 
 function rejection(wire, events) {
@@ -270,8 +299,11 @@ for (const file of findLogs(root)) {
     }
     if (patched === undefined) continue;
     const verdict = rejection(wire, patched);
-    console.log(`${apply ? 'REPAIR' : 'WOULD REPAIR'} ${wire.id} reject=${reason} strategy=${strategy} -> ${verdict ?? 'the host validator accepts it'}`);
-    if (!apply || verdict !== undefined) continue;
+    // The stored first line is written back verbatim and the validator above never sees it, so a
+    // line the read path refuses has to block the write on its own.
+    const blocker = verdict ?? headerLineRefusal(wire);
+    console.log(`${apply ? 'REPAIR' : 'WOULD REPAIR'} ${wire.id} reject=${reason} strategy=${strategy} -> ${blocker ?? 'the host validator accepts it'}`);
+    if (!apply || blocker !== undefined) continue;
     const encoded = zlib.zstdCompressSync(Buffer.from([wire, ...patched].map(record => JSON.stringify(record)).join('\n') + '\n', 'utf8'));
     const backup = `${file}.bak-surfacehead-${new Date().toISOString().replace(/[:.]/g, '')}`;
     fs.copyFileSync(file, backup);

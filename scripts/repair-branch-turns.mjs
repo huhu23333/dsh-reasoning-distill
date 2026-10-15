@@ -10,7 +10,13 @@
 // step, then turn/end with the forked reason) at the point the branch's own turn opens,
 // shifting later sequence numbers and the seq references that follow them. Every
 // candidate is re-walked and loaded through the host's own Session constructors before
-// it is written, and every file is backed up first.
+// it is written, and every file is backed up first. Those constructors are handed a header
+// this script *rebuilds* from the fields it knows, so the stored first line never reaches
+// them: the line is written back verbatim, and a stray or missing key on it passes the
+// constructors while the read path still refuses the whole log over that line alone. The line
+// is therefore checked on its own, against the same guard the read path applies to it (see
+// `headerLineRefusal`), in both passes below, and a file whose line fails that guard is
+// refused and left byte-identical.
 //
 // The numbers a shift moves are nothing without the references that name them: both passes
 // below rewrite seqs, so both move every reference through the host's own event-reference
@@ -109,6 +115,30 @@ function remapUncoveredReference(source, out, field, owner, reference) {
   return { ...out, data: { ...data, [field]: reference(data[field]) } };
 }
 
+/**
+ * The physical first line's own admissibility to the read path.
+ *
+ * `hostAccepts` below is handed a header this script *rebuilds* from the fields it knows, so the
+ * stored line is never judged by the host constructors; the line is written back verbatim, so a
+ * stray key on it survives the write and the read path refuses the whole log over that line
+ * alone (`isHeaderLine` in session-persistence-jsonl/src/format.ts accepts exactly the required
+ * keys plus `cwd`/`parentSession`/`origin`/`agentPreset`). The key set is the same one the
+ * sibling `repair-header-fields.mjs` repairs against.
+ * @param wire - the stored `session` record, exactly as it will be written back.
+ * @returns `undefined` when the line is one the read path accepts, else why the write is refused.
+ */
+function headerLineRefusal(wire) {
+  const required = ['type', 'version', 'id', 'createdAt', 'isSeeded', 'delegationDepth'];
+  const allowed = new Set([...required, 'cwd', 'parentSession', 'origin', 'agentPreset']);
+  const stray = Object.keys(wire).filter(key => !allowed.has(key));
+  if (stray.length > 0) {
+    return `SKIP writing: the physical header line carries ${stray.join(',')} the read path refuses; run repair-header-fields.mjs first`;
+  }
+  const missing = required.filter(key => !(key in wire));
+  if (missing.length > 0) return `SKIP writing: the physical header line lacks ${missing.join(',')}`;
+  return undefined;
+}
+
 /** Where the log first opens a turn while another is already open. */
 function brokenAt(events) {
   let openTurn = null;
@@ -179,6 +209,13 @@ for (const file of findLogs(root)) {
   const shift = closers.length;
   console.log(`${apply ? 'REPAIR' : 'WOULD REPAIR'} ${raw.id} at=${String(broken.index)} closers=${String(shift)}`);
   if (!apply) continue;
+  // The stored first line goes back verbatim and `hostAccepts` below never sees it, so a line
+  // the read path refuses has to refuse the write here.
+  const line = headerLineRefusal(raw);
+  if (line !== undefined) {
+    console.log(`  ${line}`);
+    continue;
+  }
   // The closers take position broken.index, so that event and every later one moves forward
   // by `shift`; the seqs other events refer to move with them, or the file the host loads
   // would point at the wrong events. Both prerequisites are refusals, never a partial repair:
@@ -235,6 +272,12 @@ for (const file of findLogs(root)) {
   gapCandidates += 1;
   console.log(`${apply ? 'RENUMBER' : 'WOULD RENUMBER'} ${raw.id} events=${String(events.length)}`);
   if (!apply) continue;
+  // Same blind spot in this pass: the renumbering moves the events, never the stored first line.
+  const line = headerLineRefusal(raw);
+  if (line !== undefined) {
+    console.log(`  ${line}`);
+    continue;
+  }
   // Renumbering rewrites numbers other events refer to, so the references have to move with
   // them. Both prerequisites are refusals, never a partial repair: a stored sequence that
   // does not run strictly forwards has no single old->new table, and without the host's
