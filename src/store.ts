@@ -274,12 +274,34 @@ export class SidecarStore {
     }
     const previous = this.queues.get(sessionId) ?? Promise.resolve()
     const next = previous.then(run, run)
-    this.queues.set(sessionId, next.catch(() => undefined))
+    const tracked = next.catch(() => undefined)
+    this.queues.set(sessionId, tracked)
+    // A queue entry is only needed while a write is in flight or waiting behind one:
+    // left in place it would pin one promise per session for the life of the process,
+    // so the write that ends up last removes its own entry. Another update that
+    // arrives first replaces it in the map and owns the removal instead.
+    void tracked.then(() => {
+      if (this.queues.get(sessionId) === tracked) this.queues.delete(sessionId)
+    })
     return next
   }
 
-  /** Drop one session's cached record, e.g. after an explicit reset. */
+  /**
+   * Drop one session's cached record, e.g. when the session is gone or its id is
+   * attached again.
+   *
+   * The record carries the original reasoning text and the distiller's request and
+   * response, so a long-lived host that never dropped it would keep every conversation
+   * it has ever seen in memory. A read already in flight publishes its snapshot when it
+   * resolves, so that outcome is dropped too; the next `load` then reads the file
+   * again rather than handing back the record of a session that is gone.
+   * @param sessionId - owning session id.
+   */
   forget(sessionId: string): void {
     this.cache.delete(sessionId)
+    const inFlight = this.pending.get(sessionId)
+    if (inFlight !== undefined) {
+      void inFlight.then(() => { this.cache.delete(sessionId) }, () => undefined)
+    }
   }
 }

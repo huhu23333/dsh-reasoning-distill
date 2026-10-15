@@ -193,7 +193,7 @@
 
 **"卡住"的上限从哪来**：由**该次压缩自己的规则**决定——`timeoutMs > 0` 时蒸馏调用本身在该值处中止，等待也以**同一 `timeoutMs`** 为上限（`ruleBackstopMs()` 取各规则上限的最大值，**不额外加宽限**，作为"适配器不理会 abort"的兜底）；`timeoutMs = 0`（文档语义为"不限"）时**没有自动上限**，但**停止依然随时有效** ✓。
 
-**会话世代**：会话对象只 attach 一次，但**同一个会话 id 可能再次出现**（清空/重建/重载）。每次 attach 会递增该 id 的**世代号**并清空它的全部状态（`pending`/`inFlight`/`running`/`waitBound`/`applied`/`rawDerive`/`pendingBranch`/`expectRequest`/`blocked`/`storageBroken`）；上一世代仍在跑的压缩在**每次落盘或标记交接前**校验世代号，不符即**放弃写入** ✓。否则旧世代的压缩会让新会话的请求平白等待（`settle` 按 id 前缀匹配 ✗）并把陈旧改写写进新会话记录 ✗。
+**会话世代**：会话对象只 attach 一次，但**同一个会话 id 可能再次出现**（清空/重建/重载）。每次 attach 会递增该 id 的**世代号**并清空它的全部状态：按 id 直接记账的 `pendingBranch`/`pendingArchive`/`deferredBranch`/`expectRequest`/`loadStarted`/`blocked`/`applied`/`rawDerive`/`storageBroken`，按 `${sessionId}:` 前缀记账的 `pending`/`inFlight`/`running`/`waitBound`/`owedHandoffNotes`/`handoffOrder`/`committedHandoffOrder`/`missCharged`/`abandoned`/`abandonTimers`/`auditBroken`，以及 sidecar 存储里该会话记录的内存副本（含原始推理原文，见审查台账 B27）；上一世代仍在跑的压缩在**每次落盘或标记交接前**校验世代号，不符即**放弃写入** ✓。否则旧世代的压缩会让新会话的请求平白等待（`settle` 按 id 前缀匹配 ✗）并把陈旧改写写进新会话记录 ✗。
 
 **世代检查必须在写队列内部**：`store.update()` 是**按会话串行排队**的 ✓，所以"写之前检查一次"并不够 ✗——排队期间世代就可能已经改变 ✓。因此所有落盘都在 `mutate` **内部**判定世代，不符即放弃写入 ✓。
 

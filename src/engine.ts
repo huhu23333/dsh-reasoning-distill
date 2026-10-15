@@ -502,7 +502,7 @@ export class ReasoningDistillEngine {
    * Called when the session goes away and when an id is attached again: a later
    * compression of the old generation must not keep a new session's requests
    * waiting (its in-flight entry is matched by id prefix) or write into its
-   * record.
+   * record. The sidecar store's in-memory copy of the record goes with it.
    * @param sessionId - session whose per-id state should go.
    */
   private releaseSession(sessionId: string): void {
@@ -523,6 +523,12 @@ export class ReasoningDistillEngine {
       }
     }
     this.pendingBranch.delete(sessionId)
+    // These two are keyed by the id alone, so a successor that reuses the id must not
+    // inherit them: the archive retry (`observe` retries it on every event) would
+    // otherwise archive the brand-new conversation on its very first event, and the
+    // stale idle guard would swallow its one branch-at-idle attempt for good.
+    this.pendingArchive.delete(sessionId)
+    this.deferredBranch.delete(sessionId)
     this.expectRequest.delete(sessionId)
     this.loadStarted.delete(sessionId)
     this.blocked.delete(sessionId)
@@ -544,6 +550,13 @@ export class ReasoningDistillEngine {
       if (key.startsWith(prefix)) this.auditBroken.delete(key)
     }
     this.storageBroken.delete(sessionId)
+    // The record itself is the worst of it: it holds the original reasoning text and
+    // the distiller's request and response. Dropping the store's copy here is what keeps
+    // a long-lived host from pinning every conversation it has ever seen — text included
+    // — for the life of the process. A later `load` reads the file again, so nothing on
+    // disk changes. A store that carries only the read/write half (a failure-injecting
+    // wrapper, say) loses the eviction rather than failing the disposal path.
+    if (typeof this.store.forget === 'function') this.store.forget(sessionId)
   }
 
   /**

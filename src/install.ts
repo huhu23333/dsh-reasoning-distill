@@ -197,13 +197,20 @@ export class InstallRunner {
    * `close`, `error` and cancellation can reach this for one job, so it is the
    * only place that ends a job: it writes nothing once the job has already ended
    * and never lets a spawn failure pass as a successful exit.
+   *
+   * Only the job that is still current unregisters its child, and only when this call
+   * is the one that ends it. A failed spawn reports `error` first and `close`
+   * afterwards, and a `##FAIL` marker fails the job while its process is still alive;
+   * either way the user can start another install in between, and that predecessor's
+   * late settle must not clear the *new* job's child — `cancel()` would then find
+   * nothing to kill and the installer would keep running.
    * @param job - job to end.
    * @param code - exit code, or null when the child never ran.
    * @param error - the spawn failure to report, when there was one.
    */
   private settle(job: InstallJob, code: number | null, error?: unknown): void {
-    this.child = undefined
     if (job.endedAt !== undefined) return
+    if (this.job === job) this.child = undefined
     job.endedAt = this.now()
     if (this.cancelled) {
       job.phase = 'cancelled'
