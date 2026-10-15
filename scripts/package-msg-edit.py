@@ -17,7 +17,13 @@ import tarfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 UPSTREAM = ROOT / 'vendor/dsh-msg-edit-0.1.0-upstream.tar.gz'
-TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched1.tgz'
+TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched2.tgz'
+
+# Upstream's client bundle registers itself under a local placeholder id. The client module
+# table pairs a bundle with the profile row by *name*, so with that id the row can never
+# activate: the shell reports "loaded without registering" and the plugin fails to load.
+CLIENT_ID_FROM = 'id: "@local/dsh-client-ui-msg-edit"'
+CLIENT_ID_TO = 'id: "@moton16/dsh-msg-edit"'
 
 # Provenance of the vendored checkout: GitHub archive of branch main, verified once and
 # pinned here so a silently replaced archive fails the build instead of shipping.
@@ -41,18 +47,25 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
             metadata = json.loads(data)
             if metadata['name'] != '@moton16/dsh-msg-edit':
                 raise SystemExit(f"unexpected package name: {metadata['name']}")
-            metadata['version'] = '0.1.0-patched1'
+            metadata['version'] = '0.1.0-patched2'
             peers = metadata.get('peerDependencies', {})
             for key in list(peers):
                 peers[key] = PEER_FLOOR
                 relaxed.append(key)
             metadata['peerDependencies'] = peers
             data = (json.dumps(metadata, ensure_ascii=False, indent=2) + '\n').encode('utf8')
+        elif str(relative) == 'lib/client.js':
+            text = data.decode('utf8')
+            if text.count(CLIENT_ID_FROM) != 1:
+                raise SystemExit('client bundle no longer registers the placeholder id exactly once')
+            data = text.replace(CLIENT_ID_FROM, CLIENT_ID_TO, 1).encode('utf8')
+            registration = CLIENT_ID_TO
         info = tarfile.TarInfo(f'package/{relative}')
         info.size = len(data)
         info.mode = member.mode or 0o644
         info.mtime = member.mtime
         target.addfile(info, io.BytesIO(data))
-print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched1)')
+print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched2)')
+print(f'client registers as {CLIENT_ID_TO}')
 print(f'relaxed peers to {PEER_FLOOR}: {", ".join(relaxed)}')
 print(f'built from: {UPSTREAM_REVISION} (sha256 {UPSTREAM_SHA256[:16]}...)')
