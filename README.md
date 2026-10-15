@@ -25,10 +25,25 @@
 仓库外的插件**无法**写自己的会话事件类型：`Session.append` 永远不写事件信封里的 `ignorable` 标记，而持久化读路径会拒绝一个未知且不可忽略的事件类型。所以本插件：
 
 - **不写入会话日志**（日志保持可被任何 build 读取、原始 reasoning 可审计）；
-- 只包装 `Session.deriveMessages()`——请求构建与不变量比对都用它，因此改变"模型看到什么"而不改变"日志记录了什么"；
+- **包装两个访问器**：`Session.deriveMessages()`（请求构建与不变量比对都用它）**以及** `Session.deriveEventMessage()`——后者是宿主的 compaction（`compaction-basic` / `tool-result-pruner` / `image-offload`）逐节点重建"要压缩的对话"时走的那条缝。两个访问器由**同一套判据**回答，所以「请求带什么」与「压缩读什么」逐字节相同（见「压缩与派生的关系」）；
 - 自己的持久状态放在 `$DSH_HOME/reasoning-distill/<sessionId>.json` 的 sidecar 里。
 
-> 这条缝的代价：只有**发给模型的请求**变了，GUI 转录里仍显示原始思维链。这是有意的——审计与展示走日志，省钱走派生历史。
+> 这条缝的代价：只有**发给模型的请求**和**宿主的压缩输入**变了；GUI 转录、轨迹页与上下文页仍显示原始思维链（`surface.ts` 规定人类转录只读 durable 原文）。这是有意的——审计与展示走日志，省钱走派生历史。
+
+## 压缩与派生的关系（两个访问器、三种情形）
+
+宿主的 token 计量与压缩走**不同**的读缝，这件事决定了本插件能保证什么：
+
+| 读缝 | 谁在用 | 本插件能否影响 |
+|---|---|---|
+| `Session.deriveEventMessage(event)`（**方法**，带投影表） | compaction 的输入、`deriveMessages()` 内部、tool-result-pruner、image-offload | ✅ **已包装**（与 `deriveMessages` 同一套判据） |
+| 自由函数 `deriveEventMessage(event)`（`token-meter/src/surface-fold.ts`、`surface-projection.ts`） | **token 计量**：压缩阈值、保留预算、"摘要必须更小"的判据 | ❌ 碰不到（插件的边界） |
+
+因此：
+
+- **压缩的输入**：与路由请求逐字节一致（同一判据 ⇒ 同样的文本、同样的 replay 载荷）。历史里已被 splice 接管的块，其事件仍带着**原文的 replay 载荷**（`message-edit` 只改 `content[i].text`），两条访问器都会把它洗成裸 `{type:'reasoning'}`，而 durable 日志一个字都不动。
+- **"该不该压缩"的估价**：按**日志**算。已成功交接的块，日志里就是蒸馏文本 ⇒ 估价正确；只有包裹生效（交接失败/跳过）或交接前的窗口里，日志还是原文 ⇒ 压力被**高估**（保守：不会漏压，但可能过早压一次）。
+- **三种情形**（`rewriteKind`）：① 该会话仍承载这条改写 ⇒ 替换并**计费**；② 日志里已经是这条蒸馏文本（更早的分支 splice 进来的）⇒ 只**洗 replay 载荷**，不计费（那份节省属于接管的那个分支）；③ 都不是（失败、已交接给分支、或用户改过原文）⇒ **把日志自己的消息放回派生的那一格**，这样"某个派生在交接之前缓存过的替换"不会活过交接。
 
 ## 计费口径
 
@@ -542,7 +557,7 @@ POST /message-edit
 
 1. **位置替换对助手消息被运行时禁止**：`packages/core/session/src/surface.ts:329-365` 要求替换必须逐一引用被遮蔽节点，同时又规定 `assistant/message` **一旦携带 `sourceEventSeqs` 就抛错**；类型层同样（`core/session/src/types.ts:470-478` 里该字段为 `never`）。因此插件无法遮蔽已有助手节点。
 2. **人类转录只读"追加来源"的原始事件**：`surface.ts:78-85` 明说替换副本 **model-only**、转录必须读 durable 原文；原生 chat 直接取 `event.data.message.content`（`client/ui-chat/.../conversation-nodes/assistant.ts:190-205,292-300`），轨迹同理（`ui-trajectory/.../trajectory-assistant-definition.ts:254-269`），上下文页渲染的是 durable 节点内容。
-3. **压缩计量读逐事件原始文本**：`llm/token-meter/src/surface-fold.ts:17,111` 用的是**自由函数** `deriveEventMessage(event)`（不传投影表），所以阈值与压缩输入都按原文计算——本插件省下的 token **不会**降低压缩压力。
+3. **压缩计量读逐事件原始文本**：`llm/token-meter/src/surface-fold.ts:17,111` 用的是**自由函数** `deriveEventMessage(event)`（不传投影表），所以**阈值、保留预算、"摘要必须更小"的判据**都按原文计算——本插件省下的 token **不会**降低压缩压力。**但压缩的输入已经被接上了**：`compaction-basic` 的 `buildSummarizationInput` 走的是 **session 方法**（`region.ts:552,557`），本插件包装了它，所以 summarizer 读到的是蒸馏文本（含洗过的 replay 载荷）——两个口径目前只在这条边界上不一致，且方向是"保守"（估价偏高）。
 
 **为什么不用 `registerMessageProjection`**（它确实存在：`core/session/src/index.ts:931-945`，可让模型可见面在原位置换成插件文本）：
 

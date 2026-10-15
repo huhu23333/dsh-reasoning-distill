@@ -14,7 +14,7 @@
 
 import { BlockAssembler, createAssistantMessage, createUserMessage, freezeMessage } from '@deepseek-ai/dsh-llm'
 import type { ContentBlock, Message, TokenUsage } from '@deepseek-ai/dsh-llm'
-import type { Session, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
+import type { Session, SessionEvent, SessionId, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { Context } from '@deepseek-ai/cordis'
 // Type-only: these packages own the `agent/pre-step` and `subagent/descriptor`
 // declarations that this plugin's event handlers are typed against.
@@ -172,6 +172,16 @@ export class ReasoningDistillEngine {
    */
   private readonly applied = new Map<string, Array<{ afterSeq: number; ids: Map<string, number> }>>()
   private readonly rawDerive = new Map<string, () => Message[]>()
+  /**
+   * The unwrapped per-event derivation, per attached session object.
+   *
+   * `deriveMessages()` is built on `deriveEventMessage()`, and compaction reads the per-event
+   * accessor directly, so both seams have to answer with the same content. The raw function is
+   * kept here rather than on the session because this plugin's own checks — which entries are in
+   * force, what a compaction would summarize — must read the log's message, never the message
+   * this plugin produced from it.
+   */
+  private readonly rawDeriveEventMessage = new WeakMap<object, (event: SessionEvent) => Message | null>()
 
   /**
    * Claims a durable log writer for a freshly created compression session, once
@@ -593,6 +603,23 @@ export class ReasoningDistillEngine {
     const original = session.deriveMessages.bind(session)
     const engine = this
     this.rawDerive.set(session.id, original)
+    // The per-event accessor is the *other* half of the same seam: a compaction summarizes the
+    // conversation by deriving one event at a time (`deriveEventMessage`), not by asking for the
+    // message list, so a rewrite only the list accessor knew about used to be summarized from the
+    // raw reasoning — with the original reasoning's replay payload attached. Answering both
+    // accessors from one rule is what keeps "what the request carries" and "what a compaction
+    // reads" the same bytes.
+    const rawMessage = session.deriveEventMessage.bind(session)
+    this.rawDeriveEventMessage.set(session, rawMessage)
+    Object.defineProperty(session, 'deriveEventMessage', {
+      configurable: true,
+      writable: true,
+      value: function deriveEventMessageDistilled(this: Session, event: SessionEvent): Message | null {
+        const message = rawMessage(event)
+        if (message === null || !engine.active || engine.replaced(this)) return message
+        return engine.rewriteDerivedMessage(this, event, message) ?? message
+      },
+    })
     Object.defineProperty(session, 'deriveMessages', {
       configurable: true,
       writable: true,
@@ -634,12 +661,6 @@ export class ReasoningDistillEngine {
   }
 
   /**
-   * Replace the reasoning of every compressed message in one derived list.
-   * @param session - session whose history is being derived.
-   * @param messages - the unmodified derived messages.
-   * @returns the same array when nothing applies, else a substituted copy.
-   */
-  /**
    * Whether a recorded rewrite is still the one this replay would use.
    *
    * Substitution is a pure function of the surface, so the same predicate decides
@@ -649,10 +670,28 @@ export class ReasoningDistillEngine {
    * stops on both counts.
    * @param session - session being replayed.
    * @param entry - the recorded compression.
-   * @param nodes - the surface node seqs, when the caller already has them.
+   * @param surface - the surface snapshot, when the caller already has one.
    * @returns true when this entry still replaces a replayed message.
    */
   private survives(session: Session, entry: StoredEntry, surface?: Surface): boolean {
+    const event = session.eventAt(entry.targetSeq as Parameters<Session['eventAt']>[0])
+    const message = event === undefined ? null : this.rawMessageOf(session, event)
+    return this.survivesMessage(session, entry, message, surface)
+  }
+
+  /**
+   * {@link survives} against a message the caller already derived.
+   *
+   * Both accessors judge an entry from the *log's* message, never from one this plugin rewrote:
+   * a spliced branch holds the distilled text in its log, and the rewrite is in force there with
+   * nothing left to replace.
+   * @param session - session being replayed.
+   * @param entry - the recorded compression.
+   * @param message - the log's own message for this entry's target, or null when it derives none.
+   * @param surface - the surface snapshot, when the caller already has one.
+   * @returns true when this entry still replaces a replayed message.
+   */
+  private survivesMessage(session: Session, entry: StoredEntry, message: Message | null, surface?: Surface): boolean {
     // A rewrite handed off to a branch belongs to that branch: replaying this
     // conversation must show its own, pre-compression reasoning.
     if (!entryInForceHere(entry, String(session.id)) || entry.distilledText.length === 0) return false
@@ -664,8 +703,6 @@ export class ReasoningDistillEngine {
     // A projection can keep the seq while replacing the message, and a later step
     // can fold the reasoning block away; either way the rewrite would not apply,
     // so the entry must stop counting as alive.
-    const event = session.eventAt(entry.targetSeq as Parameters<Session['eventAt']>[0])
-    const message = event === undefined ? null : session.deriveEventMessage(event)
     if (message === null || message.id !== entry.targetMessageId) return false
     if (withDistilledReasoning(message, entry.distilledText) === undefined) return false
     // The reasoning must still be the text this distillation came from: an edit in
@@ -681,6 +718,69 @@ export class ReasoningDistillEngine {
   }
 
   /**
+   * What one entry does to one model-visible message, decided once for both accessors.
+   *
+   * `replace` is the rewrite this conversation carries and may be credited for; `scrub` is a
+   * rewrite whose text the log already holds because an earlier branch spliced it in — the text
+   * is already right, only the replay payload still describes the reasoning it replaced, and
+   * nothing may be credited (that branch earned it); undefined leaves the message alone.
+   * @param session - session whose surface is being read.
+   * @param entry - the recorded compression to judge.
+   * @param message - the log's own message for this entry's target.
+   * @param surface - the surface snapshot, when the caller already has one.
+   * @returns the decision, or undefined when this entry does not touch the message.
+   */
+  private rewriteKind(session: Session, entry: StoredEntry, message: Message, surface?: Surface): 'replace' | 'scrub' | undefined {
+    if (this.survivesMessage(session, entry, message, surface)) return 'replace'
+    if (entry.distilledText.length === 0 || message.role !== 'assistant') return undefined
+    // The same identity rule `survivesMessage` applies: a projection can put a different message
+    // at this seq, and its text merely happening to match is not this rewrite's business.
+    if ((message as { id?: string }).id !== entry.targetMessageId) return undefined
+    return reasoningTextOf(message) === entry.distilledText ? 'scrub' : undefined
+  }
+
+  /**
+   * One event's message, rewritten when an entry covers it.
+   *
+   * This is the per-event half of the seam: `deriveMessages()` derives each node through this
+   * accessor, and so does a compaction, so anything it should carry has to be decided here too.
+   * @param session - session whose surface is being derived.
+   * @param event - the event being derived.
+   * @param message - its unmodified derived message.
+   * @returns the rewritten message, or undefined when this event carries no rewrite.
+   */
+  private rewriteDerivedMessage(session: Session, event: SessionEvent, message: Message): Message | undefined {
+    if (event.type !== 'assistant/message' || message.role !== 'assistant') return undefined
+    const entry = this.entryForSeq(session, Number(event.seq))
+    if (entry === undefined) return undefined
+    if (this.rewriteKind(session, entry, message) === undefined) return undefined
+    return withDistilledReasoning(message, entry.distilledText)
+  }
+
+  /**
+   * The record's entry for one surface seq, the last one written winning.
+   *
+   * {@link applyRewrites} resolves entries the same way, so a seq carrying both a failed attempt
+   * and the adopted rewrite is judged identically on both accessors.
+   * @param session - session owning the record.
+   * @param seq - surface sequence to look up.
+   * @returns the entry, or undefined when no recorded rewrite targets it.
+   */
+  private entryForSeq(session: Session, seq: number): StoredEntry | undefined {
+    const record = this.store.peek(session.id)
+    if (record === undefined) return undefined
+    let found: StoredEntry | undefined
+    for (const entry of record.entries) if (entry.targetSeq === seq) found = entry
+    return found
+  }
+
+  /** One event's message as the log derives it, never as this plugin rewrote it. */
+  private rawMessageOf(session: Session, event: SessionEvent): Message | null {
+    const raw = this.rawDeriveEventMessage.get(session)
+    return raw === undefined ? session.deriveEventMessage(event) : raw(event)
+  }
+
+  /**
    * The surface as one request saw it: node seqs plus the derived positions.
    * @param session - session to snapshot.
    * @returns both views, computed from the same read of the surface.
@@ -689,6 +789,16 @@ export class ReasoningDistillEngine {
     return { nodes: new Set<number>(session.surface.nodes), slots: this.derivedIndex(session) }
   }
 
+  /**
+   * Replace the reasoning of every compressed message in one derived list.
+   *
+   * The list is rewritten into a pure function of the log plus the ledger: every recorded entry
+   * either applies its rewrite, only has its stale replay payload scrubbed, or has the log's own
+   * message restored over a substitution a previous derivation cached.
+   * @param session - session whose history is being derived.
+   * @param messages - the derived messages, as the host produced them.
+   * @returns the same array when nothing applies, else a rewritten copy.
+   */
   private applyRewrites(session: Session, messages: Message[]): { out: Message[]; applied: Map<string, number> } {
     const applied = new Map<string, number>()
     const record = this.store.peek(session.id)
@@ -699,34 +809,39 @@ export class ReasoningDistillEngine {
     const surface = this.surfaceOf(session)
     let out: Message[] | undefined
     for (const [seq, entry] of bySeq) {
-      // A failed or superseded attempt recorded its spending but substitutes
-      // nothing.
-      if (!this.survives(session, entry, surface)) continue
       const at = index.get(seq)
       if (at === undefined) continue
-      const source = messages[at]
-      if (source === undefined || source.role !== 'assistant') continue
+      const derived = messages[at]
+      if (derived === undefined || derived.role !== 'assistant') continue
       // A projection can replace the content at this seq with a different
       // assistant message; its reasoning is not the reasoning this rewrite
       // distilled, so it must not be injected there.
-      if ((source as { id?: string }).id !== entry.targetMessageId) continue
-      // The message must still carry reasoning: a projection can rewrite it (or
-      // strip the reasoning) at the same seq, and then this rewrite has nothing
-      // to replace and must not be recorded as applied.
-      // The message actually being replaced decides: an earlier wrapper may have
-      // edited the reasoning in its returned list while the durable event stayed
-      // the same, and that edit must not be overwritten by stale distillation.
-      // Same rule as survives(): the original reasoning, or the distilled text a branch
-      // inherited in its place, both mean this rewrite is the one in force.
-      const currentReasoning = reasoningTextOf(source)
-      if (entry.originalHash !== undefined
-        && hashText(currentReasoning) !== entry.originalHash
-        && currentReasoning !== entry.distilledText) continue
-      const replaced = withDistilledReasoning(source, entry.distilledText)
+      if ((derived as { id?: string }).id !== entry.targetMessageId) continue
+      // The log's own message decides, never the one a previous derivation already rewrote:
+      // the host caches derived messages per node, so a substitution made while an entry was
+      // in force here would otherwise outlive the hand-off that moved it to its branch.
+      const event = session.eventAt(seq as Parameters<Session['eventAt']>[0])
+      const raw = event === undefined ? null : this.rawMessageOf(session, event)
+      if (raw === null) continue
+      const kind = this.rewriteKind(session, entry, raw, surface)
+      if (kind === undefined) {
+        // This conversation carries no rewrite here — a failed attempt, one a hand-off moved to
+        // its branch, or a target the user has since edited. A derivation that ran while it was
+        // still in force may have substituted this message, so the log's own text is restored.
+        // Compared by text, not by object: projections may hand back a fresh message each read.
+        if (reasoningTextOf(derived) === entry.distilledText) {
+          out ??= [...messages]
+          out[at] = raw
+        }
+        continue
+      }
+      const replaced = withDistilledReasoning(raw, entry.distilledText)
       if (replaced === undefined) continue
       out ??= [...messages]
       out[at] = replaced
-      applied.set(entry.id, at)
+      // Only a rewrite this conversation actually carries earns anything; scrubbing a spliced
+      // log's replay payload writes nothing back and credits nothing.
+      if (kind === 'replace') applied.set(entry.id, at)
     }
     return { out: out ?? messages, applied }
   }
@@ -1225,7 +1340,7 @@ export class ReasoningDistillEngine {
     for (const seq of session.surface.nodes) {
       const event = session.eventAt(seq)
       if (event === undefined) continue
-      if (session.deriveEventMessage(event) === null) continue
+      if (this.rawMessageOf(session, event) === null) continue
       position += 1
       index.set(seq, position)
     }

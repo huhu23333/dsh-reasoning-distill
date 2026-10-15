@@ -465,6 +465,16 @@ sessions.set(s6.id, s6)
 await fire('session/created', s6)
 const fatReasoning = 'hmm, let me think. '.repeat(120)
 
+/** Reasoning text of one derived message, for the compaction-seam checks. */
+const reasoningIn = (message: unknown): string =>
+  ((message as { content?: Array<{ type: string; text?: string }> } | null)?.content ?? [])
+    .filter(block => block.type === 'reasoning').map(block => block.text ?? '').join('\n')
+
+/** The signature one message's first replay block carries, if any. */
+const signatureIn = (message: unknown): unknown =>
+  ((message as { source?: { replayState?: { blocks?: Array<{ signature?: unknown }> } } })
+    .source?.replayState?.blocks ?? [])[0]?.signature
+
 /** Run one step of the fake tool loop and settle its compression. */
 async function runStep(turn: number): Promise<void> {
   s6.append('user/message', { id: `u-${turn}`, role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
@@ -1583,6 +1593,16 @@ await settleFor(async () => (await store59.load(s59.id)).entries[0]!.liveRequest
 check('sent rewritten reasoning stays credited after an unrelated derivation', JSON.stringify(sent59).includes('Distilled:')
   && (await store59.load(s59.id)).entries[0]!.liveRequests === 1,
   JSON.stringify({ sent: sent59, entry: (await store59.load(s59.id)).entries[0] }))
+// A compaction summarizes the conversation by deriving one event at a time
+// (`deriveEventMessage`), not by asking for the message list, so both accessors have to answer
+// with the same message — same text, same replay payload, same bytes. Here the log still holds
+// the original reasoning, so only a wrapper on the per-event accessor can make this pass.
+const perEvent59 = s59.deriveEventMessage(s59.eventAt(entry59.targetSeq)!)
+const viaList59 = sent59.find(message => (message as { id?: string }).id === entry59.targetMessageId)
+check('a compaction deriving one event at a time sees the rewrite the request carries',
+  reasoningIn(perEvent59) === entry59.distilledText && reasoningIn(perEvent59) !== fatReasoning
+  && JSON.stringify(perEvent59) === JSON.stringify(viaList59),
+  JSON.stringify({ perEvent: perEvent59, viaList: viaList59 }).slice(0, 240))
 // A branch inherits a log whose compressed block already holds the distilled text (the
 // hand-off splices it in). That rewrite is in force there — it is what the request carries
 // — so it must count, not be skipped because its original text is gone. This is why every
@@ -1595,6 +1615,36 @@ const stock59 = engine59.stock(s59.id)
 check('a rewrite whose block already holds the distilled text still counts as in force',
   stock59?.ids.includes(entry59.id) === true,
   JSON.stringify({ ids: stock59?.ids, seq: entry59.targetSeq }))
+// The hand-off splices the text into the copy's log but leaves that event's replay payload
+// describing the reasoning it replaced — so the copy would replay a signature issued for text it
+// no longer holds. Both accessors drop it, and the durable log itself is never touched.
+const logMessage59 = (targetEvent59.data as { message: { source: { replayState?: unknown } } }).message
+logMessage59.source.replayState = {
+  response: { kind: 'deepseek-messages', version: 1, model: 'deepseek-flash' },
+  blocks: [{ type: 'reasoning', signature: 'signed-for-the-original-text' }, { type: 'text' }],
+}
+await store59.update(s59.id, record => {
+  record.entries[0]!.handoff = { state: 'created', branchId: 'branch-59', at: 1 }
+})
+const scrubbed59 = s59.deriveEventMessage(s59.eventAt(entry59.targetSeq)!)
+const scrubbedViaList59 = s59.deriveMessages().find(message => (message as { id?: string }).id === entry59.targetMessageId)
+check('a spliced log keeps its text but drops the replay payload signed for the reasoning it replaced',
+  reasoningIn(scrubbed59) === entry59.distilledText && signatureIn(scrubbed59) === undefined
+  && JSON.stringify(scrubbed59) === JSON.stringify(scrubbedViaList59)
+  && signatureIn(logMessage59) === 'signed-for-the-original-text',
+  JSON.stringify({ perEvent: scrubbed59, viaList: scrubbedViaList59, log: signatureIn(logMessage59) }).slice(0, 260))
+check('and the scrub is idempotent, so repeated derivations stay byte-identical',
+  JSON.stringify(s59.deriveEventMessage(s59.eventAt(entry59.targetSeq)!)) === JSON.stringify(scrubbed59))
+// A hand-off moves the rewrite to its branch, so this conversation has to fall back to its own
+// reasoning — including when a derivation cached the substitution before the hand-off ran.
+targetBlock59.text = fatReasoning
+const reverted59 = (engine59 as unknown as {
+  applyRewrites(session: unknown, messages: unknown[]): { out: Array<{ id?: string }>; applied: Map<string, number> }
+}).applyRewrites(s59, sent59)
+check("a substitution cached before the hand-off is replaced by the log's own reasoning",
+  reasoningIn(reverted59.out.find(message => message.id === entry59.targetMessageId)) === fatReasoning
+  && reverted59.applied.size === 0,
+  JSON.stringify({ applied: [...reverted59.applied.keys()] }))
 
 
 console.log('scenario 64: running background work pauses compression when configured')
