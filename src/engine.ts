@@ -126,6 +126,8 @@ export class ReasoningDistillEngine {
    * backend after the original turn reaches idle; it never rejects that turn.
    */
   private readonly pendingBranch = new Map<string, string>()
+  /** Conversations a hand-off replaced that the host would not archive yet. */
+  private readonly pendingArchive = new Set<string>()
   /** An existing turn finishing before its one idle-phase branch attempt. */
   private readonly deferredBranch = new Set<string>()
   /** One derivation per agent/request boundary may own request accounting. */
@@ -189,10 +191,18 @@ export class ReasoningDistillEngine {
    * @param config - live plugin configuration.
    * @param store - sidecar store.
    */
+  /**
+   * @param ctx - host context.
+   * @param config - live plugin configuration.
+   * @param store - sidecar store.
+   * @param archive - archive one session on the host, when the host offers it. Injected so
+   *   tests never touch a workspace registry.
+   */
   constructor(
     private readonly ctx: Context,
     private readonly config: Config,
     private readonly store: SidecarStore,
+    private readonly archive: ((sessionId: string) => Promise<void>) | undefined = undefined,
   ) {}
 
   /** Attach every observer, hook, and existing-session wrap. */
@@ -209,6 +219,9 @@ export class ReasoningDistillEngine {
       } catch (error: unknown) {
         this.ctx.logger.warn('reasoning-distill: observation failed: %o', error)
       }
+      // A conversation whose running work refused the archive is retried here: its work
+      // settling is exactly the moment the host will accept the archive.
+      if (this.pendingArchive.has(session.id)) void this.archiveSuperseded(session.id)
     })
     // Await any distillation queued by the previous step before the next request
     // is assembled, so a compression lands before the reasoning would be resent.
@@ -750,6 +763,34 @@ export class ReasoningDistillEngine {
     }
   }
 
+  /**
+   * Archive the conversation a successful hand-off replaced.
+   *
+   * Best effort by design: a host without a workspace registry, or one that refuses while
+   * the conversation still has running work (its own fence), must never fail the hand-off.
+   * A refusal is remembered so the archive is retried when that work settles — the
+   * conversation stays listed meanwhile rather than being hidden with work still running.
+   * @param sessionId - the replaced conversation.
+   */
+  private async archiveSuperseded(sessionId: string): Promise<void> {
+    const archive = this.archive
+    if (archive === undefined) return
+    if (!this.config.archiveSuperseded.get()) {
+      this.pendingArchive.delete(sessionId)
+      return
+    }
+    try {
+      await archive(sessionId)
+      this.pendingArchive.delete(sessionId)
+    } catch (error: unknown) {
+      this.pendingArchive.add(sessionId)
+      this.ctx.logger.warn(
+        'reasoning-distill: %s is not archived yet (%s); it stays listed until its work ends',
+        sessionId, error instanceof Error ? error.message : String(error),
+      )
+    }
+  }
+
   /** POST one branch operation at idle; never retry ambiguous non-idempotent requests. */
   private async handOffToBranch(session: Session, signal?: AbortSignal): Promise<boolean> {
     const generation = this.generation.get(session.id) ?? 0
@@ -817,6 +858,9 @@ export class ReasoningDistillEngine {
       // ledger: without it the branch's panel reports nothing and loses the accounting
       // for the compression that created it.
       await this.carryLedgerToBranch(session.id, created)
+      // Hiding the replaced conversation is the host's job, not a panel's: it must happen
+      // even when nobody is looking at this conversation.
+      await this.archiveSuperseded(session.id)
       // Only the generation that asked for this hand-off may have its turn ended:
       // a disposed one is already gone.
       return (this.generation.get(session.id) ?? 0) === generation

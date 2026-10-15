@@ -41,7 +41,16 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const persistence = ctx.get('sessionPersistence')
   if (persistence === undefined) throw new Error('reasoning-distill requires the sessionPersistence service; install and enable a session-persistence backend before loading this plugin')
   const store = new SidecarStore()
-  const engine = new ReasoningDistillEngine(ctx, config, store)
+  // The host owns archiving, so a hand-off hides the conversation it replaced whether or
+  // not a panel happens to be looking at it. Resolved lazily: a host without the
+  // workspace registry still gets every other feature.
+  const archive = async (sessionId: string): Promise<void> => {
+    const registry = (ctx as unknown as { get(key: string): unknown }).get('workspaceRegistry') as
+      { archiveSession(id: unknown, options?: { stopActivity?: boolean }): Promise<void> } | undefined
+    if (registry === undefined) throw new Error('the workspace registry is unavailable')
+    await registry.archiveSession(sessionId)
+  }
+  const engine = new ReasoningDistillEngine(ctx, config, store, archive)
   engine.start()
   // One installer at a time, in this process: the quick-install page can be closed and
   // reopened without losing progress, and cancellation is a kill.

@@ -1137,7 +1137,13 @@ await new Promise<void>(resolve => activeBackend37a.listen(0, '127.0.0.1', resol
 const agent37a = { status: 'running', whenIdle: () => idle37a, session: undefined as FakeSession | undefined, inbox: { hasPending: false }, followup: (_message: unknown) => undefined }
 const ctx37a = { ...ctx, webServer: { port: (activeBackend37a.address() as { port: number }).port }, agents: { get: () => agent37a } }
 const store37a = new SidecarStore()
-const engine37a = new ReasoningDistillEngine(ctx37a as never, cfg10 as never, store37a)
+let archiveCalls37a: string[] = []
+let refuseArchive37a = false
+const archive37a = async (id: string): Promise<void> => {
+  archiveCalls37a.push(id)
+  if (refuseArchive37a) throw new Error('WorkspaceActiveSessionError: the session has running work')
+}
+const engine37a = new ReasoningDistillEngine(ctx37a as never, cfg10 as never, store37a, archive37a)
 engine37a.start()
 const s37a = new FakeSession('session-active-37a')
 agent37a.session = s37a
@@ -1155,6 +1161,22 @@ check('the branch is created during pre-step without waiting for idle',
   posts37a === 1 && (await store37a.load(s37a.id)).entries[0]?.handoff?.branchId === 'session-idle-branch',
   JSON.stringify({ posts37a, handoff: (await store37a.load(s37a.id)).entries[0]?.handoff }))
 check('a created branch ends the original turn', (decision37a as { kind?: string }).kind === 'reject', JSON.stringify(decision37a))
+// Archiving belongs to the host: a panel is only open while the user looks at the
+// conversation, so the replaced one must leave the list without one.
+check('a successful hand-off archives the replaced conversation on the host',
+  archiveCalls37a.length === 1 && archiveCalls37a[0] === s37a.id, JSON.stringify(archiveCalls37a))
+// The host refuses to archive a session with running work (its own fence). That must not
+// fail the hand-off, and the conversation stays listed until the work settles.
+const archiveFace37a = engine37a as unknown as { archiveSuperseded(id: string): Promise<void>; pendingArchive: Set<string> }
+refuseArchive37a = true
+archiveCalls37a = []
+await archiveFace37a.archiveSuperseded(s37a.id)
+check('a host that refuses while work runs leaves the conversation listed',
+  archiveCalls37a.length === 1 && archiveFace37a.pendingArchive.has(s37a.id))
+refuseArchive37a = false
+await archiveFace37a.archiveSuperseded(s37a.id)
+check('and retries once the work has settled',
+  archiveCalls37a.length === 2 && !archiveFace37a.pendingArchive.has(s37a.id))
 const branchRecord37a = await store37a.load('session-idle-branch')
 check('the branch inherits the ledger so its panel reports the compression it was cut from',
   branchRecord37a.entries.length === 1 && branchRecord37a.entries[0]?.id === (await store37a.load(s37a.id)).entries[0]?.id,
