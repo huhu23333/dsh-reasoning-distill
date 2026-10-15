@@ -20,7 +20,10 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
-    "docs"
+    "docs",
+    "scripts/install-backend.sh",
+    "scripts/patch-message-edit.py",
+    "vendor/dsh-message-edit-0.2.3-patched4.tgz"
   ],
   "scripts": {
     "build": "tsdown",

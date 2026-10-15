@@ -490,6 +490,16 @@ export class ReasoningDistillEngine {
         if (key.startsWith(prefix)) map.delete(key)
       }
     }
+    // Hand-off bookkeeping is keyed `sessionId:entryId` too. Dropping it here is what
+    // stops a disposed session's unwritten note from being retried forever, and keeps
+    // the note plus its ordering counters from outliving the session.
+    for (const map of [
+      this.owedHandoffNotes, this.handoffOrder, this.committedHandoffOrder,
+    ] as Array<Map<string, unknown>>) {
+      for (const key of [...map.keys()]) {
+        if (key.startsWith(prefix)) map.delete(key)
+      }
+    }
     this.pendingBranch.delete(sessionId)
     this.expectRequest.delete(sessionId)
     this.loadStarted.delete(sessionId)

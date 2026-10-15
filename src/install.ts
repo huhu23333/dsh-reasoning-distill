@@ -23,6 +23,12 @@ export interface InstallProcess {
   onLine(handler: (line: string) => void): void
   /** Called once the process is gone. */
   onExit(handler: (code: number | null) => void): void
+  /**
+   * Called when the process fails outside its own output — a `bash` that is
+   * missing or not executable, say — so the failure never surfaces as the host's
+   * unhandled `error` event. Optional: a fake that cannot fail need not report.
+   */
+  onError?(handler: (error: Error) => void): void
   /** Ask the process to stop. */
   kill(): void
 }
@@ -80,6 +86,10 @@ export function scriptedSpawner(script: string, cwd: string = process.cwd()): In
         child.stderr.on('data', drain)
       },
       onExit: handler => { child.once('close', code => handler(code)) },
+      // A spawn that never got its program running reports through `error` and may
+      // still emit `close` afterwards; both end up in the runner's single terminal
+      // step, which settles the job only once.
+      onError: handler => { child.once('error', handler) },
       kill: () => { child.kill('SIGTERM') },
     }
   }
@@ -136,11 +146,11 @@ export class InstallRunner {
       this.child = child
       child.onLine(line => this.consume(job, line))
       child.onExit(code => this.settle(job, code))
+      child.onError?.(error => this.settle(job, null, error))
     } catch (error: unknown) {
-      job.phase = 'failed'
-      job.error = error instanceof Error ? error.message : String(error)
-      job.endedAt = this.now()
-      this.child = undefined
+      // A spawner that throws synchronously fails the same way an asynchronous
+      // `error` event does, so it ends through that one terminal step too.
+      this.settle(job, null, error)
     }
     return { ok: true, job }
   }
@@ -181,8 +191,17 @@ export class InstallRunner {
     }
   }
 
-  /** Write the terminal state once the child is gone. */
-  private settle(job: InstallJob, code: number | null): void {
+  /**
+   * Write the terminal state once the child is gone.
+   *
+   * `close`, `error` and cancellation can reach this for one job, so it is the
+   * only place that ends a job: it writes nothing once the job has already ended
+   * and never lets a spawn failure pass as a successful exit.
+   * @param job - job to end.
+   * @param code - exit code, or null when the child never ran.
+   * @param error - the spawn failure to report, when there was one.
+   */
+  private settle(job: InstallJob, code: number | null, error?: unknown): void {
     this.child = undefined
     if (job.endedAt !== undefined) return
     job.endedAt = this.now()
@@ -191,11 +210,13 @@ export class InstallRunner {
       return
     }
     if (job.phase === 'failed') return
-    if (code === 0) {
+    if (code === 0 && error === undefined) {
       job.phase = 'done'
       return
     }
     job.phase = 'failed'
-    job.error = job.error ?? `安装器退出码 ${code === null ? '未知' : String(code)}`
+    job.error = job.error ?? (error === undefined
+      ? `安装器退出码 ${code === null ? '未知' : String(code)}`
+      : error instanceof Error ? error.message : String(error))
   }
 }
