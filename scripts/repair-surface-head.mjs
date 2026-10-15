@@ -9,6 +9,12 @@
 // step/start -- the step/start is rotated up to the turn and the system message is copied
 // in behind it.
 //
+// The numbers a rotation or an insertion moves are nothing without the references that
+// name them: both strategies below rewrite seqs, so both move every reference through the
+// host's own event-reference remap (`remapV3References`) and refuse a file whose
+// references cannot be placed rather than writing one the host loads with its references
+// pointing at the wrong events.
+//
 // Every candidate is validated with the host's own released-v4 validator before it is
 // written, and every file is backed up first.
 //
@@ -31,6 +37,22 @@ const checkout = argOf('--checkout', path.join(os.homedir(), 'otherProject', 'de
 const session = await import(pathToFileURL(path.join(checkout, 'packages/core/session/lib/index.js')).href);
 const format = await import(pathToFileURL(path.join(checkout, 'packages/session/session-format-v3-to-v4/lib/index.js')).href);
 const known = new Set([...session.KNOWN_SESSION_EVENT_TYPES, 'message-edit/version']);
+
+// The host's own event-reference remap, imported from its sources because the built package
+// does not re-export it. It is what makes rewriting a seq safe: it moves `surfaceOp`'s
+// `startSeq`/`endSeq`, `sourceEventSeqs`, a compaction's `shadowedRange`/`shadowedSeqs`, a
+// title's `messageSeqs`, `command/done`'s `sourceEventSeq` and `image/offload`'s targets
+// with the numbers, and it refuses a reference that does not name an earlier event. A host
+// that cannot be imported (a published install without sources, or a Node without type
+// stripping) leaves this undefined; a file whose numbers move is then reported instead of
+// rewritten, because rewriting the numbers without the remap is exactly what leaves a
+// loadable log whose references point at the wrong events.
+let remapV3References;
+try {
+  ({ remapV3References } = await import('@deepseek-ai/dsh-session-format-v3-to-v4/src/references.ts'));
+} catch {
+  remapV3References = undefined;
+}
 
 function findLogs(dir) {
   const found = [];
@@ -73,19 +95,53 @@ function rejection(wire, events) {
   }
 }
 
-/** Rewrite this log's own seq references through an old -> new map. */
-function remapReferences(events, mapping) {
-  const move = value => mapping.get(value) ?? value;
-  return events.map(event => {
-    const data = event.data === undefined ? undefined : { ...event.data };
-    if (Array.isArray(data?.messageSeqs)) data.messageSeqs = data.messageSeqs.map(move);
-    if (typeof data?.throughSeq === 'number') data.throughSeq = move(data.throughSeq);
-    return {
-      ...event,
-      ...(data === undefined ? {} : { data }),
-      ...Array.isArray(event.sourceEventSeqs) ? { sourceEventSeqs: event.sourceEventSeqs.map(move) } : {},
-    };
-  });
+/**
+ * Move one event's references from source sequence numbers to target ones.
+ *
+ * The reference fields are the host's business, not this script's: `remapV3References` is
+ * the function the host itself calls when it renumbers events, so every field it covers
+ * follows the numbers and a reference that names no earlier stored event throws instead of
+ * being carried over stale. That remap does not cover a delivery marker's `data.throughSeq`,
+ * which is moved here; an unexpected `throughSeq` elsewhere also refuses rather than passing
+ * through untouched. An unplaceable reference refuses the file rather than being left
+ * pointing at whatever now sits at the old number.
+ * @param event - stored event whose source seq is the key of `mapping`.
+ * @param target - the seq the event takes in the rewritten log.
+ * @param mapping - target seq of every source seq present in the log.
+ * @returns the event at `target` with every reference remapped.
+ */
+function remapReferences(event, target, mapping) {
+  if (remapV3References === undefined) throw new Error('the host event-reference remap is not importable here');
+  const reference = value => {
+    const at = typeof value === 'number' ? mapping[value] : undefined;
+    if (at === undefined || value >= event.seq) throw new Error(`reference ${String(value)} does not name an earlier stored event`);
+    return at;
+  };
+  let out = remapV3References(event, target, mapping);
+  const data = out.data;
+  if (data !== null && typeof data === 'object' && data.throughSeq !== undefined) {
+    if (out.type !== 'session-log-deepseek/delivery-accepted') throw new Error(`unknown throughSeq on ${String(out.type)}`);
+    out = { ...out, data: { ...data, throughSeq: reference(data.throughSeq) } };
+  }
+  return out;
+}
+
+/**
+ * Place a copied event at its target coordinate, moving the references it carried.
+ *
+ * The copy is a copy, not the head itself, so its references have to follow the events
+ * around it even when it lands exactly where the event it was copied from sat.
+ * `remapV3References` reads an unchanged seq as "this event did not move" and hands the
+ * event back untouched; passing the source coordinate one higher is the same validity bound
+ * it always had (every reference it carried names a strictly earlier source event) and
+ * makes the remap run.
+ * @param source - the stored event the copy was taken from.
+ * @param target - the seq the copy takes in the rewritten log.
+ * @param mapping - target seq of every source seq present in the log.
+ * @returns the copy at `target` with the references it carried remapped.
+ */
+function remapCopy(source, target, mapping) {
+  return remapReferences(target === source.seq ? { ...source, seq: source.seq + 1 } : source, target, mapping);
 }
 
 /** Rotate the opening step/start above the first user message and copy the head in. */
@@ -104,26 +160,30 @@ function rotateHead(wire, events) {
     surfaceOp: 'append',
     data: { ...head.data, turn: stepStart.data.turn, step: stepStart.data.step },
   };
+  // The rebuilt order is the map: every event's source seq names the seq it takes, so the
+  // references that name those source seqs move with them instead of being left behind.
   const rebuilt = [];
-  const mapping = new Map();
+  const mapping = [];
   for (const event of events) {
     if (event.seq === firstSurface.seq) {
       // turn/start, step/start, system head, then the user message
-      rebuilt.push({ ...stepStart, seq: rebuilt.length });
-      mapping.set(stepStart.seq, rebuilt.length - 1);
-      rebuilt.push({ ...inserted, seq: rebuilt.length });
-      rebuilt.push({ ...event, seq: rebuilt.length });
-      mapping.set(event.seq, rebuilt.length - 1);
+      rebuilt.push({ event: stepStart, target: rebuilt.length, copy: false });
+      mapping[stepStart.seq] = rebuilt.length - 1;
+      rebuilt.push({ event: inserted, target: rebuilt.length, copy: true });
+      rebuilt.push({ event, target: rebuilt.length, copy: false });
+      mapping[event.seq] = rebuilt.length - 1;
       continue;
     }
     if (event.seq === stepStart.seq) {
       // The original step/start has been rotated up; its slot closes the gap.
       continue;
     }
-    rebuilt.push({ ...event, seq: rebuilt.length });
-    mapping.set(event.seq, rebuilt.length - 1);
+    rebuilt.push({ event, target: rebuilt.length, copy: false });
+    mapping[event.seq] = rebuilt.length - 1;
   }
-  return remapReferences(rebuilt, mapping);
+  return rebuilt.map(({ event, target, copy }) => copy
+    ? remapCopy(event, target, mapping)
+    : remapReferences(event, target, mapping));
 }
 
 /** Fallback: insert the head straight in, when the surrounding step allows it. */
@@ -132,9 +192,17 @@ function insertHead(events) {
   const head = events.find(event => event.type === 'system/message');
   if (firstSurface === undefined || head === undefined) return undefined;
   const at = firstSurface.seq;
-  const patched = events.map(event => event.seq >= at ? { ...event, seq: event.seq + 1 } : event);
-  patched.splice(at, 0, { ...head, seq: at, time: firstSurface.time ?? head.time, surfaceOp: 'append' });
-  return patched;
+  const inserted = { ...head, time: firstSurface.time ?? head.time, surfaceOp: 'append' };
+  const rebuilt = [];
+  const mapping = [];
+  for (const event of events) {
+    if (event.seq === at) rebuilt.push({ event: inserted, target: rebuilt.length, copy: true });
+    rebuilt.push({ event, target: rebuilt.length, copy: false });
+    mapping[event.seq] = rebuilt.length - 1;
+  }
+  return rebuilt.map(({ event, target, copy }) => copy
+    ? remapCopy(event, target, mapping)
+    : remapReferences(event, target, mapping));
 }
 
 let candidates = 0;
@@ -155,7 +223,28 @@ for (const file of findLogs(root)) {
   const reason = rejection(wire, events);
   if (reason === undefined) continue;
   candidates += 1;
-  for (const [strategy, patched] of [['rotate', rotateHead(wire, events)], ['insert', insertHead(events)]]) {
+  // Both strategies below rewrite seqs, so both have to move the references that name them.
+  // Two prerequisites are refusals, never a partial repair: a stored sequence that does not
+  // run strictly forwards has no single old -> new table to move them through, and without
+  // the host's reference remap nothing can move them at all.
+  const forwards = events.every((event, index) => index === 0 || event.seq > events[index - 1].seq);
+  if (remapV3References === undefined || !forwards) {
+    console.log(`${apply ? 'REPAIR' : 'WOULD REPAIR'} ${wire.id} reject=${reason} -> ${remapV3References === undefined ? 'the host event-reference remap is not importable here' : 'the stored sequence is not strictly increasing'}`);
+    console.log(remapV3References === undefined
+      ? '  SKIP repairing: the host event-reference remap is not importable here'
+      : '  SKIP repairing: the stored sequence is not strictly increasing');
+    continue;
+  }
+  for (const [strategy, build] of [['rotate', () => rotateHead(wire, events)], ['insert', () => insertHead(events)]]) {
+    let patched;
+    try {
+      patched = build();
+    } catch (error) {
+      // A reference that cannot be placed refuses the file: the numbers would move while the
+      // things that name them stayed behind.
+      console.log(`  SKIP repairing: ${error instanceof Error ? error.message : String(error)}`);
+      break;
+    }
     if (patched === undefined) continue;
     const verdict = rejection(wire, patched);
     console.log(`${apply ? 'REPAIR' : 'WOULD REPAIR'} ${wire.id} reject=${reason} strategy=${strategy} -> ${verdict ?? 'the host validator accepts it'}`);
