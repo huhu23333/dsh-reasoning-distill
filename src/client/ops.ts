@@ -14,6 +14,8 @@
 
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { FALLBACK_RULE, mergeRule, withKindDefaults, withLimitDefaults, type RuleOverride, type RuleSource } from '../rule.ts'
+import { backendById } from '../backends.ts'
+import { entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
 
 /** Sparse per-model rule as stored, matching what the host schema accepts. */
 export type StoredRule = RuleOverride
@@ -138,18 +140,80 @@ export function availableSessionStorage(source: Pick<Window, 'sessionStorage'> =
 }
 
 /** Read the result of a backend request made by this tab before its next settle. */
-export function pendingRewriteOutcome(storage: Pick<Storage, 'getItem'> | undefined, key: string): { error?: string } | undefined {
+export function pendingRewriteOutcome(storage: Pick<Storage, 'getItem'> | undefined, key: string): { error?: string; claimed?: number } | undefined {
   try {
     const saved = storage?.getItem(`reasoning-distill:handoff:${key}`)
     if (saved == null) return undefined
     const value: unknown = JSON.parse(saved)
     if (value === null || typeof value !== 'object') return undefined
-    const error = (value as { error?: unknown }).error
+    const record = value as { error?: unknown; claimed?: unknown }
+    if (record.claimed !== undefined) {
+      return typeof record.claimed === 'number' && Number.isFinite(record.claimed) ? { claimed: record.claimed } : undefined
+    }
+    const error = record.error
     if (error !== null && typeof error !== 'string') return undefined
     return error === null ? {} : { error }
   } catch {
     return undefined
   }
+}
+
+/** Take an attempt without recording how it ended. */
+function rememberClaim(storage: Pick<Storage, 'setItem'> | undefined, key: string, now: number): void {
+  try {
+    storage?.setItem(`reasoning-distill:handoff:${key}`, JSON.stringify({ claimed: now }))
+  } catch {
+    // Storage can be blocked; the in-memory guard still keeps this mount to one attempt.
+  }
+}
+
+/** How long one tab's claim suppresses another tab's request for the same rewrite. */
+const CLAIM_TTL_MS = 60_000
+
+/**
+ * Claim the right to POST one in-place rewrite.
+ *
+ * Two drivers can be mounted at once — the report panel and the composer seat — and the
+ * request must not be sent twice. The first caller to write a fresh claim wins; a claim
+ * older than {@link CLAIM_TTL_MS} is ignored so a driver that died before recording its
+ * outcome cannot strand the entry. A recorded outcome (success or refusal) always wins over
+ * a later claim.
+ * @param storage - per-tab storage; without it every caller wins and the in-memory guard decides.
+ * @param key - session id and entry id.
+ * @param now - clock, for the staleness test.
+ * @returns whether this caller owns the attempt.
+ */
+export function claimRewriteAttempt(storage: Pick<Storage, 'getItem' | 'setItem'> | undefined, key: string, now: number): boolean {
+  const saved = pendingRewriteOutcome(storage, key)
+  if (saved === undefined) {
+    rememberClaim(storage, key, now)
+    return true
+  }
+  if (saved.claimed === undefined) return false
+  if (now - saved.claimed < CLAIM_TTL_MS) return false
+  rememberClaim(storage, key, now)
+  return true
+}
+
+/**
+ * The rewrites an in-place backend still has to be asked to write.
+ *
+ * The host cannot make this request itself — an in-place backend's route sits behind the
+ * browser's credentials — and it keeps only one pending marker per session, so a driver has
+ * to work from the ledger instead: every rewrite that is in force here, was not refused, and
+ * carries no hand-off note is still owed. Written and unwritten entries look the same in the
+ * ledger, which is why the caller claims each attempt in browser storage before sending it.
+ * @param report - the session's report, when one has arrived.
+ * @returns the entries whose rewrite still has to be written back.
+ */
+export function owedInPlaceEntries(report: SessionReport | null | undefined): CompressionEntry[] {
+  if (report == null) return []
+  if (backendById(report.config.rewriteBackend)?.kind !== 'in-place') return []
+  return report.entries.filter(entry =>
+    entry.failed !== true
+    && entry.skipped !== true
+    && entry.handoff === undefined
+    && entryInForceHere(entry, report.sessionId))
 }
 
 /** Remember a terminal backend outcome before asking the host to settle it. */

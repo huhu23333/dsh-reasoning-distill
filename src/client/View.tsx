@@ -3,6 +3,7 @@ import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
 import { availableSessionStorage, backendById, isStaleResponse, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
 import { HANDOFF_ROUTE, REPORT_ROUTE, entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
+import { settleHandoff } from './handoff.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
 
@@ -212,27 +213,6 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
    * one (nothing to retry); `failed` means the request itself did not complete, so
    * the settle is still owed.
    */
-  const settleHandoff = async (current: SessionReport, entryId: string, error?: string): Promise<{ verdict: 'settled' | 'refused' | 'failed'; recorded: boolean }> => {
-    try {
-      const response = await fetch(HANDOFF_ROUTE, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          sessionId: current.sessionId,
-          cancel: false,
-          entryId,
-          generation: current.generation,
-          ...error === undefined ? {} : { error },
-        }),
-      })
-      if (!response.ok) return { verdict: 'failed', recorded: true }
-      const payload = await response.json().catch(() => null) as { ok?: unknown } | null
-      const recorded = (payload as { recorded?: unknown } | null)?.recorded !== false
-      return { verdict: payload?.ok === false ? 'refused' : 'settled', recorded }
-    } catch {
-      return { verdict: 'failed', recorded: true }
-    }
-  }
   // Stamped when the view starts showing a session, not when its first report
   // arrives: a slow first poll must not make a branch that landed after the tab
   // opened look like history.
@@ -314,6 +294,9 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
     // interpret an uncleared host marker as permission to POST the rewrite again.
     const saved = pendingRewriteOutcome(availableSessionStorage(), attemptKey)
     if (saved !== undefined) {
+      // Another driver — the composer seat — has claimed this attempt: it owns both the POST
+      // and the settle, so this panel must not settle it out from under that claim.
+      if (saved.claimed !== undefined) return
       settlePending.current.set(attemptKey, saved.error)
       applyingPending.current.add(attemptKey)
       void settleHandoff(current, pending, saved.error).then(({ verdict, recorded }) => {

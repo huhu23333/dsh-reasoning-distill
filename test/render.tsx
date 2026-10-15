@@ -14,7 +14,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, claimRewriteAttempt, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
 import { installPromptFor, type InstallJob } from '../src/install-shared.ts'
@@ -185,6 +185,34 @@ check('three backends are offered: one branching, two in place',
 // the probe compares the backend's answer against a sibling path that cannot exist.
 const absentShell = { status: 405, contentType: null, body: '' }
 const absentApi = { status: 401, contentType: 'text/plain', body: 'unauthorized' }
+
+// An in-place backend writes back from the browser (its route needs the user credentials)
+// and the host keeps one pending marker per session, so the driver works from the ledger and
+// claims each attempt before sending it.
+const reportInPlace = {
+  sessionId: 'session-seat-1',
+  config: { rewriteBackend: 'msg-edit' },
+  entries: [
+    { id: 'owed-1', targetSeq: 20, turn: 1, step: 1, appliedAt: 1, distilledText: 'Distilled', savedTokensPerRequest: 10, liveRequests: 0, liveSaved: 0, frozenSaved: 0, sessionLive: true, originalChars: 9, distilledChars: 1, originalTokens: 9, distilledTokens: 1, cacheBreakTokens: 0, cacheBreakCost: 0, targetBlockIndex: 0, active: true, provider: 'p', model: 'm', distill: {},  },
+    { id: 'done-1', targetSeq: 20, turn: 1, step: 1, appliedAt: 1, distilledText: 'Distilled', savedTokensPerRequest: 10, liveRequests: 0, liveSaved: 0, frozenSaved: 0, sessionLive: true, originalChars: 9, distilledChars: 1, originalTokens: 9, distilledTokens: 1, cacheBreakTokens: 0, cacheBreakCost: 0, targetBlockIndex: 0, active: true, provider: 'p', model: 'm', distill: {}, handoff: { state: 'skipped', at: 1 } },
+    { id: 'failed-1', targetSeq: 20, turn: 1, step: 1, appliedAt: 1, distilledText: 'Distilled', savedTokensPerRequest: 10, liveRequests: 0, liveSaved: 0, frozenSaved: 0, sessionLive: true, originalChars: 9, distilledChars: 1, originalTokens: 9, distilledTokens: 1, cacheBreakTokens: 0, cacheBreakCost: 0, targetBlockIndex: 0, active: true, provider: 'p', model: 'm', distill: {}, failed: true },
+  ],
+} as unknown as SessionReport
+check('a rewrite with no hand-off note is still owed by an in-place backend',
+  owedInPlaceEntries(reportInPlace).map(item => item.id).join(',') === 'owed-1',
+  JSON.stringify(owedInPlaceEntries(reportInPlace).map(item => item.id)))
+check('a branch backend leaves its write-back to the host',
+  owedInPlaceEntries({ ...reportInPlace, config: { rewriteBackend: 'message-edit' } } as never).length === 0)
+const claimStore = (() => {
+  const map = new Map<string, string>()
+  return { getItem: (key: string) => map.get(key) ?? null, setItem: (key: string, value: string) => { map.set(key, value) } }
+})()
+check('the first driver claims an in-place attempt', claimRewriteAttempt(claimStore, 'session-x:entry-1', 1_000) === true)
+check('a second driver leaves a fresh claim alone', claimRewriteAttempt(claimStore, 'session-x:entry-1', 1_100) === false)
+check('a stale claim is retaken rather than stranding the rewrite',
+  claimRewriteAttempt(claimStore, 'session-x:entry-1', 61_001) === true)
+rememberRewriteOutcome(claimStore, 'session-x:entry-1')
+check('a recorded outcome is never re-sent', claimRewriteAttempt(claimStore, 'session-x:entry-1', 200_000) === false)
 check("the shell's own answer for a missing route means the backend is not installed",
   !backendInstalled(absentShell, absentShell) && !backendInstalled(absentApi, absentApi))
 check('a backend that answers differently — even with its own refusal — is installed',

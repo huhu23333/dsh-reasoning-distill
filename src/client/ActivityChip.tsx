@@ -7,7 +7,8 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { isStaleResponse } from './ops.ts'
+import { availableSessionStorage, claimRewriteAttempt, isStaleResponse, owedInPlaceEntries, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest } from './ops.ts'
+import { settleHandoff } from './handoff.ts'
 import { REPORT_ROUTE, type BlockingReason, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
@@ -109,6 +110,8 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, on
   // arrives: browsing history must never redirect to an old hand-off.
   const followedAt = useRef<{ sessionId: string; at: number }>({ sessionId: '', at: 0 })
   const followed = useRef(new Set<string>())
+  /** In-place rewrites this mount has already sent. */
+  const applyingInPlace = useRef(new Set<string>())
 
   useEffect(() => {
     followedAt.current = { sessionId, at: Date.now() }
@@ -132,6 +135,48 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, on
   }
 
 
+  /**
+   * Write back the rewrites an in-place backend owes.
+   *
+   * The host cannot send these itself — an in-place backend's route sits behind the
+   * browser's credentials — and it keeps one pending marker per session, so a series of
+   * compressions used to leave every rewrite but the newest unwritten. This seat is mounted
+   * whenever the conversation is, so it drives them entry by entry from the report, claiming
+   * each attempt in browser storage first so the report panel cannot send it too.
+   * @param report - the session's latest report.
+   */
+  const applyInPlace = (report: SessionReport | null): void => {
+    for (const entry of owedInPlaceEntries(report)) {
+      if (report === null) return
+      const key = sessionId + ':' + entry.id
+      if (applyingInPlace.current.has(key)) continue
+      if (!claimRewriteAttempt(availableSessionStorage(), key, Date.now())) continue
+      const request = rewriteRequest(report.config.rewriteBackend, report.sessionId, entry, entry.distilledText)
+      if (request === undefined) continue
+      applyingInPlace.current.add(key)
+      void fetch(request.path, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(request.body),
+      }).then(async response => {
+        const payload: unknown = await response.json().catch(() => null)
+        const outcome = rewriteApplyOutcome(response.ok, payload)
+        if (!outcome.done) {
+          // Released so a later poll retries, and remembered so the panel reports the refusal
+          // instead of writing the rewrite a second time.
+          applyingInPlace.current.delete(key)
+          rememberRewriteOutcome(availableSessionStorage(), key, outcome.error)
+          return
+        }
+        rememberRewriteOutcome(availableSessionStorage(), key)
+        await settleHandoff(report, entry.id)
+      }).catch(() => {
+        applyingInPlace.current.delete(key)
+        rememberRewriteOutcome(availableSessionStorage(), key, 'the rewrite request failed')
+      })
+    }
+  }
+
   useEffect(() => {
     // A chip describing the previous session must not stand in for this one: the
     // status is cleared up front and every read is ordered, so a late or failed
@@ -150,6 +195,7 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, on
         applied.current = request
         setLive(liveAfterReport(report))
         follow(report)
+        applyInPlace(report)
       }).catch(() => {
         // A read that failed says nothing about the compression, so the chip goes
         // back to silence instead of staying expanded on a stale "busy". An older

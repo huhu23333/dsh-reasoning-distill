@@ -505,6 +505,8 @@ pnpm dsh plugin --profile web add github:moton16/dsh-msg-edit
 ```
 
 好消息：它的客户端产物只 require `react` 与 `@deepseek-ai/dsh-client-ui-primitives`，**不需要** message-edit 那种模块表补丁；端点与我们的映射**完全一致**——`POST /api/msg-edit/rewrite-message {sessionId, messageId, reasoning?}`、`POST /api/msg-edit/get-message {sessionId, messageId}`（另有 `edit-message`/`regenerate` 未使用）。已在临时 profile 里验证能装上。
+**原位后端的写回由谁发起**：`msg-edit` / `context-shaping` 的路由在 `/api/*` 后面，需要**浏览器凭据**，宿主自己够不到，所以写回只能由**前端**发起。此前它只在「推理蒸馏」标签页里做（打开该标签才挂载 ✗），而宿主的「待应用」标记**每个会话只留最新一个** ✗ —— 于是连续压缩时除最后一条外都不会被写回，对话页就一直显示原文。现在改为：**常驻座位**（输入框上方的芯片）每次拿到报告就**逐条判断**，凡是「在生效、没被拒、没有交接记录」的条目就发写回并结算；两个驱动之间用**浏览器存储里的认领标记**（60 秒过期）避免重复发送。因此**不需要打开报告标签**。
+
 ### 若一定要尝试另外两个后端（未验证，失败概率极高）
 
 **本仓库没有它们的可用流程**：既没有验证过的版本，也没有适配过的补丁。只能按下面的思路自行探索，**每一步都可能失败**，而且失败可能是**静默**的（探针通过、实际改写不生效，或写坏会话日志）：
