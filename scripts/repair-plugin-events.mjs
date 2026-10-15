@@ -9,8 +9,9 @@
 //
 // A log whose seqs no longer equal their positions is renumbered through the host's own
 // event-reference remap (`renumber` below), so the numbers other events refer to move with
-// them; a reference that cannot be placed refuses the file rather than being left stale.
-// When that remap is unavailable the log is reported and left untouched.
+// them, including the reference fields that remap does not cover; a reference that cannot be
+// placed refuses the file rather than being left stale. When that remap is unavailable the
+// log is reported and left untouched.
 //
 // Usage: node scripts/repair-plugin-events.mjs [--apply] [--root <sessions dir>] [--host <session package>]
 import { execFileSync } from 'node:child_process';
@@ -69,9 +70,13 @@ function findLogs(dir) {
  * The reference fields are the host's business, not this script's: `remapV3References` is
  * the function the host itself calls when it renumbers events, so every field it covers
  * follows the numbers and a reference that names no earlier stored event refuses the whole
- * file instead of being carried over stale. That remap does not cover a delivery marker's
- * `data.throughSeq`, which is remapped here; an unexpected `throughSeq` elsewhere also
- * refuses rather than passing through untouched.
+ * file instead of being carried over stale. Two reference fields it does not cover are moved
+ * here, each guarded by the event type that owns it: a delivery marker's `data.throughSeq`
+ * and a developer message's `data.headerSeq`. The second one is enforced by the host's own
+ * relationship validation (`developer/message headerSeq must reference an earlier
+ * request/header`) even though no remap moves it, so a rewrite that leaves it behind either
+ * produces a log the host refuses or -- when the old number lands on another valid
+ * `request/header` -- one whose developer message binds to the wrong header.
  * @param events - stored events in file order, with strictly increasing, distinct seqs.
  * @returns the events with their positions as seqs and every reference remapped.
  */
@@ -84,14 +89,33 @@ function renumber(events) {
     return target;
   };
   return events.map((event, index) => {
+    const move = value => reference(value, event.seq);
     let out = remapV3References(event, index, mapping);
-    const data = out.data;
-    if (data !== null && typeof data === 'object' && data.throughSeq !== undefined) {
-      if (out.type !== 'session-log-deepseek/delivery-accepted') throw new Error(`unknown throughSeq on ${String(out.type)}`);
-      out = { ...out, data: { ...data, throughSeq: reference(data.throughSeq, event.seq) } };
-    }
+    out = remapUncoveredReference(event, out, 'throughSeq', 'session-log-deepseek/delivery-accepted', move);
+    out = remapUncoveredReference(event, out, 'headerSeq', 'developer/message', move);
     return out;
   });
+}
+
+/**
+ * Move one reference field the host's remap does not cover, for the event type that owns it.
+ *
+ * The field is moved only while the host left it alone, so a host remap that later covers it
+ * is followed rather than moved twice. A field on any other event type refuses the file
+ * instead of being carried over untouched.
+ * @param source - the stored event before the remap.
+ * @param out - the event the host remap returned.
+ * @param field - the uncovered reference field (`throughSeq`, `headerSeq`).
+ * @param owner - the one event type that carries that field.
+ * @param reference - moves one source reference to its target, refusing an unplaceable one.
+ * @returns `out` with the field remapped, or `out` unchanged when nothing has to move.
+ */
+function remapUncoveredReference(source, out, field, owner, reference) {
+  const data = out.data;
+  if (data === null || typeof data !== 'object' || data[field] === undefined) return out;
+  if (out.type !== owner) throw new Error(`unknown ${field} on ${String(out.type)}`);
+  if (data[field] !== source.data?.[field]) return out;
+  return { ...out, data: { ...data, [field]: reference(data[field]) } };
 }
 
 let candidates = 0;

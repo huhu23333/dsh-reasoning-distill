@@ -14,8 +14,9 @@
 //
 // The numbers a shift moves are nothing without the references that name them: both passes
 // below rewrite seqs, so both move every reference through the host's own event-reference
-// remap (`remapReferences`) and refuse a file whose references cannot be placed rather than
-// writing one the host loads with its references pointing at the wrong events.
+// remap (`remapReferences`, which also moves the reference fields that remap does not cover)
+// and refuse a file whose references cannot be placed rather than writing one the host loads
+// with its references pointing at the wrong events.
 //
 // Usage: node scripts/repair-branch-turns.mjs [--apply] [--root <sessions dir>] [--host <session package>]
 import { execFileSync } from 'node:child_process';
@@ -62,9 +63,13 @@ try {
  * The reference fields are the host's business, not this script's: `remapV3References` is
  * the function the host itself calls when it renumbers events, so every field it covers
  * follows the numbers and a reference that names no earlier stored event throws instead of
- * being carried over stale. That remap does not cover a delivery marker's `data.throughSeq`,
- * which is moved here; an unexpected `throughSeq` elsewhere also refuses rather than passing
- * through untouched.
+ * being carried over stale. Two reference fields the remap does not cover are moved here,
+ * each guarded by the event type that owns it: a delivery marker's `data.throughSeq` and a
+ * developer message's `data.headerSeq`. The second one is enforced by the host's own
+ * relationship validation (`developer/message headerSeq must reference an earlier
+ * request/header`) even though no remap moves it, so a rewrite that leaves it behind either
+ * produces a log the host refuses or -- when the old number lands on another valid
+ * `request/header` -- one whose developer message binds to the wrong header.
  * @param event - stored event whose source seq is the key of `mapping`.
  * @param target - the seq the event takes in the rewritten log.
  * @param mapping - target seq of every source seq present in the log.
@@ -78,12 +83,30 @@ function remapReferences(event, target, mapping) {
     return at;
   };
   let out = remapV3References(event, target, mapping);
-  const data = out.data;
-  if (data !== null && typeof data === 'object' && data.throughSeq !== undefined) {
-    if (out.type !== 'session-log-deepseek/delivery-accepted') throw new Error(`unknown throughSeq on ${String(out.type)}`);
-    out = { ...out, data: { ...data, throughSeq: reference(data.throughSeq) } };
-  }
+  out = remapUncoveredReference(event, out, 'throughSeq', 'session-log-deepseek/delivery-accepted', reference);
+  out = remapUncoveredReference(event, out, 'headerSeq', 'developer/message', reference);
   return out;
+}
+
+/**
+ * Move one reference field the host's remap does not cover, for the event type that owns it.
+ *
+ * The field is moved only while the host left it alone, so a host remap that later covers it
+ * is followed rather than moved twice. A field on any other event type refuses the file
+ * instead of being carried over untouched.
+ * @param source - the stored event before the remap.
+ * @param out - the event the host remap returned.
+ * @param field - the uncovered reference field (`throughSeq`, `headerSeq`).
+ * @param owner - the one event type that carries that field.
+ * @param reference - moves one source reference to its target, refusing an unplaceable one.
+ * @returns `out` with the field remapped, or `out` unchanged when nothing has to move.
+ */
+function remapUncoveredReference(source, out, field, owner, reference) {
+  const data = out.data;
+  if (data === null || typeof data !== 'object' || data[field] === undefined) return out;
+  if (out.type !== owner) throw new Error(`unknown ${field} on ${String(out.type)}`);
+  if (data[field] !== source.data?.[field]) return out;
+  return { ...out, data: { ...data, [field]: reference(data[field]) } };
 }
 
 /** Where the log first opens a turn while another is already open. */
