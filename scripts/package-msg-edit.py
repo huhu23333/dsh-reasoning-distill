@@ -17,7 +17,14 @@ import tarfile
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 UPSTREAM = ROOT / 'vendor/dsh-msg-edit-0.1.0-upstream.tar.gz'
-TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched5.tgz'
+TARGET = ROOT / 'vendor/dsh-msg-edit-0.1.0-patched6.tgz'
+
+# Its editor panel is rendered inside the assistant-actions slot -- a narrow flex row -- and its
+# CSS gives that panel no positioning at all, so the host's layout clips it: half a box, the
+# Save/Cancel buttons out of reach, no way to close it. Turning the panel into a floating overlay
+# fixes the clipping and puts it above the conversation (code blocks included) in one rule.
+EDITOR_CSS_FROM = '.msg-edit-editor{display:flex;flex-direction:column;gap:6px;padding:6px 8px;border:1px solid var(--dsw-alias-border-l1,#333);border-radius:8px;background:var(--dsw-alias-bg-layer-2,#1e1e1e);min-width:280px}'
+EDITOR_CSS_TO = '.msg-edit-editor{position:fixed;right:16px;bottom:96px;z-index:4000;display:flex;flex-direction:column;gap:6px;padding:10px 12px;border:1px solid var(--dsw-alias-border-l1,#333);border-radius:8px;background:var(--dsw-alias-bg-layer-2,#1e1e1e);min-width:320px;width:min(620px,86vw);max-height:64vh;overflow:auto;box-shadow:0 10px 28px rgba(0,0,0,.38)}'
 
 # Every one of its host handlers reads the session's event log as `session.events`, a property the
 # 0.2.x Session no longer has: reading it threw a TypeError, which is why all four endpoints
@@ -88,7 +95,7 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
             metadata = json.loads(data)
             if metadata['name'] != '@moton16/dsh-msg-edit':
                 raise SystemExit(f"unexpected package name: {metadata['name']}")
-            metadata['version'] = '0.1.0-patched5'
+            metadata['version'] = '0.1.0-patched6'
             peers = metadata.get('peerDependencies', {})
             for key in list(peers):
                 peers[key] = PEER_FLOOR
@@ -104,6 +111,9 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
                 if old not in text:
                     raise SystemExit(f'client bundle no longer uses {old}')
                 text = text.replace(old, new)
+            if EDITOR_CSS_FROM not in text:
+                raise SystemExit('client bundle no longer carries the editor panel rule')
+            text = text.replace(EDITOR_CSS_FROM, EDITOR_CSS_TO, 1)
             data = text.encode('utf8')
             registration = CLIENT_ID_TO + ' + ' + str(len(ICON_RENAMES)) + ' icon names'
         elif str(relative) == 'lib/index.js':
@@ -120,7 +130,8 @@ with tarfile.open(UPSTREAM) as source, tarfile.open(TARGET, 'w:gz', format=tarfi
         info.mode = member.mode or 0o644
         info.mtime = member.mtime
         target.addfile(info, io.BytesIO(data))
-print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched5)')
+print(f'packed: {TARGET} (name @moton16/dsh-msg-edit, version 0.1.0-patched6)')
+print('editor panel: floating overlay (position:fixed, z-index:4000, 64vh scroll)')
 print('host: session.events -> session.snapshotEvents()')
 print('client icons: ' + ', '.join(f'{old}->{new}' for old, new in ICON_RENAMES.items()))
 print('host bundle: dropped the missing agents dependency and answered for it with a shim')
