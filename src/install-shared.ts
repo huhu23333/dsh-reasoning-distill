@@ -12,8 +12,6 @@
 export interface InstallableBackend {
   /** Stored backend id, matching {@link REWRITE_BACKENDS}. */
   id: string
-  /** Whether a scripted installer exists for it. */
-  scripted: boolean
 }
 
 /**
@@ -75,11 +73,15 @@ export const INSTALL_STEPS: readonly { id: string; label: string }[] = [
   { id: 'verify', label: '校验安装件与 vendor 逐字节一致' },
 ]
 
-/** Backends the quick-install page lists, with why each is (not) scripted. */
+/**
+ * Backends the quick-install page lists.
+ *
+ * Only a backend the page can actually install belongs here: the in-place slot in
+ * {@link REWRITE_BACKENDS} is a placeholder with nothing to install, so it is deliberately
+ * absent and the route refuses it like any other id it does not know.
+ */
 export const INSTALLABLE_BACKENDS: readonly InstallableBackend[] = [
-  { id: 'message-edit', scripted: true },
-  { id: 'msg-edit', scripted: false },
-  { id: 'context-shaping', scripted: false },
+  { id: 'message-edit' },
 ]
 
 /** The installable entry for one backend id, when the page knows it. */
@@ -98,15 +100,12 @@ export function installableBackend(id: string): InstallableBackend | undefined {
  * @returns the prompt text.
  */
 export function installPromptFor(backendId: string, repo: string): string {
-  const verified = backendId === 'message-edit'
   return [
     `请在本工作区里安装并接入 DSH 的「助手消息改写后端」：${backendId}。`,
     '',
     `第一步先读这两个文件（它们是本仓库唯一的事实来源）：${repo}/README.md 的「后端支持状态」与「安装与修补 message-edit 后端的完整流程」两节，以及 ${repo}/docs/message-edit-client-compat.md。`,
     '',
-    verified
-      ? '这个后端是本仓库唯一验证过的：请严格按 README 的流程做（装 vendor/dsh-message-edit-0.2.3-patched4.tgz 或原版后跑 scripts/patch-message-edit.py），每步都用 README 给出的校验命令确认。'
-      : '注意：这个后端在本仓库里从未安装、修补、探测过，端点契约全是按第三方接口假定写下的，很可能根本装不通。你的任务是「探索并如实汇报」，不是「务必装通」：每一步都要先用它自己的文档或包内容核对假定，对不上就停下来记录，不要伪造成功。',
+    '这个后端是本仓库唯一验证过的：请严格按 README 的流程做（装 vendor/dsh-message-edit-0.2.3-patched4.tgz 或原版后跑 scripts/patch-message-edit.py），每步都用 README 给出的校验命令确认。',
     '',
     '硬性要求：',
     `1. 只改与该后端安装相关的文件；不要改动本仓库的 scripts/**、src/**、vendor/**（除非你确认那正是修复所需，并在报告里逐条说明）。`,

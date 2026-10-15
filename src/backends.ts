@@ -18,10 +18,22 @@
 export interface RewriteBackend {
   /** Stored id; empty string is the "none selected" state. */
   id: string
-  /** Endpoint probed for availability. */
-  probe: { method: 'POST'; path: string; body: Record<string, unknown> }
+  /**
+   * Endpoint probed for availability.
+   *
+   * Absent when nothing can answer: a placeholder reserves the slot for a backend this plugin
+   * cannot drive yet, so it has no route to ask about and is never offered as a choice.
+   */
+  probe?: { method: 'POST'; path: string; body: Record<string, unknown> }
   /** Where the rewrite lands. */
   kind: 'branch' | 'in-place'
+  /**
+   * Whether this entry only reserves the slot for a backend that is not implemented yet.
+   *
+   * Such a slot keeps the chooser honest about what is planned and gives a future backend one
+   * obvious place to be declared, but it can never be selected: nothing answers for it.
+   */
+  placeholder?: true
   /**
    * Package that owns this backend's route, when a plugin does.
    *
@@ -43,19 +55,11 @@ export const REWRITE_BACKENDS: readonly RewriteBackend[] = [
     probe: { method: 'POST', path: '/message-edit', body: { action: 'edit', sessionId: '', eventSeq: 0, blockIndex: 0, text: 'probe' } },
   },
   {
-    id: 'msg-edit',
+    // Nothing answers for this one: it holds the in-place slot, and {@link rewriteRequest}
+    // returns nothing for it, so selecting it could never write anything back.
+    id: 'placeholder',
     kind: 'in-place',
-    plugin: '@moton16/dsh-msg-edit',
-    probe: { method: 'POST', path: '/api/msg-edit/get-message', body: { sessionId: '', messageId: '' } },
-  },
-  {
-    id: 'context-shaping',
-    kind: 'in-place',
-    // The package is not published to npm, so the profile may carry it under the repository spec
-    // the install instructions name rather than under this name; {@link backendMissingFrom}
-    // accepts either.
-    plugin: 'dsh-context-shaping',
-    probe: { method: 'POST', path: '/api/dsh-context-shaping/edit', body: { sessionId: '', messageId: '', part: 'thinking' } },
+    placeholder: true,
   },
 ]
 
@@ -90,6 +94,26 @@ export function backendMissingFrom(plugin: string | undefined, activePlugins: re
   if (plugin === undefined || plugin === '') return false
   if (activePlugins === undefined) return false
   return !activePlugins.some(entry => namesPlugin(entry, plugin))
+}
+
+/**
+ * Whether the stored selection is one this host cannot drive.
+ *
+ * Three ways to be stuck, and all of them are stale state the plugin itself would never write:
+ * the id belongs to another build (a backend since removed, or one this version does not have),
+ * the id is a placeholder (nothing answers for it, and its row is disabled, so the panel cannot
+ * clear it either — the host is the only one that can), or it names a plugin the profile no
+ * longer loads. A profile that cannot be read answers false throughout: with no evidence about
+ * this host, no write.
+ * @param backend - the stored backend id.
+ * @param activePlugins - the profile's active plugin entries; undefined when it could not be read.
+ * @returns whether the selection has to be cleared.
+ */
+export function backendUnusable(backend: string, activePlugins: readonly string[] | undefined): boolean {
+  if (backend === '' || activePlugins === undefined) return false
+  const known = backendById(backend)
+  if (known === undefined || known.placeholder === true) return true
+  return backendMissingFrom(known.plugin, activePlugins)
 }
 
 /** Stored settings a backend that is gone invalidates, ready to be written as one patch. */
@@ -207,19 +231,19 @@ export function masterSwitchState(
  * history, replacing the reasoning of the recorded target.
  * @param backendId - stored backend id.
  * @param sessionId - session that owns the rewrite.
- * @param entry - the recorded compression (seq, message id and block index).
+ * @param entry - the recorded compression (surface seq and the reasoning block's index).
  * @param text - the distilled reasoning.
  * @returns the path and JSON body, or undefined when this backend cannot apply it.
  */
 export function rewriteRequest(
   backendId: string,
   sessionId: string,
-  entry: { targetSeq: number; targetMessageId: string; targetBlockIndex: number },
+  entry: { targetSeq: number; targetBlockIndex: number },
   text: string,
 ): { path: string; body: Record<string, unknown> } | undefined {
   if (sessionId === '' || text === '') return undefined
   const backend = backendById(backendId)
-  if (backend === undefined) return undefined
+  if (backend === undefined || backend.placeholder === true) return undefined
   if (backend.id === 'message-edit') {
     if (entry.targetBlockIndex < 0) return undefined
     // A compression branch must be *this* conversation with one block rewritten:
@@ -230,13 +254,7 @@ export function rewriteRequest(
       body: { action: 'splice', sessionId, eventSeq: entry.targetSeq, blockIndex: entry.targetBlockIndex, text },
     }
   }
-  if (entry.targetMessageId === '') return undefined
-  if (backend.id === 'context-shaping') {
-    // Edits only the reasoning part of that exact assistant message, in place.
-    return {
-      path: '/api/dsh-context-shaping/edit',
-      body: { sessionId, messageId: entry.targetMessageId, part: 'thinking', role: 'assistant', text },
-    }
-  }
-  return { path: '/api/msg-edit/rewrite-message', body: { sessionId, messageId: entry.targetMessageId, reasoning: text } }
+  // A backend this plugin can name but cannot yet drive: send nothing rather than guess at a
+  // request. Implementing it means adding its own branch above.
+  return undefined
 }

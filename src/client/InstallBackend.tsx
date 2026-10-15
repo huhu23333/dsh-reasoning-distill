@@ -165,7 +165,6 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
             <input type="radio" name="install-backend" checked={item.id === backendId} disabled={running}
               onChange={() => { setBackendId(item.id); setError(''); setNotice('') }} />
             <span>{item.id}</span>
-            <span className={css.muted}>{item.scripted ? t('install.scriptable') : t('install.notScriptable')}</span>
           </label>)}
         </div>
         {chosen !== undefined && <p className={css.note}>{t(`install.note.${chosen.id}` as Key)}</p>}
@@ -188,10 +187,9 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
 
         {mode === 'script' && <div className={css.installBlock}>
           <div className={css.actions}>
-            <button type="button" className={css.primary} disabled={running || chosen?.scripted !== true} onClick={() => { void start() }}>{t('install.start')}</button>
+            <button type="button" className={css.primary} disabled={running} onClick={() => { void start() }}>{t('install.start')}</button>
             <button type="button" className={css.secondary} disabled={!running} onClick={() => { void cancel() }}>{t('install.cancel')}</button>
           </div>
-          {chosen?.scripted !== true && <p className={css.note}>{t('install.useAgentInstead')}</p>}
           {job !== null && <div className={css.installProgress}>
             <p role="status" className={job.phase === 'failed' ? css.error : css.note}>{jobVerdict(job, t)}</p>
             <ul className={css.steps}>

@@ -150,9 +150,11 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, on
       if (report === null) return
       const key = sessionId + ':' + entry.id
       if (applyingInPlace.current.has(key)) continue
-      if (!claimRewriteAttempt(availableSessionStorage(), key, Date.now())) continue
+      // Asked for before the claim: a backend this plugin cannot drive yet owes nothing, and
+      // claiming an attempt that will never be sent would strand the entry for a whole TTL.
       const request = rewriteRequest(report.config.rewriteBackend, report.sessionId, entry, entry.distilledText)
       if (request === undefined) continue
+      if (!claimRewriteAttempt(availableSessionStorage(), key, Date.now())) continue
       applyingInPlace.current.add(key)
       void fetch(request.path, {
         method: 'POST',

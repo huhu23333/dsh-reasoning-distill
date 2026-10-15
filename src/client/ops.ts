@@ -126,7 +126,7 @@ export function messageEditRequest(
 }
 
 export {
-  REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendOptionsVisible, masterSwitchState, missingBackendFixup, nextBackend, rewriteRequest,
+  REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendOptionsVisible, backendUnusable, masterSwitchState, missingBackendFixup, nextBackend, rewriteRequest,
 } from '../backends.ts'
 export type { BackendFixup, ProbeAnswer, RewriteBackend } from '../backends.ts'
 
@@ -151,16 +151,20 @@ export function forcesMasterOff(backend: string, enabled: boolean, installed?: b
  *
  * The same rule the panel's checklist uses, in one place so the master switch can ask about the
  * selected backend without knowing the chooser's table: probe the backend's own path and a sibling
- * path that cannot exist, and treat only a *different* answer as proof the backend replied.
+ * path that cannot exist, and treat only a *different* answer as proof the backend replied. A
+ * backend with no route to ask — a placeholder — is simply not reachable.
  * @param backend - registry entry to probe.
- * @returns whether the backend answered as itself; false when the request itself failed.
+ * @returns whether the backend answered as itself; false when there is nothing to ask, or when the
+ *   request itself failed.
  */
 export async function backendReachable(backend: RewriteBackend): Promise<boolean> {
+  const route = backend.probe
+  if (route === undefined) return false
   const probe = async (path: string): Promise<ProbeAnswer> => {
     const response = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(backend.probe.body),
+      body: JSON.stringify(route.body),
     })
     return {
       status: response.status,
@@ -169,8 +173,8 @@ export async function backendReachable(backend: RewriteBackend): Promise<boolean
     }
   }
   try {
-    const answer = await probe(backend.probe.path)
-    const absent = await probe(backend.probe.path + '-absent')
+    const answer = await probe(route.path)
+    const absent = await probe(route.path + '-absent')
     return backendInstalled(answer, absent)
   } catch {
     return false
@@ -280,9 +284,9 @@ export function shouldRetrySettle(verdict: 'settled' | 'refused' | 'failed', rec
 /**
  * Whether a backend's response means the rewrite was written.
  *
- * Success bodies differ per backend (`context-shaping` answers a bare result,
- * `msg-edit` answers its own envelope), so an absent `ok` means success while an
- * explicit `false` is a refusal — and a non-2xx always is.
+ * Success bodies differ per backend (an in-place companion may answer its own envelope, for
+ * instance), so an absent `ok` means success while an explicit `false` is a refusal — and a non-2xx
+ * always is.
  * @param ok - whether the HTTP status was in the 2xx range.
  * @param payload - the parsed body, when it parsed.
  * @returns whether the hand-off completed, and why not when it did not.

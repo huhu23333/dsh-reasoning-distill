@@ -14,7 +14,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendUnusable, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
 import { installPromptFor, type InstallJob } from '../src/install-shared.ts'
@@ -173,11 +173,10 @@ check('empty text cannot be bridged', messageEditRequest('s', { targetSeq: 1, ta
 check('a session without an id cannot be bridged', messageEditRequest('', { targetSeq: 1, targetBlockIndex: 0 }, 'x') === undefined)
 
 console.log('client: the rewrite backend registry drives the panel')
-check('three backends are offered: one branching, two in place',
-  REWRITE_BACKENDS.length === 3
+check('one backend is offered, plus the in-place slot still waiting for an implementation',
+  REWRITE_BACKENDS.length === 2
   && backendById('message-edit')?.kind === 'branch'
-  && backendById('msg-edit')?.kind === 'in-place'
-  && backendById('context-shaping')?.kind === 'in-place')
+  && backendById('placeholder')?.kind === 'in-place' && backendById('placeholder')?.placeholder === true)
 // Detection must not confuse a backend's own 404 ("no such session") with a
 // missing route: the former answers with its JSON envelope.
 // Measured on a live host: a route that does not exist is answered by the web server —
@@ -188,10 +187,11 @@ const absentApi = { status: 401, contentType: 'text/plain', body: 'unauthorized'
 
 // An in-place backend writes back from the browser (its route needs the user credentials)
 // and the host keeps one pending marker per session, so the driver works from the ledger and
-// claims each attempt before sending it.
+// claims each attempt before sending it. The in-place slot is a placeholder today, which is
+// exactly the case the driver has to survive: owed by kind, and undrivable by request.
 const reportInPlace = {
   sessionId: 'session-seat-1',
-  config: { rewriteBackend: 'msg-edit' },
+  config: { rewriteBackend: 'placeholder' },
   entries: [
     { id: 'owed-1', targetSeq: 20, turn: 1, step: 1, appliedAt: 1, distilledText: 'Distilled', savedTokensPerRequest: 10, liveRequests: 0, liveSaved: 0, frozenSaved: 0, sessionLive: true, originalChars: 9, distilledChars: 1, originalTokens: 9, distilledTokens: 1, cacheBreakTokens: 0, cacheBreakCost: 0, targetBlockIndex: 0, active: true, provider: 'p', model: 'm', distill: {},  },
     { id: 'done-1', targetSeq: 20, turn: 1, step: 1, appliedAt: 1, distilledText: 'Distilled', savedTokensPerRequest: 10, liveRequests: 0, liveSaved: 0, frozenSaved: 0, sessionLive: true, originalChars: 9, distilledChars: 1, originalTokens: 9, distilledTokens: 1, cacheBreakTokens: 0, cacheBreakCost: 0, targetBlockIndex: 0, active: true, provider: 'p', model: 'm', distill: {}, handoff: { state: 'skipped', at: 1 } },
@@ -226,24 +226,36 @@ check('an empty or unknown id resolves to no backend',
 // The host cannot probe these routes (in-place ones need the browser's credentials), so the
 // startup check reads the profile's active plugin list instead. Only a list that was read *and*
 // lacks the plugin may close the switch down; every weaker answer leaves the user's setting alone.
-const active = ['dsh-base', '@moton16/dsh-msg-edit']
-check('every backend names the plugin that serves it, so none is checked by accident',
-  REWRITE_BACKENDS.every(backend => (backend.plugin ?? '') !== ''))
+const active = ['dsh-base', 'dsh-message-edit']
+check('every backend names the plugin that serves it, except the slot that has no route at all',
+  REWRITE_BACKENDS.filter(backend => backend.placeholder !== true).every(backend => (backend.plugin ?? '') !== '')
+  && REWRITE_BACKENDS.filter(backend => backend.placeholder === true).every(backend =>
+    backend.plugin === undefined && backend.probe === undefined))
 check('a plugin the active list does not carry is reported missing',
-  backendMissingFrom('@moton16/dsh-msg-edit', ['dsh-base']) && backendMissingFrom('dsh-context-shaping', active)
-  && backendMissingFrom('dsh-message-edit', []))
+  backendMissingFrom('dsh-message-edit', ['dsh-base']) && backendMissingFrom('dsh-message-edit', []))
 check('a plugin the active list carries is found, by name or by repository spec',
-  !backendMissingFrom('@moton16/dsh-msg-edit', active)
-  && !backendMissingFrom('dsh-context-shaping', ['zeranhub/dsh-context-shaping']))
+  !backendMissingFrom('dsh-message-edit', active)
+  && !backendMissingFrom('dsh-other-backend', ['github:someone/dsh-other-backend']))
 check('a list that could not be read closes nothing', !backendMissingFrom('dsh-message-edit', undefined))
+check('the placeholder has no plugin name, so nothing host-side is ever closed down for it',
+  backendMissingFrom(backendById('placeholder')?.plugin, active) === false)
 check('no plugin name — no backend, or one this host does not know — closes nothing',
   !backendMissingFrom('', active) && !backendMissingFrom(undefined, active))
+// What the host acts on is the selection, not just the plugin: an id from another build and the
+// placeholder are both unusable, and the placeholder's row is disabled, so the host is the only
+// one that can drop it. No readable profile ⇒ nothing is written, whatever the id is.
+check('a selection this build cannot drive is unusable',
+  backendUnusable('msg-edit', active) && backendUnusable('placeholder', active)
+  && backendUnusable('message-edit', ['dsh-base']))
+check('and a selection this build can drive is left alone',
+  !backendUnusable('message-edit', active) && !backendUnusable('', active)
+  && !backendUnusable('msg-edit', undefined))
 // Clearing the selection is part of the same fix: the stored name outlives the plugin, and leaving
 // it would keep every later process promising a hand-off that cannot happen.
 check('a missing backend clears the selection, and takes the switch off with it when it was on',
-  JSON.stringify(missingBackendFixup('msg-edit', true)) === '{"enabled":false,"rewriteBackend":""}')
+  JSON.stringify(missingBackendFixup('message-edit', true)) === '{"enabled":false,"rewriteBackend":""}')
 check('and clears only the selection when the switch was already off',
-  JSON.stringify(missingBackendFixup('msg-edit', false)) === '{"rewriteBackend":""}')
+  JSON.stringify(missingBackendFixup('message-edit', false)) === '{"rewriteBackend":""}')
 check('an already-empty selection has nothing to write',
   missingBackendFixup('', true) === undefined && missingBackendFixup('', false) === undefined)
 // Master switch: locked off with no backend, the user's choice otherwise.
@@ -253,16 +265,17 @@ check('a selected backend unlocks it and keeps the user value',
 check('and an uninstalled/unknown id does not unlock it', masterSwitchState('nope', true).locked)
 // Removing the plugin leaves the selection in storage, so what the *probe* saw has to decide.
 check('a selected backend the probe reports missing locks the switch off',
-  masterSwitchState('msg-edit', true, false).locked && masterSwitchState('msg-edit', true, false).checked === false)
+  masterSwitchState('message-edit', true, false).locked && masterSwitchState('message-edit', true, false).checked === false)
 check('an answered probe for an installed backend keeps the switch openable',
-  !masterSwitchState('msg-edit', true, true).locked && masterSwitchState('msg-edit', true, true).checked === true)
-check('a probe that has not answered yet locks nothing', !masterSwitchState('msg-edit', true).locked)
+  !masterSwitchState('message-edit', true, true).locked && masterSwitchState('message-edit', true, true).checked === true)
+check('a probe that has not answered yet locks nothing', !masterSwitchState('message-edit', true).locked)
 // A locked switch shows off, so the stored value has to follow it into storage.
 check('a stored on switch is written back off when its backend is missing',
-  forcesMasterOff('msg-edit', true, false) && forcesMasterOff('', true) && forcesMasterOff('nope', true))
+  forcesMasterOff('message-edit', true, false) && forcesMasterOff('', true) && forcesMasterOff('nope', true))
 check('and a usable backend leaves the stored value alone',
-  !forcesMasterOff('message-edit', true, true) && !forcesMasterOff('msg-edit', false, false))
-// Requests: branch backend needs seq + block index, in-place backend needs the message id.
+  !forcesMasterOff('message-edit', true, true) && !forcesMasterOff('message-edit', false, false))
+// Requests: only the branch backend has one. The in-place slot has no implementation, so it must
+// ask for nothing at all rather than send a request nobody answers.
 const target = { targetSeq: 12, targetMessageId: 'm-12', targetBlockIndex: 2 }
 const branchCall = rewriteRequest('message-edit', 'session-1', target, 'short')
 check('the branch backend is asked to splice the reasoning block',
@@ -271,26 +284,16 @@ check('the branch backend is asked to splice the reasoning block',
   branchCall?.path === '/message-edit' && branchCall.body['eventSeq'] === 12 && branchCall.body['blockIndex'] === 2
   && branchCall.body['text'] === 'short' && branchCall.body['action'] === 'splice',
   JSON.stringify(branchCall))
-const inPlaceCall = rewriteRequest('msg-edit', 'session-1', target, 'short')
-check('the in-place backend is asked to rewrite the message reasoning',
-  inPlaceCall?.path === '/api/msg-edit/rewrite-message' && inPlaceCall.body['messageId'] === 'm-12'
-  && inPlaceCall.body['reasoning'] === 'short' && inPlaceCall.body['sessionId'] === 'session-1',
-  JSON.stringify(inPlaceCall))
 check('a missing block index cannot be sent to the branch backend',
   rewriteRequest('message-edit', 'session-1', { ...target, targetBlockIndex: -1 }, 'short') === undefined)
-check('a missing message id cannot be sent to the in-place backend',
-  rewriteRequest('msg-edit', 'session-1', { ...target, targetMessageId: '' }, 'short') === undefined)
-const shapingCall = rewriteRequest('context-shaping', 'session-1', target, 'short')
-check('the thinking-editing backend is asked for the reasoning part only',
-  shapingCall?.path === '/api/dsh-context-shaping/edit' && shapingCall.body['part'] === 'thinking'
-  && shapingCall.body['role'] === 'assistant' && shapingCall.body['messageId'] === 'm-12'
-  && shapingCall.body['text'] === 'short',
-  JSON.stringify(shapingCall))
+check('the placeholder backend is asked for nothing',
+  rewriteRequest('placeholder', 'session-1', target, 'short') === undefined
+  && rewriteRequest('placeholder', '', target, 'short') === undefined)
 check('no backend means no request at all', rewriteRequest('', 'session-1', target, 'short') === undefined)
-check('empty text is never sent', rewriteRequest('msg-edit', 'session-1', target, '') === undefined)
+check('empty text is never sent', rewriteRequest('message-edit', 'session-1', target, '') === undefined)
 
 console.log('client: activating the chosen backend again clears it')
-check('clicking another backend switches to it', nextBackend('message-edit', 'msg-edit') === 'msg-edit')
+check('clicking another backend switches to it', nextBackend('message-edit', 'placeholder') === 'placeholder')
 check('clicking a backend when none is chosen selects it', nextBackend('', 'message-edit') === 'message-edit')
 // A radio input cannot fire change once checked, which is exactly why the panel
 // must model deselection itself.
@@ -446,7 +449,7 @@ check('and leaves it in the list when the switch is off',
   } as unknown as SessionReport))
 check('a report that could not be read never archives anything', !shouldArchiveSuperseded(null))
 check('the backend-specific options belong to a branch backend only',
-  backendOptionsVisible('message-edit') && !backendOptionsVisible('msg-edit') && !backendOptionsVisible(''))
+  backendOptionsVisible('message-edit') && !backendOptionsVisible('placeholder') && !backendOptionsVisible(''))
 
 console.log('render: quick-install page')
 // The page is a view onto a host-side install: closing it must render nothing at all,
@@ -454,9 +457,9 @@ console.log('render: quick-install page')
 check('the quick-install page is absent while it is closed',
   tryRender(<InstallBackendPanel open={false} onClose={noop} t={t} />) === '')
 const installPage = tryRender(<InstallBackendPanel open onClose={noop} t={t} />)
-check('it lists the backends and says which one can be scripted',
-  installPage.includes('message-edit') && installPage.includes('install.scriptable')
-  && installPage.includes('install.notScriptable') && installPage.includes('install.note.message-edit'))
+check('it lists the installable backends and their install note',
+  installPage.includes('message-edit') && installPage.includes('install.note.message-edit')
+  && !installPage.includes('placeholder'))
 check('it states the trade-off of both install routes',
   installPage.includes('install.mode.script.pros') && installPage.includes('install.mode.script.cons')
   && installPage.includes('install.mode.agent.pros') && installPage.includes('install.mode.agent.cons'))
@@ -478,14 +481,12 @@ check('every step state and verdict has its own words',
   && jobVerdict(jobFixture, t).includes('install.result.running')
   && jobVerdict({ ...jobFixture, phase: 'cancelled' }, t).includes('install.result.cancelled')
   && jobVerdict({ ...jobFixture, phase: 'failed', error: 'boom' }, t).includes('boom'))
-// The prompt has to send the agent to the real instructions, and must not encourage it
-// to fake success on a backend this repository never verified.
+// The prompt has to send the agent to the real instructions and to the one verified backend.
 const verifiedPrompt = installPromptFor('message-edit', '/repo')
-const unverifiedPrompt = installPromptFor('msg-edit', '/repo')
 check('the agent prompt names the backend and points at the real instructions',
   verifiedPrompt.includes('message-edit') && verifiedPrompt.includes('/repo/README.md') && verifiedPrompt.includes('/repo'))
-check('the prompt for an unverified backend says so instead of promising success',
-  unverifiedPrompt.includes('从未安装') && unverifiedPrompt.includes('不要伪造成功') && !unverifiedPrompt.includes('唯一验证过'))
+check('and it promises nothing beyond the verified procedure',
+  verifiedPrompt.includes('唯一验证过') && !verifiedPrompt.includes('不要伪造成功'))
 check('no render path threw', !rendered.some(markup => markup.includes('__THREW__')))
 
 // Effect-only regressions: the SSR checks above do not run the view's effects.
@@ -517,8 +518,12 @@ try {
       opened.length === 1 && opened[0] === 'newer-branch')
   } finally { branch.stop(); Date.now = clock }
 
+  // The in-place slot is a placeholder, so an owed rewrite must not be posted and must not be
+  // settled: nothing answers for that backend. The POST half of this driver therefore has no
+  // backend to run against any more — when a real in-place backend is implemented, this check
+  // goes back to driving one (its end-to-end form is in the history before this change).
   const pending = modernReport()
-  pending.config.rewriteBackend = 'msg-edit'
+  pending.config.rewriteBackend = 'placeholder'
   pending.entries[0]!.id = 'in-place-1'
   pending.entries[0]!.targetMessageId = 'm-12'
   pending.entries[0]!.distilledText = 'capped'
@@ -536,12 +541,10 @@ try {
   try {
     await inPlace.tick()
     await inPlace.tick()
-    const beforeRemount = { backendPosts, settles }
     await inPlace.remount()
     await inPlace.tick()
-    check('successful in-place POST survives remount: only failed handoff settlement retries',
-      beforeRemount.backendPosts === 1 && beforeRemount.settles >= 1
-      && backendPosts === 1 && settles > beforeRemount.settles && storageData.has('reasoning-distill:handoff:session-1:in-place-1'),
+    check('a backend with no implementation posts nothing, settles nothing and claims nothing',
+      backendPosts === 0 && settles === 0 && !storageData.has('reasoning-distill:handoff:session-1:in-place-1'),
       JSON.stringify({ backendPosts, settles, storage: [...storageData] }))
   } finally { inPlace.stop() }
 } finally {

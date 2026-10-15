@@ -21,7 +21,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-subagent'
 
-import { backendById, backendMissingFrom, missingBackendFixup, rewriteRequest, type BackendFixup } from './backends.ts'
+import { backendById, backendUnusable, missingBackendFixup, rewriteRequest, type BackendFixup } from './backends.ts'
 import { resolveRule, type Config, type ModelRule } from './config.ts'
 import { priceAt } from './peak.ts'
 import { DEFAULT_PROMPT, encloseDistillationData, looksLikeFinalReply } from './prompt.ts'
@@ -374,21 +374,25 @@ export class ReasoningDistillEngine {
   }
 
   /**
-   * Clear the stored backend once its plugin is no longer installed.
+   * Clear the stored backend once this host can no longer drive it.
    *
    * The backends answer on routes the host cannot reach — an in-place backend's route sits behind
    * `/api/*`, where the shell demands the browser's own credentials — so the host recognizes a
-   * missing backend from the profile's active plugin list instead. A stored selection naming a
-   * plugin that list no longer carries cannot hand a rewrite over, and it outlives the plugin that
-   * made it valid, so the selection itself is cleared along with the master switch that needs it;
-   * this is the same outcome the panel reaches with its probe.
+   * backend it cannot use from the profile's active plugin list and from its own registry instead.
+   * A stored selection it cannot drive cannot hand a rewrite over, and it outlives whatever made
+   * it valid, so the selection itself is cleared along with the master switch that needs it; this
+   * is the same outcome the panel reaches with its probe.
    */
   private async checkBackend(): Promise<void> {
     const backend = this.config.rewriteBackend.get() ?? ''
-    const plugin = backendById(backend)?.plugin
     const active = this.activePlugins === undefined ? undefined : await this.activePlugins()
-    if (!backendMissingFrom(plugin, active)) return
-    this.ctx.logger.warn('reasoning-distill: rewrite backend %s needs plugin %s, which the profile no longer lists; clearing the selection', backend, plugin)
+    if (!backendUnusable(backend, active)) return
+    const plugin = backendById(backend)?.plugin
+    if (plugin === undefined) {
+      this.ctx.logger.warn('reasoning-distill: rewrite backend %s is not one this build can drive; clearing the selection', backend)
+    } else {
+      this.ctx.logger.warn('reasoning-distill: rewrite backend %s needs plugin %s, which the profile no longer lists; clearing the selection', backend, plugin)
+    }
     const fixup = missingBackendFixup(backend, this.config.enabled.get() === true)
     if (fixup === undefined) return
     if (this.writeFixup === undefined) {
@@ -938,7 +942,6 @@ export class ReasoningDistillEngine {
     }
     const request = rewriteRequest(backend.id, session.id, {
       targetSeq: entry.targetSeq,
-      targetMessageId: entry.targetMessageId,
       targetBlockIndex: entry.targetBlockIndex ?? -1,
     }, entry.distilledText)
     if (request === undefined) {

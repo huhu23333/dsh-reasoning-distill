@@ -121,10 +121,9 @@ export function registerRoutes(
           if (body.action !== 'start') return json({ error: 'action must be start or cancel' }, 400)
           const backendId = typeof body.backendId === 'string' ? body.backendId : ''
           const entry = installableBackend(backendId)
+          // The route only refuses, so one backend cannot be "guessed at" by a stray request;
+          // the in-place placeholder is not installable and lands here like any unknown id.
           if (entry === undefined) return json({ error: `unknown backend: ${backendId}` }, 400)
-          // The page explains why (its locale table owns that wording); the route only
-          // refuses, so one backend cannot be "guessed at" by a stray request.
-          if (!entry.scripted) return json({ error: '这个后端没有程序化安装' }, 409)
           const started = runner.start(backendId)
           if (!started.ok) return json({ error: started.error }, 409)
           return json({ job: started.job })

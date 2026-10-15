@@ -89,12 +89,16 @@ function BackendChooser({ value, onSelect, t }: {
       }
     }
     for (const backend of REWRITE_BACKENDS) {
+      // A placeholder has no route, so there is nothing to ask and no answer that could make it
+      // selectable: it stays out of the probe and out of the availability map.
+      const route = backend.probe
+      if (route === undefined) continue
       // A sibling path in the same namespace cannot exist: its answer is what the web
       // server says for "no such route here", which is the yardstick this backend's own
       // answer has to differ from. Both are probed with the same body and method.
-      void probe(backend.probe.path, backend.probe.body)
+      void probe(route.path, route.body)
         .then(async answer => {
-          const absent = await probe(`${backend.probe.path}-absent`, backend.probe.body)
+          const absent = await probe(`${route.path}-absent`, route.body)
           if (alive) setAvailable(current => ({ ...current, [backend.id]: backendInstalled(answer, absent) }))
         })
         .catch(() => {
@@ -114,8 +118,12 @@ function BackendChooser({ value, onSelect, t }: {
           disabled={!installed}
           onChange={() => onSelect(nextBackend(value, backend.id))}
         />
-        <span>{backend.id} · {backend.kind === 'branch' ? t('settings.backendBranch') : t('settings.backendInPlace')}</span>
-        <span className={css.muted}>{installed ? t('settings.backendInstalled') : t('settings.backendMissing')}</span>
+        {backend.placeholder === true
+          ? <span>{backend.id} · {t('settings.backendPlaceholder')}</span>
+          : <>
+            <span>{backend.id} · {backend.kind === 'branch' ? t('settings.backendBranch') : t('settings.backendInPlace')}</span>
+            <span className={css.muted}>{installed ? t('settings.backendInstalled') : t('settings.backendMissing')}</span>
+          </>}
       </label>
     })}
     <span className={css.note}>{t('settings.backendHint')}</span>

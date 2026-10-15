@@ -1818,9 +1818,9 @@ const statusBody63 = status63 === undefined ? undefined : await status63.json() 
 check('the page can read the backend list, the step labels and the checkout before starting',
   statusBody63?.job === null && statusBody63.backends.length === INSTALLABLE_BACKENDS.length && statusBody63.steps.length === INSTALL_STEPS.length && statusBody63.repo.length > 1,
   JSON.stringify(statusBody63).slice(0, 200))
-const refused63 = await installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'start', backendId: 'msg-edit' }) }))
-check('a backend without a scripted install is refused rather than guessed at',
-  refused63?.status === 409, String(refused63?.status))
+const refused63 = await installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'start', backendId: 'placeholder' }) }))
+check('a backend this page cannot install is refused rather than guessed at',
+  refused63?.status === 400, String(refused63?.status))
 const accepted63 = await installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'start', backendId: 'message-edit' }) }))
 const acceptedBody63 = accepted63 === undefined ? undefined : await accepted63.json() as { job?: { phase?: string } }
 check('starting the verified backend returns its running job',
