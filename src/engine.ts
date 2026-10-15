@@ -1968,8 +1968,8 @@ export class ReasoningDistillEngine {
       )
       if (stale()) return
       await this.store.update(session.id, (record) => {
-      if (stale()) return
-      record.entries = record.entries.filter(item => item.targetSeq !== target.seq || (item.failed !== true && item.skipped !== true))
+        if (stale()) return
+        record.entries = record.entries.filter(item => item.targetSeq !== target.seq || (item.failed !== true && item.skipped !== true))
         record.entries.push({
           id: failedId,
           targetSeq: target.seq,
@@ -2018,8 +2018,8 @@ export class ReasoningDistillEngine {
       // hides the audit session entirely.
       if (stale()) return
       await this.store.update(session.id, (record) => {
-      if (stale()) return
-      record.entries = record.entries.filter(item => item.targetSeq !== target.seq || (item.failed !== true && item.skipped !== true))
+        if (stale()) return
+        record.entries = record.entries.filter(item => item.targetSeq !== target.seq || (item.failed !== true && item.skipped !== true))
         record.entries.push({
           id: skippedId,
           targetSeq: target.seq,

@@ -121,7 +121,7 @@
     holidays: ['2026-01-01', ...]  # 全天谷价的法定节假日（北京时间日期）
     prices: {}                     # 逐模型价格条目：peak/off 两栏 + peakPricing 是否分栏
     prompt: ''                     # 空 = 内置提示词
-    maxInputChars: 0               # 背景块（工具结果）长度上限；0 = 不截断（默认不截断）
+    maxInputChars: 0               # 背景块（工具结果）长度上限；绝不截断思考本体——思考超过该值即跳过本次压缩；0 = 不限（默认不截断）
     maxOutputChars: 0              # 0 = 不限制蒸馏结果长度
     rewriteBackend: message-edit    # 助手消息改写后端；空 = 未选（见「助手消息改写后端」）
     branchTimeoutMs: 0              # 分支型后端专用：宿主等待建分支的时限，0 = 永不超时
@@ -379,7 +379,7 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 
 | 后端 id | 前置插件 | 调用 | 语义 |
 |---|---|---|---|
-| `message-edit` | `dsh-message-edit` 或 `@yunyv/dsh-message-edit` | `POST /message-edit` `{action:'edit', sessionId, eventSeq, blockIndex, text, cascade:'truncate'}` | **另开分支会话**（新增版本，原会话不动） |
+| `message-edit` | `dsh-message-edit` 或 `@yunyv/dsh-message-edit` | `POST /message-edit` `{action:'splice', sessionId, eventSeq, blockIndex, text}`（`edit` 会丢工具调用与后续步骤，故不用） | **另开分支会话**（新增版本，原会话不动） |
 | `placeholder` | —（无） | —（不发任何请求） | **无实际内容**：只占住 in-place 那个槽位；没有探针、没有插件名，因此恒显示「占位（尚未实现，不可选）」且不可选 |
 
 ### 后端支持状态（先读这一段）
@@ -538,8 +538,8 @@ node scripts/scan-session-logs.mjs               # 期望：VALID 全部、INVAL
 
 ```
 POST /message-edit
-{ "action": "edit", "sessionId": "<会话>", "eventSeq": <该条 targetSeq>,
-  "blockIndex": <reasoning 块下标>, "text": "<蒸馏文本>", "cascade": "truncate" }
+{ "action": "splice", "sessionId": "<会话>", "eventSeq": <该条 targetSeq>,
+  "blockIndex": <reasoning 块下标>, "text": "<蒸馏文本>" }
 → 200 { "sessionId": "<新分支会话 id>", ... }
 ```
 
