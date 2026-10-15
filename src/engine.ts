@@ -1302,7 +1302,12 @@ export class ReasoningDistillEngine {
     // still honoured, or a note that failed to be written once could never be
     // written at all.
     const pending = this.pendingBranch.get(sessionId)
-    const mine = entryId === undefined || pending === entryId
+    // Naming the attempt is what authorises a settle. An unnamed caller cannot be
+    // settling *ours*, and treating it as ours is how a caller that guessed the
+    // session id could clear a hand-off this plugin still owes and stop the turn
+    // with it. With nothing pending there is nothing to clear or stop, which is
+    // why that call stays the no-op it always was.
+    const mine = entryId === undefined ? pending === undefined : pending === entryId
     if (!mine) {
       if (error === undefined || entryId === undefined) return { ok: false, recorded: false }
       const outcome = { state: 'failed' as const, error, at: Date.now() }
