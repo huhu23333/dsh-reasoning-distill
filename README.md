@@ -86,7 +86,7 @@
 - id: reasoning-distill
   name: dsh-reasoning-distill
   config:
-    enabled: true
+    enabled: false                  # 总开关，默认关：打开后才会有任何蒸馏调用
     defaultRule:
       enabled: true                # 对【主对话】启用（三种会话各有独立开关，见下文）
       thresholdTokens: 4000        # 超过这个估算 token 数才压缩

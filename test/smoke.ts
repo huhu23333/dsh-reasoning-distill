@@ -35,6 +35,11 @@ check('the panel fallback rule equals the host default rule',
 check('the shipping defaults impose neither a distillation timeout nor an input ceiling',
   DEFAULT_RULE.timeoutMs === 0 && DEFAULT_RULE.maxInputChars === 0 && DEFAULT_RULE.maxOutputChars === 0,
   JSON.stringify({ timeoutMs: DEFAULT_RULE.timeoutMs, maxInputChars: DEFAULT_RULE.maxInputChars }))
+// The schema itself cannot be resolved under the smoke stubs, so the shipping default is
+// asserted where the schema takes it from.
+const { DEFAULT_ENABLED } = await import('../src/config.ts')
+check('a fresh install distils nothing until the master switch is turned on',
+  DEFAULT_ENABLED === false, JSON.stringify({ DEFAULT_ENABLED }))
 
 /** Minimal in-memory session. */
 class FakeSession {
@@ -535,6 +540,9 @@ const startedAt = Date.now()
 await fire('agent/pre-step', { agent: { session: s7 } }, async () => undefined)
 const elapsed = Date.now() - startedAt
 check('the step waits for the outcome, then proceeds', elapsed >= 150 && elapsed < 1500, `${elapsed}ms`)
+// The pre-step stops waiting at the rule's own 200ms bound and proceeds; the aborted
+// attempt is recorded afterwards, so wait for it before inspecting the entry.
+await settleFor(async () => (await store7.load(s7.id)).entries.length === 1)
 const rec7 = await store7.load(s7.id)
 check('the abandoned attempt is still recorded', rec7.entries.length === 1 && rec7.entries[0]!.failed === true, JSON.stringify(rec7.entries.map(e => e.failed)))
 check('it spends but saves nothing', rec7.entries[0]!.distill.cost > 0 && rec7.entries[0]!.savedTokensPerRequest === 0,
@@ -1546,7 +1554,7 @@ const raced59b = new AbortController()
 let continued59b = false
 const second59b = fire('agent/pre-step', { agent: { session: s59b }, signal: raced59b.signal }, async () => { continued59b = true; return { kind: 'enter' } })
 await new Promise<void>(resolve => setTimeout(resolve, 15))
-check('a 60s rule timeout expires a stalled read after its 30s grace', continued59b)
+check('a 60s rule timeout expires a stalled read, with no grace added on top', continued59b)
 stopped59b.abort()
 raced59b.abort()
 releaseRead59b?.()

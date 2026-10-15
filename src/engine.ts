@@ -249,7 +249,7 @@ export class ReasoningDistillEngine {
           }
           const backstop = this.ruleBackstopMs()
           const loaded = await this.waitUntil(load.work, signal,
-            backstop > 0 ? load.at + backstop + 30_000 : undefined)
+            backstop > 0 ? load.at + backstop : undefined)
           if (!loaded) {
             if (signal?.aborted || this.replaced(session)) return true
             // A stalled step/end gate must not launch after the raw request escapes.
@@ -1241,7 +1241,7 @@ export class ReasoningDistillEngine {
     const existingTimer = this.abandonTimers.get(key)
     if (existingTimer !== undefined) clearTimeout(existingTimer)
     if (target.rule.timeoutMs > 0) {
-      const timer = setTimeout(() => { this.abandoned.add(key) }, target.rule.timeoutMs + 30_000)
+      const timer = setTimeout(() => { this.abandoned.add(key) }, target.rule.timeoutMs)
       timer.unref?.()
       this.abandonTimers.set(key, timer)
     }
@@ -1281,9 +1281,9 @@ export class ReasoningDistillEngine {
     try {
       // Waiting is the contract: the next request is assembled only once the
       // rewrite is in place. A compression whose rule sets a timeout is already
-      // aborted by its own provider call, so the wait is bounded just past that
-      // as a backstop for adapters that ignore abort. `timeoutMs: 0` means no
-      // limit, and then this genuinely waits until the compression ends.
+      // aborted by its own provider call, so the wait is bounded by exactly that
+      // value as a backstop for adapters that ignore abort. `timeoutMs: 0` means
+      // no limit, and then this genuinely waits until the compression ends.
       // Each compression is waited for up to *its own* bound, measured from when it
       // was launched: one unlimited attempt must not remove the bound of a bounded
       // one, and repeated pre-steps must not each restart the clock.
@@ -1298,7 +1298,7 @@ export class ReasoningDistillEngine {
           await promise
           return
         }
-        const remaining = bound.timeoutMs + 30_000 - (Date.now() - bound.launchedAt)
+        const remaining = bound.timeoutMs - (Date.now() - bound.launchedAt)
         if (remaining <= 0) {
           // Stop waiting *and* refuse a later adoption: otherwise a finally-launched
           // attempt could reset its own clock and land after the raw request.
@@ -1321,7 +1321,7 @@ export class ReasoningDistillEngine {
         } finally {
           if (timer !== undefined) clearTimeout(timer)
         }
-        if (timedOut || Date.now() >= bound.launchedAt + bound.timeoutMs + 30_000) this.abandoned.add(key)
+        if (timedOut || Date.now() >= bound.launchedAt + bound.timeoutMs) this.abandoned.add(key)
       })
       await this.untilAborted(Promise.all(waits), signal)
       if (signal?.aborted) {
@@ -1588,7 +1588,7 @@ export class ReasoningDistillEngine {
     const abandonedNow = (): boolean => {
       const bound = this.waitBound.get(attemptKey)
       return this.abandoned.has(attemptKey)
-        || (bound !== undefined && bound.timeoutMs > 0 && Date.now() >= bound.launchedAt + bound.timeoutMs + 30_000)
+        || (bound !== undefined && bound.timeoutMs > 0 && Date.now() >= bound.launchedAt + bound.timeoutMs)
     }
     const maxInput = target.rule.maxInputChars
     // The reasoning is the *subject* of the rewrite, not context: silently sending

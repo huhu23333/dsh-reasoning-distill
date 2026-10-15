@@ -220,9 +220,17 @@ function half(bucket: PriceBucket): PriceBucket {
   return { hit: bucket.hit / 2, miss: bucket.miss / 2, out: bucket.out / 2 }
 }
 
+/**
+ * Whether distillation is on for a fresh install.
+ *
+ * Off: the plugin ships inert, so an installation never starts paying for
+ * distillations (or branching sessions) before its user asks for it.
+ */
+export const DEFAULT_ENABLED = false
+
 /** The exported schema; the `id` of this plugin's Loader row is its namespace. */
 export const Config = z.object({
-  enabled: z.boolean().default(true).volatile(),
+  enabled: z.boolean().default(DEFAULT_ENABLED).volatile(),
   defaultRule: z.object(ModelRuleFields).default(DEFAULT_RULE).volatile(),
   models: z.dict(z.object(ModelRuleFields)).default({}).volatile(),
   peakSource: z.string().default('builtin').volatile(),
