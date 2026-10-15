@@ -39,9 +39,6 @@ interface Surface {
   slots: ReadonlyMap<number, number>
 }
 
-/** Marker property recording that one session's accessor is already wrapped. */
-const WRAPPED = Symbol('reasoning-distill/wrapped')
-
 /** Optional host services must not trigger Cordis's uninjected-property guard. */
 function optionalService<T>(ctx: Context, name: string): T | undefined {
   try {
@@ -348,9 +345,6 @@ export class ReasoningDistillEngine {
               this.scheduleBranchAtIdle(payload.agent, session)
             }
           }
-          // The failure note for a host without whenIdle may await storage;
-          // a replaced id must not arm its successor.
-          if (this.replaced(session)) return true
           return true
         })()
         if (!continueOriginal) return { kind: 'reject' }
@@ -934,17 +928,6 @@ export class ReasoningDistillEngine {
       this.ctx.logger.warn('reasoning-distill: could not read the job list for %s: %o', session.id, error)
       return false
     }
-  }
-
-  /** Do not POST from pre-step when an old host lacks the idle API. */
-  private async failMissingIdleAgent(session: Session, signal?: AbortSignal): Promise<void> {
-    const entryId = this.pendingBranch.get(session.id)
-    if (entryId === undefined || backendById(this.config.rewriteBackend.get())?.kind !== 'branch') return
-    const generation = this.generation.get(session.id) ?? 0
-    await this.untilSettled(this.recordHandoffOrOwe(session.id, entryId, {
-      state: 'failed', error: 'host agent exposes no whenIdle; branch POST was not sent', at: Date.now(),
-    }, generation), signal)
-    if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
   }
 
   /**
