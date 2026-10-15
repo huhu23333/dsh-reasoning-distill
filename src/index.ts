@@ -110,11 +110,11 @@ export function apply(ctx: Context, config: PluginConfig): void {
       }
     }).settings
     child.effect(() => settings.configure({ auto: false }, ctx.fiber), 'reasoning-distill: settings page')
-    // The host half owns the document the panel edits, so a backend that is gone is closed the
-    // same way the panel closes it. A host without `update` keeps the report-only path.
+    // The host half owns the document the panel edits, so a backend that is gone is cleared the
+    // same way the panel clears it. A host without `update` keeps the report-only path.
     const update = settings.update
     if (update !== undefined) {
-      engine.useSettingsWriter(async () => { await update.call(settings, SETTINGS_NS, { enabled: false }) })
+      engine.useSettingsWriter(async fixup => { await update.call(settings, SETTINGS_NS, fixup) })
     }
   })
   ctx.logger.info('reasoning-distill: watching reasoning over %d estimated tokens', resolveRule('', config).thresholdTokens)

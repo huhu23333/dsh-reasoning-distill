@@ -92,6 +92,35 @@ export function backendMissingFrom(plugin: string | undefined, activePlugins: re
   return !activePlugins.some(entry => namesPlugin(entry, plugin))
 }
 
+/** Stored settings a backend that is gone invalidates, ready to be written as one patch. */
+export interface BackendFixup {
+  /**
+   * Master switch. Present only when it was still on: it needs a backend to hand a rewrite over,
+   * so it is as invalid as the selection itself.
+   */
+  enabled?: false
+  /**
+   * The selection goes away. It names a plugin that is no longer installed, and leaving it stored
+   * would keep the panel and every later process promising a hand-off that cannot happen.
+   */
+  rewriteBackend: ''
+}
+
+/**
+ * What to write when the selected backend's plugin is gone.
+ *
+ * The selection is the thing to clear, and the switch follows it only when it is still on: a
+ * profile whose switch is already off has nothing to change beyond the stale name, and one whose
+ * selection is already empty has nothing to change at all.
+ * @param backend - the stored backend id.
+ * @param enabled - the stored master switch.
+ * @returns the patch to write, or undefined when no stale selection is stored.
+ */
+export function missingBackendFixup(backend: string, enabled: boolean): BackendFixup | undefined {
+  if (backend === '') return undefined
+  return enabled ? { enabled: false, rewriteBackend: '' } : { rewriteBackend: '' }
+}
+
 /** What one probe request saw; two of these are compared, so it is only the shape. */
 export interface ProbeAnswer {
   status: number

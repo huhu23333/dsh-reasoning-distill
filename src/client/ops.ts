@@ -126,9 +126,9 @@ export function messageEditRequest(
 }
 
 export {
-  REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendOptionsVisible, masterSwitchState, nextBackend, rewriteRequest,
+  REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendOptionsVisible, masterSwitchState, missingBackendFixup, nextBackend, rewriteRequest,
 } from '../backends.ts'
-export type { ProbeAnswer, RewriteBackend } from '../backends.ts'
+export type { BackendFixup, ProbeAnswer, RewriteBackend } from '../backends.ts'
 
 /**
  * Whether a stored master switch must be written back as off.

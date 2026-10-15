@@ -14,7 +14,7 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, claimRewriteAttempt, forcesMasterOff, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, messageEditRequest, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
 import { installPromptFor, type InstallJob } from '../src/install-shared.ts'
@@ -238,6 +238,14 @@ check('a plugin the active list carries is found, by name or by repository spec'
 check('a list that could not be read closes nothing', !backendMissingFrom('dsh-message-edit', undefined))
 check('no plugin name — no backend, or one this host does not know — closes nothing',
   !backendMissingFrom('', active) && !backendMissingFrom(undefined, active))
+// Clearing the selection is part of the same fix: the stored name outlives the plugin, and leaving
+// it would keep every later process promising a hand-off that cannot happen.
+check('a missing backend clears the selection, and takes the switch off with it when it was on',
+  JSON.stringify(missingBackendFixup('msg-edit', true)) === '{"enabled":false,"rewriteBackend":""}')
+check('and clears only the selection when the switch was already off',
+  JSON.stringify(missingBackendFixup('msg-edit', false)) === '{"rewriteBackend":""}')
+check('an already-empty selection has nothing to write',
+  missingBackendFixup('', true) === undefined && missingBackendFixup('', false) === undefined)
 // Master switch: locked off with no backend, the user's choice otherwise.
 check('no backend locks the master switch off', masterSwitchState('', true).locked && masterSwitchState('', true).checked === false)
 check('a selected backend unlocks it and keeps the user value',

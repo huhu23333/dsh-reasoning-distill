@@ -21,7 +21,7 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-subagent'
 
-import { backendById, backendMissingFrom, rewriteRequest } from './backends.ts'
+import { backendById, backendMissingFrom, missingBackendFixup, rewriteRequest, type BackendFixup } from './backends.ts'
 import { resolveRule, type Config, type ModelRule } from './config.ts'
 import { priceAt } from './peak.ts'
 import { DEFAULT_PROMPT, encloseDistillationData, looksLikeFinalReply } from './prompt.ts'
@@ -195,10 +195,10 @@ export class ReasoningDistillEngine {
   private backendChecked = false
 
   /**
-   * Commits `enabled: false` to the settings document. Absent when the host has no settings
+   * Commits {@link BackendFixup} to the settings document. Absent when the host has no settings
    * service, and then a missing backend can only be reported, never acted on.
    */
-  private writeMasterOff: (() => Promise<void>) | undefined
+  private writeFixup: ((fixup: BackendFixup) => Promise<void>) | undefined
 
   /**
    * @param ctx - host context carrying the session store, LLM seam, and logger.
@@ -346,15 +346,15 @@ export class ReasoningDistillEngine {
   }
 
   /**
-   * Register the write that closes the master switch on a backend that is gone.
+   * Register the write that clears a backend the profile no longer carries.
    *
    * The host reads its configuration through volatile references, which have no public setter, so
-   * the switch is closed the way the panel closes it: through the settings service, one write that
-   * updates the running reference and the stored document together.
-   * @param write - commits `enabled: false`.
+   * these settings are cleared the way the panel clears them: through the settings service, one
+   * write that updates the running reference and the stored document together.
+   * @param write - commits a {@link BackendFixup}.
    */
-  useSettingsWriter(write: () => Promise<void>): void {
-    this.writeMasterOff = write
+  useSettingsWriter(write: (fixup: BackendFixup) => Promise<void>): void {
+    this.writeFixup = write
   }
 
   /**
@@ -374,32 +374,34 @@ export class ReasoningDistillEngine {
   }
 
   /**
-   * Close the master switch when the selected backend's plugin is no longer installed.
+   * Clear the stored backend once its plugin is no longer installed.
    *
    * The backends answer on routes the host cannot reach — an in-place backend's route sits behind
    * `/api/*`, where the shell demands the browser's own credentials — so the host recognizes a
    * missing backend from the profile's active plugin list instead. A stored selection naming a
-   * plugin that list no longer carries cannot hand a rewrite over, and leaving the switch open
-   * would promise a write-back that can never happen; turning it off here is the same outcome the
-   * panel reaches with its probe. The stored value is only written when it is still on, so a
-   * profile whose switch is already off is reported and left alone.
+   * plugin that list no longer carries cannot hand a rewrite over, and it outlives the plugin that
+   * made it valid, so the selection itself is cleared along with the master switch that needs it;
+   * this is the same outcome the panel reaches with its probe.
    */
   private async checkBackend(): Promise<void> {
     const backend = this.config.rewriteBackend.get() ?? ''
     const plugin = backendById(backend)?.plugin
     const active = this.activePlugins === undefined ? undefined : await this.activePlugins()
     if (!backendMissingFrom(plugin, active)) return
-    this.ctx.logger.warn('reasoning-distill: rewrite backend %s needs plugin %s, which the profile no longer lists; the master switch cannot apply anything', backend, plugin)
-    if (this.config.enabled.get() !== true) return
-    if (this.writeMasterOff === undefined) {
-      this.ctx.logger.warn('reasoning-distill: the master switch could not be turned off: the host exposes no settings service')
+    this.ctx.logger.warn('reasoning-distill: rewrite backend %s needs plugin %s, which the profile no longer lists; clearing the selection', backend, plugin)
+    const fixup = missingBackendFixup(backend, this.config.enabled.get() === true)
+    if (fixup === undefined) return
+    if (this.writeFixup === undefined) {
+      this.ctx.logger.warn('reasoning-distill: the rewrite backend settings could not be cleared: the host exposes no settings service')
       return
     }
     try {
-      await this.writeMasterOff()
-      this.ctx.logger.warn('reasoning-distill: the master switch was turned off')
+      await this.writeFixup(fixup)
+      this.ctx.logger.info(fixup.enabled === undefined
+        ? 'reasoning-distill: cleared the rewrite backend selection; the master switch was already off'
+        : 'reasoning-distill: cleared the rewrite backend selection and turned the master switch off')
     } catch (error: unknown) {
-      this.ctx.logger.warn('reasoning-distill: the master switch could not be turned off: %o', error)
+      this.ctx.logger.warn('reasoning-distill: the rewrite backend settings could not be cleared: %o', error)
     }
   }
 
