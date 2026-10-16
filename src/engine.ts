@@ -122,6 +122,16 @@ export class ReasoningDistillEngine {
 
   /** Memoized session kind for children, cleared on disposal. */
   private readonly sessionKind = new Map<string, 'continuable' | 'oneShot'>()
+
+  /**
+   * Why one session's last observed step did not become a distillation.
+   *
+   * Staging declines for reasons that are otherwise invisible from outside: a rule that is off for
+   * this session's kind, a threshold the reasoning did not reach, an interrupted step, or a session
+   * this plugin never attached. The report carries the last one, so "it never triggers" is
+   * answerable without reading a terminal.
+   */
+  private readonly lastDecision = new Map<string, { at: number; turn: number; step: number; reason: string }>()
   /**
    * Sessions whose record cannot be read right now. Distillation is skipped for
    * them rather than spending money on a result that could not be stored; every
@@ -1559,7 +1569,12 @@ export class ReasoningDistillEngine {
     if (this.ownSessions.has(session.id)) return
     // A disposed session object can still emit queued events; they belong to the
     // previous generation and must not stage work or move state for its successor.
-    if (this.current.get(session.id) !== session) return
+    if (this.current.get(session.id) !== session) {
+      // A step for a session this plugin never attached is exactly the "nothing ever triggers"
+      // case; record it instead of returning in silence.
+      if (event.type === 'assistant/message') this.noteDecision(session.id, event, 'session-not-attached')
+      return
+    }
     // Any event can change the surface (append, prune, projection, message
     // edit), so the position index is only valid until the next event.
     switch (event.type) {
@@ -1588,6 +1603,12 @@ export class ReasoningDistillEngine {
         // pre-step down.
         if (!this.pending.has(key)) {
           this.ctx.logger.debug('reasoning-distill: step end %s had nothing staged', key)
+          // Staging already recorded why *this* step was left alone, and that reason is the useful
+          // one; "nothing staged" is only the summary for a step staging never saw.
+          const why = this.lastDecision.get(session.id)
+          if (why?.turn !== (data.turn ?? 0) || why?.step !== (data.step ?? 0)) {
+            this.noteDecision(session.id, event, 'not-staged')
+          }
           return
         }
         // The record is read *before* paying, not merely before the next request:
@@ -1603,6 +1624,7 @@ export class ReasoningDistillEngine {
           if (this.abandoned.has(key) || this.storageBroken.has(session.id)) {
             this.pending.delete(key)
             if (this.inFlight.get(key) === gate) this.inFlight.delete(key)
+            this.noteDecision(session.id, event, 'abandoned-or-record-unreadable')
             return
           }
           // A conversation whose own background work is still running is left alone when
@@ -1612,6 +1634,7 @@ export class ReasoningDistillEngine {
             this.pending.delete(key)
             if (this.inFlight.get(key) === gate) this.inFlight.delete(key)
             this.ctx.logger.info('reasoning-distill: %s keeps its reasoning: background work is running', session.id)
+            this.noteDecision(session.id, event, 'background-work-running')
             return
           }
           this.launch(session, event)
@@ -1636,6 +1659,12 @@ export class ReasoningDistillEngine {
     }
   }
 
+  /** Record why one step did not become a distillation, for the report. */
+  private noteDecision(sessionId: string, event: { data: unknown }, reason: string): void {
+    const data = event.data as { turn?: number; step?: number } | undefined
+    this.lastDecision.set(sessionId, { at: Date.now(), turn: data?.turn ?? 0, step: data?.step ?? 0, reason })
+  }
+
   /**
    * Stage a candidate assistant message for the step boundary, synchronously.
    * @param session - emitting session.
@@ -1645,12 +1674,16 @@ export class ReasoningDistillEngine {
    */
   private stageTarget(session: Session, event: { seq: number; data: unknown }): string {
     const data = event.data as { turn?: number; step?: number; message?: unknown; interrupted?: true }
+    const decline = (reason: string, model = ''): string => {
+      this.noteDecision(session.id, event, reason)
+      return model
+    }
     const message = data.message as { id?: string; content?: ContentBlock[]; source?: { provider?: string; model?: string } } | undefined
-    if (message === undefined || !Array.isArray(message.content)) return ''
+    if (message === undefined || !Array.isArray(message.content)) return decline('message-unreadable')
     const model = message.source?.model ?? ''
     const provider = message.source?.provider ?? ''
-    if (model === '') return ''
-    if (!this.config.enabled.get()) return model
+    if (model === '') return decline('model-unknown')
+    if (!this.config.enabled.get()) return decline('master-switch-off', model)
     // A distillation is only useful when some companion can write the result into
     // the session's own history. With no backend selected the panel forces the
     // master switch off; this is the belt-and-braces half of the same rule.
@@ -1658,30 +1691,30 @@ export class ReasoningDistillEngine {
     // was removed or renamed, or the config was edited by hand) must not enable
     // spending or substitution, because the result could never be written into the
     // history.
-    if (backendById(this.config.rewriteBackend.get()) === undefined) return model
+    if (backendById(this.config.rewriteBackend.get()) === undefined) return decline('no-backend', model)
     // A canceled step is not an answer: the host still appends `step/end` after
     // an abort (agent-loop), so staging here would spend a distillation on
     // partial reasoning and hold the next request until it finished. Accounting
     // still runs, because that response may have replayed earlier rewrites.
     if (data.interrupted === true) {
       this.ctx.logger.debug('reasoning-distill: skipping an interrupted step')
-      return model
+      return decline('interrupted', model)
     }
     const rule = resolveRule(model, this.config)
-    if (!this.appliesTo(session, rule)) return model
+    if (!this.appliesTo(session, rule)) return decline(`rule-off-${this.kindOf(session)}`, model)
     const reasoning = reasoningOf(message.content)
-    if (reasoning.trim().length === 0) return model
+    if (reasoning.trim().length === 0) return decline('no-reasoning', model)
     const tokens = estimateTextTokens(reasoning)
-    if (tokens < rule.thresholdTokens) return model
+    if (tokens < rule.thresholdTokens) return decline('below-threshold', model)
     const hasToolCall = message.content.some(block => block.type === 'tool-call')
-    if (!hasToolCall && !rule.includeFinalTurns) return model
+    if (!hasToolCall && !rule.includeFinalTurns) return decline('final-turn-excluded', model)
     // The replay folds every reasoning block of a message into one, while a branch
     // backend replaces a single block: compressing a multi-block message would
     // leave its other originals in the branch and leak uncompressed reasoning.
     const reasoningBlocks = (message.content ?? []).filter(block => block.type === 'reasoning').length
     if (reasoningBlocks !== 1) {
       this.ctx.logger.debug('reasoning-distill: leaving a %d-block reasoning message uncompressed', reasoningBlocks)
-      return model
+      return decline('multi-block-reasoning', model)
     }
     const key = this.pendingKey(session.id, data.turn ?? 0, data.step ?? 0)
     this.pending.set(key, {
@@ -1697,6 +1730,9 @@ export class ReasoningDistillEngine {
       content: message.content,
       rule,
     })
+    // Staged: the launch records what happens next, so a stale decline cannot be mistaken for
+    // this step's outcome.
+    this.lastDecision.delete(session.id)
     this.ctx.logger.debug('reasoning-distill: staged %s turn %d step %d (%d est. tokens)',
       model, data.turn ?? 0, data.step ?? 0, tokens)
     return model
@@ -1918,7 +1954,15 @@ export class ReasoningDistillEngine {
    * @param sessionId - session being reported.
    * @returns running compressions and whether a step is currently blocked.
    */
-  snapshot(sessionId: string): { active: ActiveCompression[]; blockingSince: number | null; blockingReason: BlockingReason | null; pendingBranch: string | null; generation: number } {
+  snapshot(sessionId: string): {
+    active: ActiveCompression[]
+    blockingSince: number | null
+    blockingReason: BlockingReason | null
+    pendingBranch: string | null
+    generation: number
+    /** Why this session's last observed step did not become a distillation; null once one did. */
+    lastDecision: { at: number; turn: number; step: number; reason: string } | null
+  } {
     const active: ActiveCompression[] = []
     for (const entry of this.running.values()) {
       if (entry.sessionId !== sessionId) continue
@@ -1932,6 +1976,7 @@ export class ReasoningDistillEngine {
       blockingReason: blocked?.reason ?? null,
       pendingBranch: this.pendingBranch.get(sessionId) ?? null,
       generation: this.generation.get(sessionId) ?? 0,
+      lastDecision: this.lastDecision.get(sessionId) ?? null,
     }
   }
 

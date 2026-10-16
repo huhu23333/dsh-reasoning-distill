@@ -2447,6 +2447,60 @@ check('and writes the rewrite back for that very session',
   delegatedApplied.ok === true && delegatedWrites.length === 1 && delegatedWrites[0] === 'short',
   JSON.stringify({ delegatedApplied, delegatedWrites }))
 
+console.log('scenario 73: an empty ledger can say why the last step did not trigger')
+/** Drive one step through a fresh engine and report why it did or did not become a distillation. */
+async function runDecision(
+  id: string,
+  header: { cwd?: string; origin?: 'subagent'; delegationDepth?: number },
+  overrides: Record<string, unknown>,
+  ruleOverrides: Record<string, unknown>,
+  reasoning: string,
+  descriptor?: 'one-shot' | 'continuable',
+): Promise<string | undefined> {
+  handlers.clear()
+  const engine = new ReasoningDistillEngine(
+    ctx as never,
+    makeConfig({
+      defaultRule: { get: () => kindRule(ruleOverrides) },
+      models: { get: () => ({}) },
+      rewriteBackend: { get: () => 'in-place' },
+      ...overrides,
+    }) as never,
+    new SidecarStore(),
+  )
+  engine.start()
+  const session = new FakeSession(id, header)
+  sessions.set(session.id, session)
+  await fire('session/created', session)
+  if (descriptor !== undefined) session.append('subagent/descriptor', { version: 3, mode: descriptor, provider: 'in-process' })
+  session.append('user/message', { id: `u-${id}`, role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+  const seq = session.append('assistant/message', {
+    turn: 1, step: 1,
+    message: {
+      id: `a-${id}`, role: 'assistant',
+      content: [{ type: 'reasoning', text: reasoning }, { type: 'text', text: 'done' }],
+      source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+    },
+    stream: [],
+  }).seq
+  session.append('step/end', { turn: 1, step: 1 })
+  await fire('session/event', session, session.eventAt(seq))
+  await fire('session/event', session, session.eventAt(session.log.length - 1))
+  return engine.snapshot(session.id).lastDecision?.reason
+}
+const decChild = { cwd: '/tmp', origin: 'subagent' as const, delegationDepth: 1 }
+check('a step skipped because the master switch is off says exactly that',
+  (await runDecision('dec-master', { cwd: '/tmp' }, { enabled: { get: () => false } }, {}, fatReasoning)) === 'master-switch-off')
+check('a continuable child blocked by its own switch names that kind',
+  (await runDecision('dec-child', decChild, {}, { continuableSubagents: false }, fatReasoning, 'continuable')) === 'rule-off-continuable')
+check('a one-shot child names the one-shot switch',
+  (await runDecision('dec-shot', decChild, {}, {}, fatReasoning, 'one-shot')) === 'rule-off-oneShot')
+check('reasoning under the threshold names the threshold',
+  (await runDecision('dec-thresh', { cwd: '/tmp' }, {}, { thresholdTokens: 5000 }, fatReasoning)) === 'below-threshold')
+check('a message without reasoning says so',
+  (await runDecision('dec-none', { cwd: '/tmp' }, {}, {}, '   ')) === 'no-reasoning')
+check('and a step that did trigger leaves no decision behind',
+  (await runDecision('dec-ok', { cwd: '/tmp' }, {}, {}, fatReasoning)) === undefined)
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

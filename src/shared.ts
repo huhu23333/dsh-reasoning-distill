@@ -148,6 +148,14 @@ export interface SessionReport {
    */
   stockIds?: string[]
   /**
+   * Why this session's last observed step did not become a distillation, or null once one did.
+   *
+   * The reason is a short code (`below-threshold`, `rule-off-continuable`, `session-not-attached`,…)
+   * because the engine cannot translate; the panel renders the ones it knows and falls back to the
+   * code, and anyone reading the route sees exactly what the engine decided.
+   */
+  lastDecision?: { at: number; turn: number; step: number; reason: string } | null
+  /**
    * Entry id whose distilled text still has to be written into the history by a
    * backend, or null. The panel applies it and then calls the hand-off route.
    */

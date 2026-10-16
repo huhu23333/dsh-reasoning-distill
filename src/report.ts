@@ -47,6 +47,11 @@ export function buildReport(
      * projection changed its target.
      */
     stock?: { tokens: number; saved: number; ids: string[] }
+    /**
+     * Why this session's last observed step did not become a distillation, from the engine.
+     * Absent for a caller that passes no engine snapshot.
+     */
+    lastDecision?: { at: number; turn: number; step: number; reason: string } | null
     /** Clock used to price the fallback stock; defaults to now. */
     now?: number
     /** Session generation the panel must quote when settling a hand-off. */
@@ -160,6 +165,7 @@ export function buildReport(
     },
     pendingBranch: live.pendingBranch ?? null,
     generation: live.generation ?? 0,
+    lastDecision: live.lastDecision ?? null,
     active: live.active,
     blockingSince: live.blockingSince,
     blockingReason: live.blockingReason,

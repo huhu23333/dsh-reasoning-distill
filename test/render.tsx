@@ -379,6 +379,13 @@ check('a report missing the new fields still renders', skew.includes('view.entri
 check('a missing audit session says so instead of looking broken', noSession.includes('view.sessionMissing') && !noSession.includes('view.noSession'))
 const empty = tryRender(<ReportBody report={{ ...modernReport(), entries: [], active: [], blockingSince: null, blockingReason: null }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
 check('an empty session renders the empty state', empty.includes('view.empty'))
+// An empty ledger cannot answer "why did nothing happen" from its entries, so the engine's own
+// last decision is shown -- and a code the panel has no phrase for still renders as itself.
+const decided = tryRender(<ReportBody report={{ ...modernReport(), entries: [], active: [], blockingSince: null, blockingReason: null, lastDecision: { at: 0, turn: 3, step: 2, reason: 'below-threshold' } }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
+const unknown = tryRender(<ReportBody report={{ ...modernReport(), entries: [], active: [], blockingSince: null, blockingReason: null, lastDecision: { at: 0, turn: 3, step: 2, reason: 'brand-new-code' } }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
+check('an empty ledger says why the last step did not trigger',
+  decided.includes('view.notTriggered') && decided.includes('view.why.below-threshold') && decided.includes('3/2'), decided.slice(0, 200))
+check('and a reason the panel cannot phrase still shows its code', unknown.includes('brand-new-code'))
 check('loading and error states render', tryRender(<ReportBody report={undefined} loading error={undefined} now={0} onRefresh={noop} openSession={noop} t={t} />).includes('view.loading'))
 check('the error state renders', tryRender(<ReportBody report={undefined} loading={false} error="boom" now={0} onRefresh={noop} openSession={noop} t={t} />).includes('boom'))
 

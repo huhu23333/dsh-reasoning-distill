@@ -4,7 +4,7 @@ import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/
 import { availableSessionStorage, backendById, httpFailure, isStaleResponse, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
 import { HANDOFF_ROUTE, REPORT_ROUTE, entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { settleHandoff } from './handoff.ts'
-import { NS } from './locales.ts'
+import { NS, type Key } from './locales.ts'
 import css from './View.module.css'
 
 type Props = PropsRuntime<'conversation.view'> & PropsLocale<typeof NS> & {
@@ -436,7 +436,11 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
           <span className={css.metric}>{Math.max(0, Math.round((now - item.startedAt) / 1000))}s</span>
         </div>)}
       </section>}
-      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}{report.entries.map(entry => <Entry key={entry.id} entry={entry} sessionId={report.sessionId} t={t} liveStockIds={report.stockIds} />)}</section>
+      <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}
+        {/* "Why did nothing happen" is the one question an empty ledger cannot answer from the
+            entries alone, so the engine's last decision is shown while there is nothing else. */}
+        {report.entries.length === 0 && report.lastDecision != null && <p className={css.muted}>{t('view.notTriggered')}: {report.lastDecision.turn}/{report.lastDecision.step} · {t(`view.why.${report.lastDecision.reason}` as Key)}</p>}
+        {report.entries.map(entry => <Entry key={entry.id} entry={entry} sessionId={report.sessionId} t={t} liveStockIds={report.stockIds} />)}</section>
       <section className={css.section}><h3>{t('view.sessions')}</h3>{report.entries.map(entry => <SessionRow key={entry.id} entry={entry} t={t} openSession={openSession} />)}</section>
     </>}
   </div>

@@ -1,7 +1,7 @@
 export const NS = 'reasoningDistill'
 
 export const zh = {
-  'view.auditUndurable': '未写入持久日志（当前可打开，重启后消失）',
+  'view.auditUndurable': '未写入持久日志（当前可打开，重启后消失）', 'view.notTriggered': '最近一步未触发', 'view.why.master-switch-off': '总开关是关的', 'view.why.no-backend': '没有选择改写后端', 'view.why.rule-off-main': '该模型的规则关着', 'view.why.rule-off-continuable': '该模型对「可续聊子代理」的开关关着', 'view.why.rule-off-oneShot': '该模型对「一次性子代理」的开关关着', 'view.why.below-threshold': '思考长度没到阈值', 'view.why.no-reasoning': '这一步没有思考内容', 'view.why.multi-block-reasoning': '这条消息有多个思考块（只压单块）', 'view.why.interrupted': '这一步被中断', 'view.why.final-turn-excluded': '规则排除了没有工具调用的收尾步', 'view.why.session-not-attached': '这个会话没有被插件接管', 'view.why.not-staged': '这一步没有候选项', 'view.why.background-work-running': '有后台工作，按配置跳过', 'view.why.abandoned-or-record-unreadable': '记录不可读或这一步已被放弃', 'view.why.message-unreadable': '消息内容读不出来', 'view.why.model-unknown': '回答的模型未知',
   'view.sessions': '压缩会话', 'view.sessionExpired': '会话已随上次运行结束（内容见下方明细）',
   'settings.maxInput': '背景块长度上限（字符）', 'settings.maxOutput': '蒸馏结果长度上限（字符）',
   'settings.branchTimeout': '分支超时（毫秒）', 'settings.branchTimeoutHint': '宿主等待分支型后端建好分支的时限；超时就按“无事发生”继续原会话。仅分支型后端使用，0 = 永不超时。',
@@ -91,7 +91,7 @@ export const zh = {
 } as const
 
 export const en: Record<keyof typeof zh, string> = {
-  'view.auditUndurable': 'not written to a persistent log (openable now, gone after a restart)',
+  'view.auditUndurable': 'not written to a persistent log (openable now, gone after a restart)', 'view.notTriggered': 'the last step did not trigger', 'view.why.master-switch-off': 'the master switch is off', 'view.why.no-backend': 'no rewrite backend is selected', 'view.why.rule-off-main': 'this model\u2019s rule is off', 'view.why.rule-off-continuable': 'this model\u2019s continuable-subagent switch is off', 'view.why.rule-off-oneShot': 'this model\u2019s one-shot-subagent switch is off', 'view.why.below-threshold': 'the reasoning did not reach the threshold', 'view.why.no-reasoning': 'this step produced no reasoning', 'view.why.multi-block-reasoning': 'the message carries more than one reasoning block', 'view.why.interrupted': 'this step was interrupted', 'view.why.final-turn-excluded': 'the rule excludes a final turn without tool calls', 'view.why.session-not-attached': 'this plugin never attached that session', 'view.why.not-staged': 'this step staged no candidate', 'view.why.background-work-running': 'background work is running, so the rule skips', 'view.why.abandoned-or-record-unreadable': 'the record is unreadable or the step was abandoned', 'view.why.message-unreadable': 'the message content could not be read', 'view.why.model-unknown': 'the answering model is unknown',
   'view.sessions': 'Distillation sessions', 'view.sessionExpired': 'session ended with the previous run (full text below)',
   'settings.maxInput': 'Context block limit (chars)', 'settings.maxOutput': 'Distilled result limit (chars)',
   'settings.branchTimeout': 'Branch timeout (ms)', 'settings.branchTimeoutHint': 'How long the host waits for a branch backend before carrying on in the original conversation; only used by branch-type backends. 0 waits forever.',
