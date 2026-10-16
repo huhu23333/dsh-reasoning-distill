@@ -2403,12 +2403,13 @@ check('the quick-install route accepts the built-in backend',
   JSON.stringify(installInPlaceBody71))
 installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'cancel' }) }))
 
-console.log('scenario 72: a delegated session is written back through the engine registry')
+console.log('scenario 72: a delegated session is learned from a pre-step, not from its creation')
 handlers.clear()
 // A child session lives in its agent's scope: the root store this plugin reaches does not carry
-// it, and only the engine's own registry (filled when the host created the session) can resolve
-// the id. Resolving through the store alone is what made the panel 404 on every subagent.
-const delegatedSession = new FakeSession('delegated-1', { cwd: '/tmp' })
+// it, its creation is never delivered here, and only `agent/pre-step` names it. Attaching it
+// there is what makes the engine the authority on it -- which is both why the report route can
+// answer for a subagent and why a subagent can be distilled at all.
+const delegatedSession = new FakeSession('delegated-1', { cwd: '/tmp', origin: 'subagent' })
 const delegatedWrites: string[] = []
 ;(delegatedSession as unknown as { rewriteReasoningBlock: (this: { id: string }, request: { text: string }) => unknown }).rewriteReasoningBlock = function (request) {
   if (typeof this?.id !== 'string') throw new TypeError('rewriteReasoningBlock lost its receiver')
@@ -2427,13 +2428,16 @@ const delegatedEngine = new ReasoningDistillEngine(
   new DelegatedStore(),
 )
 delegatedEngine.start()
-await fire('session/created', delegatedSession)
-check('the engine attaches a session the root store cannot resolve',
-  delegatedEngine.sessionFor('delegated-1') === delegatedSession && delegatedEngine.sessionFor('nope') === undefined)
+check('a session nothing has announced yet is unknown to the engine',
+  delegatedEngine.sessionFor('delegated-1') === undefined && delegatedEngine.sessionCount() === 0)
+await fire('agent/pre-step', { agent: { session: delegatedSession } }, async () => undefined)
+check('the pre-step attaches a session the root store cannot resolve and nothing announced',
+  delegatedEngine.sessionFor('delegated-1') === delegatedSession && delegatedEngine.sessionCount() === 1)
 const delegatedApplied = await delegatedEngine.applyInPlace({ sessionId: 'delegated-1', eventSeq: 4, blockIndex: 0, text: 'short' })
 check('and writes the rewrite back for that very session',
   delegatedApplied.ok === true && delegatedWrites.length === 1 && delegatedWrites[0] === 'short',
   JSON.stringify({ delegatedApplied, delegatedWrites }))
+
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

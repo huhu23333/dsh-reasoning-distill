@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { availableSessionStorage, backendById, isStaleResponse, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
+import { availableSessionStorage, backendById, httpFailure, isStaleResponse, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
 import { HANDOFF_ROUTE, REPORT_ROUTE, entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { settleHandoff } from './handoff.ts'
 import { NS } from './locales.ts'
@@ -165,7 +165,7 @@ export function ReasoningDistillView({ sessionId, openSession, refreshTranscript
       setCache(current => ({ ...current, [sessionId]: { ...current[sessionId], loading: current[sessionId]?.report === undefined, error: undefined } }))
       fetch(REPORT_ROUTE, { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId }) }).then(async response => {
-        if (!response.ok) throw new Error(`HTTP ${response.status}`)
+        if (!response.ok) throw new Error(await httpFailure(response))
         return await response.json() as SessionReport
       }).then(report => {
         if (!alive || isStaleResponse(request, applied.current)) return

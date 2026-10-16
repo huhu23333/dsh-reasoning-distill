@@ -22,6 +22,7 @@ import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/Install
 import { INSTALLABLE_BACKENDS, installPromptFor, type InstallJob } from '../src/install-shared.ts'
 import { en, zh, type Key } from '../src/client/locales.ts'
 import { refreshTranscript } from '../src/client/transcript.ts'
+import { httpFailure } from '../src/client/ops.ts'
 
 let failures = 0
 const log: string[] = []
@@ -710,6 +711,13 @@ check('a session without the rebuild entry point is left alone',
   refreshTranscript({}) === false && refreshTranscript(undefined) === false && rebuildCalls === 1)
 check('a rebuild that throws cannot fail the write-back that already landed',
   refreshTranscript({ resync: () => { throw new Error('no window') } }) === false && rebuildCalls === 1)
+// A bare status hides which lookup failed; the routes all answer JSON, so the reason is readable.
+const statedFailure = await httpFailure({ status: 404, json: async () => ({ error: 'unknown session' }) } as unknown as Response)
+const silentFailure = await httpFailure({ status: 500, json: async () => { throw new Error('not json') } } as unknown as Response)
+const emptyFailure = await httpFailure({ status: 502, json: async () => ({}) } as unknown as Response)
+check('a failed response keeps the server\u2019s own reason',
+  statedFailure === 'unknown session（HTTP 404）' && silentFailure === 'HTTP 500' && emptyFailure === 'HTTP 502',
+  JSON.stringify({ statedFailure, silentFailure, emptyFailure }))
 check('no render path threw', !rendered.some(markup => markup.includes('__THREW__')))
 
 // Effect-only regressions: the SSR checks above do not run the view's effects.

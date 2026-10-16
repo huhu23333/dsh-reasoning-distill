@@ -341,6 +341,21 @@ export function shouldRetrySettle(verdict: 'settled' | 'refused' | 'failed', rec
  * @param payload - the parsed body, when it parsed.
  * @returns whether the hand-off completed, and why not when it did not.
  */
+/**
+ * Describe one failed HTTP response, naming the server's own reason when it gave one.
+ *
+ * A status alone is not actionable: "HTTP 404" hides whether the route did not exist, the session
+ * was unknown, or the request was refused. Every route in this plugin answers JSON, so the reason
+ * is there to be read.
+ * @param response - the failed response.
+ * @returns a message that keeps the status and adds the server's stated reason.
+ */
+export async function httpFailure(response: Response): Promise<string> {
+  const payload: unknown = await response.json().catch(() => null)
+  const stated = (payload as { error?: unknown } | null)?.error
+  return typeof stated === 'string' && stated !== '' ? `${stated}（HTTP ${response.status}）` : `HTTP ${response.status}`
+}
+
 export function rewriteApplyOutcome(ok: boolean, payload: unknown): { done: boolean; error?: string } {
   if (!ok) {
     const stated = (payload as { error?: unknown } | null)?.error

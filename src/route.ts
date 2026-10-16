@@ -57,6 +57,8 @@ export function registerRoutes(
      * Optional on the type so the route can be driven by a stub that models only one half.
      */
     sessionFor?(sessionId: string): unknown
+    /** How many sessions the engine has attached; diagnostics only. */
+    sessionCount?(): number
     handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }>
     hostPatchStatus(): HostPatchStatus
     applyInPlace(request: { sessionId: string; eventSeq: number; blockIndex: number; text: string }): Promise<{ ok: true; seq: number } | { ok: false; error: string }>
@@ -92,8 +94,15 @@ export function registerRoutes(
         // moment the host created it. The store stays the fallback for a session this plugin has
         // not observed yet.
         const sessions = child.get('sessions') as { get(id: string): unknown } | undefined
-        if ((engine.sessionFor?.(sessionId) ?? sessions?.get(sessionId)) === undefined) {
-          return json({ error: 'unknown session' }, 404)
+        const known = engine.sessionFor?.(sessionId)
+        if ((known ?? sessions?.get(sessionId)) === undefined) {
+          // The body is diagnostic on purpose: the panel shows the status, and a live probe can
+          // then say *which* lookup failed and whether the plugin can see sessions at all.
+          return json({
+            error: 'unknown session',
+            engineKnown: known !== undefined,
+            knownSessions: engine.sessionCount?.() ?? null,
+          }, 404)
         }
         try {
           const record = await store.load(sessionId)

@@ -299,6 +299,12 @@ export class ReasoningDistillEngine {
           // not act for the new one. Only a *different* known object counts: an id the
           // engine never attached (resumed before this plugin loaded) is left alone.
           if (this.replaced(session)) return true
+          // Attach a session this plugin has not seen yet, after the replacement check so an
+          // obsolete pre-step can never overwrite a successor. A delegated (subagent) session can
+          // reach this hook without its creation ever being delivered here, and this registry is
+          // what makes the engine the authority on it: staging, the derived-message wrapper and the
+          // report route's lookup all key off it.
+          if (this.sessionFor(session.id) !== session) this.attach(session)
           const signal = (payload as { signal?: AbortSignal }).signal
           // A stalled sidecar read must not outlive a stop either: the host only looks
           // at its signal once this handler returns.
@@ -419,6 +425,14 @@ export class ReasoningDistillEngine {
    */
   sessionFor(sessionId: string): Session | undefined {
     return this.current.get(sessionId)
+  }
+
+  /**
+   * How many sessions this engine has attached; for diagnostics only.
+   * @returns the size of the attachment registry.
+   */
+  sessionCount(): number {
+    return this.current.size
   }
 
   /**
