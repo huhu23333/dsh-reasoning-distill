@@ -13,7 +13,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, stockOfEntry } from '../src/client/View.tsx'
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import { REWRITE_ROUTE, type SessionReport } from '../src/shared.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendSelectable, backendUnusable, claimRewriteAttempt, hostPatchReady, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendReachable, backendSelectable, backendUnusable, claimRewriteAttempt, hostPatchReady, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
 import { branchBackendBlocksSubagents } from '../src/backends.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { mergeRule, sparseOverride } from '../src/rule.ts'
@@ -718,6 +718,18 @@ const emptyFailure = await httpFailure({ status: 502, json: async () => ({}) } a
 check('a failed response keeps the server\u2019s own reason',
   statedFailure === 'unknown session（HTTP 404）' && silentFailure === 'HTTP 500' && emptyFailure === 'HTTP 502',
   JSON.stringify({ statedFailure, silentFailure, emptyFailure }))
+// A probe that never answered must not be read as "the backend is gone": that reading wrote the
+// master switch off into storage on one transient failure, and it stayed off until the user
+// noticed nothing compressed any more.
+check('a probe that could not answer leaves the master switch alone',
+  !forcesMasterOff('in-place', true, undefined) && masterSwitchState('in-place', true, undefined).locked === false)
+check('and only an answered "missing" turns it off',
+  forcesMasterOff('in-place', true, false) && forcesMasterOff('in-place', false, false) === false)
+const fetchBeforeProbe = (globalThis as { fetch?: unknown }).fetch
+;(globalThis as { fetch: unknown }).fetch = async () => { throw new Error('offline') }
+const unknownProbe = await backendReachable(backendById('in-place')!)
+;(globalThis as { fetch?: unknown }).fetch = fetchBeforeProbe
+check('a transport failure is reported as unknown, not as missing', unknownProbe === undefined, String(unknownProbe))
 check('no render path threw', !rendered.some(markup => markup.includes('__THREW__')))
 
 // Effect-only regressions: the SSR checks above do not run the view's effects.

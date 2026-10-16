@@ -207,7 +207,7 @@ export function withoutSubagentKinds(value: SettingsValue): SettingsValue {
  * @returns whether the backend can be selected; false when there is nothing to ask, the answer is
  *   the shell's, or a host-patch host reports itself unpatched or broken.
  */
-export async function backendReachable(backend: RewriteBackend): Promise<boolean> {
+export async function backendReachable(backend: RewriteBackend): Promise<boolean | undefined> {
   const route = backend.probe
   if (route === undefined) return false
   const probe = async (path: string): Promise<ProbeAnswer> => {
@@ -227,7 +227,10 @@ export async function backendReachable(backend: RewriteBackend): Promise<boolean
     const absent = await probe(route.path + '-absent')
     return backendSelectable(backend, answer, absent)
   } catch {
-    return false
+    // A request that never got an answer says nothing about the backend. Reporting it as
+    // "not installed" is what let one transient failure (a host restart, a page waking up) turn the
+    // master switch off in storage, where it stayed off until the user noticed nothing worked.
+    return undefined
   }
 }
 

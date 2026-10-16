@@ -73,7 +73,7 @@ function BackendChooser({ value, onSelect, t }: {
   onSelect: (id: string) => void
   t: Translate
 }) {
-  const [available, setAvailable] = useState<Record<string, boolean>>({})
+  const [available, setAvailable] = useState<Record<string, boolean | undefined>>({})
   useEffect(() => {
     let alive = true
     /** One probe: status, content type and a short body — everything worth comparing. */
@@ -105,7 +105,9 @@ function BackendChooser({ value, onSelect, t }: {
           if (alive) setAvailable(current => ({ ...current, [backend.id]: backendSelectable(backend, answer, absent) }))
         })
         .catch(() => {
-          if (alive) setAvailable(current => ({ ...current, [backend.id]: false }))
+          // Unknown, not missing: the row stays unselectable, but nothing downstream may read this
+          // as proof the backend is gone.
+          if (alive) setAvailable(current => ({ ...current, [backend.id]: undefined }))
         })
     }
     return () => { alive = false }
