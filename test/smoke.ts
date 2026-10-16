@@ -2608,6 +2608,58 @@ const settled76 = (await store76.load(failedId)).entries[0]
 check('and the note that it failed is gone, because it no longer has',
   settled76?.inPlaceApplied !== undefined && settled76?.handoff === undefined,
   JSON.stringify({ inPlaceApplied: settled76?.inPlaceApplied, handoff: settled76?.handoff }))
+console.log('scenario 77: a rewrite outlives the session it belongs to')
+handlers.clear()
+// The step that ends a turn is dispatched, the compression lands a moment later, and a delegated
+// conversation is already disposed by then. Persistence can open a stored session for writing, so
+// the rewrite lands in the artifact instead of waiting for a turn that may never come.
+const probe77 = { opened: 0, rewritten: [] as unknown[] }
+const storedCtx = {
+  ...ctx,
+  get(name: string): unknown {
+    if (name !== 'sessionPersistence') return ctx.get(name)
+    return {
+      open: async () => {
+        probe77.opened += 1
+        return {
+          read: async () => ({ events: [{
+            type: 'assistant/message', seq: 3, time: 1,
+            data: { turn: 1, step: 1, stream: [], message: {
+              id: 'm-77', role: 'assistant',
+              content: [{ type: 'reasoning', text: 'z'.repeat(60) }, { type: 'text', text: 'done' }],
+            } },
+          }] }),
+          rewrite: async (events: readonly unknown[]) => { probe77.rewritten.push(...events) },
+          flush: async () => undefined,
+          close: async () => undefined,
+        }
+      },
+    }
+  },
+}
+const storedId = 'stored-1'
+const store77 = new SidecarStore()
+const engine77 = new ReasoningDistillEngine(storedCtx as never, makeConfig({ rewriteBackend: { get: () => 'in-place' } }) as never, store77)
+engine77.start()
+await store77.update(storedId, record => {
+  record.entries.push({
+    id: 'e-77', targetSeq: 3, targetMessageId: 'm-77', targetBlockIndex: 0, turn: 1, step: 1,
+    provider: 'deepseek-official', model: 'deepseek-flash', originalChars: 60, originalTokens: 15,
+    distilledText: 'short-stored', distilledChars: 12, distilledTokens: 3, savedTokensPerRequest: 12,
+    distill: { sessionId: '', requestText: '', responseText: '', inputTokens: 0, outputTokens: 0, cost: 0, startedAt: 0, finishedAt: 0, provider: '', model: '' },
+    cacheBreakTokens: 0, cacheBreakCost: 0, liveSaved: 0, appliedAt: 1,
+  } as never)
+})
+const session77 = new FakeSession(storedId, { cwd: '/tmp', origin: 'subagent', delegationDepth: 1, createdAt: 7 })
+const written77 = await (engine77 as unknown as {
+  settleInPlaceEntry(session: unknown, entry: unknown, generation: number): Promise<boolean>
+}).settleInPlaceEntry(session77, (await store77.load(storedId)).entries[0], 0)
+const replaced77 = reasoningIn((probe77.rewritten[0] as { data?: { message?: unknown } } | undefined)?.data?.message)
+check('a rewrite whose session is gone is written into the stored artifact',
+  written77 === true && probe77.opened === 1 && probe77.rewritten.length === 1 && replaced77 === 'short-stored',
+  JSON.stringify({ written77, opened: probe77.opened, rewritten: replaced77 }))
+check('and the entry says the engine wrote it, so nothing writes it twice',
+  (await store77.load(storedId)).entries[0]?.inPlaceApplied !== undefined)
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

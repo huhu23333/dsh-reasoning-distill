@@ -554,6 +554,116 @@ export class ReasoningDistillEngine {
     }
   }
 
+/**
+   * Write one adopted rewrite into the conversation's history, now.
+   *
+   * The step that ends a turn is the one whose rewrite used to wait for a next pre-step, and a
+   * delegated conversation is disposed as soon as that turn ends -- so that rewrite had no writer
+   * at all until the conversation ran again, and the last reasoning before a reply stayed raw. A
+   * live session is written through the host entry point; a conversation that is no longer live is
+   * written through its *stored* artifact. Either way the entry is marked, so the same in-place
+   * rewrite is never written twice.
+   * @param session - session the rewrite belongs to.
+   * @param entry - the entry, already durable in the record.
+   * @param generation - generation the compression started under.
+   * @returns whether the history now carries the distilled text.
+   */
+  private async settleInPlaceEntry(session: Session, entry: StoredEntry, generation: number): Promise<boolean> {
+    if (entry.targetMessageId === '') return false
+    const request = {
+      seq: entry.targetSeq as SessionSeq,
+      messageId: entry.targetMessageId,
+      blockIndex: entry.targetBlockIndex ?? 0,
+      text: entry.distilledText,
+    }
+    // The object in the registry, not the one this compression captured: a delegated conversation is
+    // entered again between its turns, and the current object owns the log the request will replay.
+    const live = this.sessionFor(session.id)
+    if (live !== undefined) {
+      try {
+        const rewrite = rewriteEntryPoint(live)
+        if (rewrite !== undefined) {
+          rewrite(request)
+          await this.ctx.sessions.flush(live)
+          await this.markInPlaceApplied(session.id, entry.id)
+          return true
+        }
+      } catch (error: unknown) {
+        this.ctx.logger.debug('reasoning-distill: in-place write for %s on its live session failed: %o', session.id, error)
+      }
+    }
+    if ((this.generation.get(session.id) ?? 0) !== generation) return false
+    return await this.rewriteStored(session.id, request, entry.id)
+  }
+
+  /**
+   * Replace one reasoning block in a stored artifact, for a conversation that is not live.
+   *
+   * Persistence hands out a write handle for a stored session and the host patch gives that handle
+   * `rewrite`; taking ownership is deliberately brief, because an active owner rejects the open, so
+   * a conversation that is running is never touched and the handle is released before anything else
+   * can want it.
+   * @param sessionId - stored conversation to edit.
+   * @param request - the replacement to write.
+   * @param entryId - entry to mark once the artifact carries it.
+   * @returns whether the artifact now carries the distilled text.
+   */
+  private async rewriteStored(
+    sessionId: string,
+    request: { seq: SessionSeq; messageId: string; blockIndex: number; text: string },
+    entryId: string,
+  ): Promise<boolean> {
+    const persistence = optionalService<{ open?(id: string, access: 'write'): Promise<{
+      read(offset?: number, length?: number): Promise<{ events: readonly SessionEvent[] }>
+      rewrite?(events: readonly SessionEvent[]): Promise<void>
+      flush?(): Promise<void>
+      close(): Promise<void>
+    }> }>(this.ctx, 'sessionPersistence')
+    if (persistence?.open === undefined) return false
+    let handle: {
+      read(offset?: number, length?: number): Promise<{ events: readonly SessionEvent[] }>
+      rewrite?(events: readonly SessionEvent[]): Promise<void>
+      flush?(): Promise<void>
+      close(): Promise<void>
+    } | undefined
+    try {
+      handle = await persistence.open(sessionId, 'write')
+      if (handle.rewrite === undefined) return false
+      const { events } = await handle.read(request.seq, 1)
+      const current = events[0]
+      const message = (current?.data as { message?: { id?: string; content?: ContentBlock[] } } | undefined)?.message
+      if (current === undefined || current.type !== 'assistant/message' || message?.id !== request.messageId) return false
+      if (!Array.isArray(message.content) || message.content[request.blockIndex]?.type !== 'reasoning') return false
+      const content = message.content.map((block, index) =>
+        index === request.blockIndex ? { type: 'reasoning' as const, text: request.text } : block)
+      const replacement = {
+        ...current,
+        data: { ...(current.data as object), message: { ...message, content } },
+      } as unknown as SessionEvent
+      await handle.rewrite([replacement])
+      await handle.flush?.()
+      await this.markInPlaceApplied(sessionId, entryId)
+      this.ctx.logger.info('reasoning-distill: wrote a rewrite into the stored history of %s', sessionId)
+      return true
+    } catch (error: unknown) {
+      this.ctx.logger.debug('reasoning-distill: stored in-place write for %s could not be made: %o', sessionId, error)
+      return false
+    } finally {
+      if (handle !== undefined) await handle.close().catch(() => undefined)
+    }
+  }
+
+  /** Mark one entry as written into the history by this engine, clearing a stale failure note. */
+  private async markInPlaceApplied(sessionId: string, entryId: string): Promise<void> {
+    const at = Date.now()
+    await this.store.update(sessionId, current => {
+      for (const item of current.entries) {
+        if (item.id !== entryId) continue
+        item.inPlaceApplied = at
+        if (item.handoff?.state === 'failed') delete item.handoff
+      }
+    })
+  }
   /**
    * Write back the distilled text of every rewrite this conversation still owes.
    *
@@ -586,45 +696,13 @@ export class ReasoningDistillEngine {
     for (const entry of owed) {
       if (entry.targetMessageId === '' || !seqs.has(entry.targetSeq)) continue
       const generation = this.generation.get(session.id) ?? 0
-      try {
-        rewrite({
-          seq: entry.targetSeq as SessionSeq,
-          messageId: entry.targetMessageId,
-          blockIndex: entry.targetBlockIndex ?? 0,
-          text: entry.distilledText,
-        })
-      } catch (error: unknown) {
-        // A target that is no longer in the log (a compaction retired it) is not a write to retry.
-        this.ctx.logger.debug('reasoning-distill: owed in-place rewrite for %s was not written: %o', session.id, error)
-        continue
-      }
-      // The surface changed under a session that may have been replaced while we wrote: the write
-      // is in the log either way, but the record must not be marked from a stale generation.
-      if ((this.generation.get(session.id) ?? 0) !== generation) return
-      const at = Date.now()
-      await this.store.update(session.id, current => {
-        for (const item of current.entries) {
-          if (item.id !== entry.id) continue
-          item.inPlaceApplied = at
-          // The note explained why the panel could not write it; the write has now happened.
-          if (item.handoff?.state === 'failed') delete item.handoff
-        }
-      })
-      wrote += 1
+      if (await this.settleInPlaceEntry(session, entry, generation)) wrote += 1
     }
     if (wrote === 0) return
-    // The barrier is what makes this other than best-effort: the write reaches storage before the
-    // request that follows re-reads the conversation.
-    try {
-      await this.ctx.sessions.flush(session)
-    } catch (error: unknown) {
-      this.ctx.logger.warn('reasoning-distill: owed in-place rewrites for %s could not be flushed: %o', session.id, error)
-    }
     this.ctx.logger.info('reasoning-distill: wrote back %d owed in-place rewrite(s) for %s', wrote, session.id)
   }
   /**
    * Make sure one session's sidecar is in memory before its request is built.
-   * @param session - session entering a pre-step boundary.
    */
   private async ensureLoaded(session: Session): Promise<void> {
     // The read is awaited, so its outcome belongs to the generation that asked for
@@ -2470,7 +2548,12 @@ export class ReasoningDistillEngine {
     // while the queued write is in flight, and re-checking it here would adopt the
     // rewrite yet refuse to hand it over.
     if (adopted && !stale() && this.config.enabled.get() && backendById(this.config.rewriteBackend.get()) !== undefined) {
-      if (abandonedNow()) {
+      if (backendById(this.config.rewriteBackend.get())?.kind === 'in-place') {
+        // Write it at *this* step boundary rather than at the next pre-step. The step that ends a
+        // turn has no next pre-step, and a delegated conversation is disposed as soon as its turn
+        // ends, so the last reasoning before a reply had no writer until the conversation ran again.
+        if (await this.settleInPlaceEntry(session, entry, generation)) this.pendingBranch.delete(session.id)
+      } else if (abandonedNow()) {
         // The committed entry remains visible and any real savings remain payable;
         // only the branch hand-off is skipped after the original turn was released.
         const reason = 'branch hand-off skipped after the wait deadline'
