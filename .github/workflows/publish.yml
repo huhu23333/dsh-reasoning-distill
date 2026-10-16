@@ -1,0 +1,90 @@
+name: Publish to npm
+
+# 事件驱动发布：main 分支有新提交即尝试发布（版本号 = package.json 的 version，不自动递增）。
+# 首次发布新包必须有可用的 npm 凭据，二者其一：
+#   1. 仓库 secret `NPM_TOKEN`（npmjs.com → Access Tokens 新建，写进 secret）；
+#   2. npm 上为该包配置 Trusted Publisher（OIDC）后，设置仓库变量
+#      `NPM_TRUSTED_PUBLISHER` = true（npm 会清掉 _authToken，走 OIDC 换临时凭证）。
+# 未配置任何凭据时，workflow 会跳过发布而不是报错；配好后可在 Actions 页手动
+# Run workflow 重新触发。
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22.x'
+          registry-url: 'https://registry.npmjs.org'
+
+      # npm >= 11.5.1 才支持 Trusted Publishing (OIDC)；npm 10.x 会直接 ENEEDAUTH
+      - name: Upgrade npm for OIDC support
+        run: npm install -g npm@latest
+
+      # OIDC 发布：清掉 .npmrc 里残留的 _authToken，让 npm 走 OIDC
+      - name: Clean .npmrc for OIDC
+        run: |
+          if [ -n "$NPM_CONFIG_USERCONFIG" ] && [ -f "$NPM_CONFIG_USERCONFIG" ]; then
+            sed -i '/_authToken/d' "$NPM_CONFIG_USERCONFIG"
+          fi
+
+      - name: Install dependencies
+        run: npm ci || npm install
+
+      - name: Check if version already published
+        id: check
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' "https://registry.npmjs.org/dsh-reasoning-distill/${VERSION}")
+          if [ "$CODE" = "200" ]; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "版本 ${VERSION} 已存在于 npm，跳过发布"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "版本 ${VERSION} 未发布"
+          fi
+
+      # 没有凭据就跳过（首次发布需要 NPM_TOKEN；配好 Trusted Publisher 后设仓库变量）
+      - name: Publish to npm
+        id: publish
+        if: steps.check.outputs.exists == 'false' && (env.NPM_TOKEN != '' || vars.NPM_TRUSTED_PUBLISHER == 'true')
+        run: npm publish --access public --registry https://registry.npmjs.org --provenance=false
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: No credentials configured
+        if: steps.check.outputs.exists == 'false' && env.NPM_TOKEN == '' && vars.NPM_TRUSTED_PUBLISHER != 'true'
+        run: |
+          echo "::warning::未配置 npm 凭据（secrets.NPM_TOKEN 或 vars.NPM_TRUSTED_PUBLISHER），已跳过发布。"
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Create GitHub Release
+        if: steps.publish.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if gh release view "v${VERSION}" >/dev/null 2>&1; then
+            echo "Release v${VERSION} 已存在，跳过"
+            exit 0
+          fi
+          gh release create "v${VERSION}" --target "${{ github.sha }}" --title "v${VERSION}" --notes-file CHANGELOG.md
