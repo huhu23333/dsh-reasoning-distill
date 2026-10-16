@@ -258,6 +258,16 @@ export function ReasoningDistillView({ sessionId, openSession, refreshTranscript
         }
       }
     }
+    // The engine settles what a delegated conversation owes the moment it is live again -- the panel
+    // posted between two of its turns, when there was no session to write into. The open transcript
+    // holds the superseded text just as it does after the panel's own apply, so rebuild it here too.
+    for (const entry of current.entries) {
+      if (entry.inPlaceApplied === undefined) continue
+      const settledKey = `${current.sessionId}:engine:${entry.id}`
+      if (appliedPending.current.has(settledKey)) continue
+      appliedPending.current.add(settledKey)
+      refreshTranscript?.(current.sessionId)
+    }
     // Settles we still owe are retried first: the host's pending flag may already be
     // gone (its note write failed), and waiting for it to reappear would strand the
     // failure forever.

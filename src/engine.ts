@@ -555,6 +555,65 @@ export class ReasoningDistillEngine {
   }
 
   /**
+   * Write back the distilled text of every rewrite this conversation still owes.
+   *
+   * The panel drives the write-back for a live conversation, but a *delegated* conversation is
+   * disposed between its turns: the report shows an owed entry, the panel posts, and by then there
+   * is no live session to write into -- "unknown session", which is terminal for an in-place
+   * rewrite (it is not idempotent), so the original reasoning stayed in the history for good. The
+   * engine holds both the text and the record, so it settles what is owed the moment the
+   * conversation is live again, before the request that would replay the raw reasoning.
+   * @param session - session that is live right now.
+   */
+  private async settleOwedInPlace(session: Session): Promise<void> {
+    if (backendById(this.config.rewriteBackend.get() ?? '')?.kind !== 'in-place') return
+    const rewrite = rewriteEntryPoint(session)
+    if (rewrite === undefined) return
+    const record = this.store.peek(session.id)
+    if (record === undefined) return
+    const owed = record.entries.filter(entry =>
+      entry.failed !== true
+      && entry.skipped !== true
+      && entry.handoff === undefined
+      && entry.inPlaceApplied === undefined)
+    if (owed.length === 0) return
+    const seqs = new Set<number>(session.ownEvents().map(event => event.seq as number))
+    let wrote = 0
+    for (const entry of owed) {
+      if (entry.targetMessageId === '' || !seqs.has(entry.targetSeq)) continue
+      const generation = this.generation.get(session.id) ?? 0
+      try {
+        rewrite({
+          seq: entry.targetSeq as SessionSeq,
+          messageId: entry.targetMessageId,
+          blockIndex: entry.targetBlockIndex ?? 0,
+          text: entry.distilledText,
+        })
+      } catch (error: unknown) {
+        // A target that is no longer in the log (a compaction retired it) is not a write to retry.
+        this.ctx.logger.debug('reasoning-distill: owed in-place rewrite for %s was not written: %o', session.id, error)
+        continue
+      }
+      // The surface changed under a session that may have been replaced while we wrote: the write
+      // is in the log either way, but the record must not be marked from a stale generation.
+      if ((this.generation.get(session.id) ?? 0) !== generation) return
+      const at = Date.now()
+      await this.store.update(session.id, current => {
+        for (const item of current.entries) if (item.id === entry.id) item.inPlaceApplied = at
+      })
+      wrote += 1
+    }
+    if (wrote === 0) return
+    // The barrier is what makes this other than best-effort: the write reaches storage before the
+    // request that follows re-reads the conversation.
+    try {
+      await this.ctx.sessions.flush(session)
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: owed in-place rewrites for %s could not be flushed: %o', session.id, error)
+    }
+    this.ctx.logger.info('reasoning-distill: wrote back %d owed in-place rewrite(s) for %s', wrote, session.id)
+  }
+  /**
    * Make sure one session's sidecar is in memory before its request is built.
    * @param session - session entering a pre-step boundary.
    */
@@ -568,6 +627,10 @@ export class ReasoningDistillEngine {
       await this.store.load(session.id)
       if (stale()) return
       this.storageBroken.delete(session.id)
+      // A conversation that is live again settles what it still owes, before the request that would
+      // otherwise replay the raw reasoning.
+      await this.settleOwedInPlace(session)
+      if (stale()) return
     } catch (error: unknown) {
       // A sidecar that cannot be read disables the feature for this session: it
       // must never stop the conversation itself, and — since the result could
@@ -1494,6 +1557,14 @@ export class ReasoningDistillEngine {
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: in-place rewrite for %s could not be flushed: %o', sessionId, error)
     }
+    // Record the write host-side too: the panel remembers its own attempt, but another view, a
+    // reload or a later pre-step must not repeat an in-place rewrite that already landed.
+    const at = Date.now()
+    await this.store.update(sessionId, current => {
+      for (const item of current.entries) {
+        if (item.targetSeq === eventSeq && (item.targetBlockIndex ?? 0) === blockIndex) item.inPlaceApplied = at
+      }
+    })
     return { ok: true, seq: eventSeq }
   }
 

@@ -54,6 +54,14 @@ export interface CompressionEntry {
   /** Branch hand-off outcome for this rewrite, when one was attempted. */
   handoff?: { state: 'created' | 'failed' | 'skipped'; branchId?: string; error?: string; at: number }
   /**
+   * When the engine itself wrote this rewrite into the history.
+   *
+   * Absent for a rewrite the panel applied and for one still owed. The engine settles what a
+   * delegated conversation owes as soon as it is live again, because the panel's request can arrive
+   * between two of its turns, when no session exists to write into.
+   */
+  inPlaceApplied?: number
+  /**
    * The text the engine stored and replays: the answer capped at
    * `maxOutputChars`. Backends must be given this one, not the raw answer.
    */

@@ -2535,6 +2535,41 @@ const headlessGen = engine74.snapshot('headless-1').generation
 await fire('session/disposed', headless74)
 check('a session whose header carries no stamp is still invalidated by disposal',
   engine74.snapshot('headless-1').generation === headlessGen + 1, String(engine74.snapshot('headless-1').generation))
+console.log('scenario 75: a conversation that comes back settles the rewrite it still owes')
+handlers.clear()
+// The panel posts between a delegated conversation's turns, when there is no live session to
+// write into; "unknown session" is terminal for an in-place rewrite, so the engine has to settle
+// what is owed as soon as the conversation is live again.
+const owedId = 'owed-1'
+const store75 = new SidecarStore()
+const engine75 = new ReasoningDistillEngine(ctx as never, makeConfig({ rewriteBackend: { get: () => 'in-place' } }) as never, store75)
+engine75.start()
+const session75 = new FakeSession(owedId, { cwd: '/tmp', origin: 'subagent', delegationDepth: 1, createdAt: 5 })
+const writes75: Array<{ text?: string; seq?: number }> = []
+;(session75 as unknown as { rewriteReasoningBlock: (request: { text: string; seq: number }) => unknown }).rewriteReasoningBlock = function (request) {
+  writes75.push(request)
+  return { type: 'assistant/message' }
+}
+const seq75 = session75.append('assistant/message', {
+  turn: 1, step: 1,
+  message: { id: 'm-75', role: 'assistant', content: [{ type: 'reasoning', text: 'x'.repeat(40) }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+}).seq
+await store75.update(owedId, record => {
+  record.entries.push({
+    id: 'e-75', targetSeq: seq75, targetMessageId: 'm-75', targetBlockIndex: 0, turn: 1, step: 1,
+    provider: 'deepseek-official', model: 'deepseek-flash', originalChars: 40, originalTokens: 10,
+    distilledText: 'short', distilledChars: 5, distilledTokens: 2, savedTokensPerRequest: 8,
+    distill: { sessionId: '', requestText: '', responseText: '', inputTokens: 0, outputTokens: 0, cost: 0, startedAt: 0, finishedAt: 0, provider: '', model: '' },
+    cacheBreakTokens: 0, cacheBreakCost: 0, liveSaved: 0, appliedAt: 1,
+  } as never)
+})
+await fire('session/created', session75)
+await fire('agent/pre-step', { agent: { session: session75 } }, async () => undefined)
+check('a rewrite the panel could not apply is written once the conversation is live again',
+  writes75.length === 1 && writes75[0]?.text === 'short' && writes75[0]?.seq === seq75, JSON.stringify(writes75))
+check('and the record says so, so nothing writes it a second time',
+  (await store75.load(owedId)).entries.every(entry => entry.inPlaceApplied !== undefined))
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

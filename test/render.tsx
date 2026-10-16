@@ -820,6 +820,19 @@ try {
         && refreshed.length === 1,
         JSON.stringify({ backendPosts, settles, refreshed, storage: [...storageData] }))
     } finally { unknown.stop() }
+    // The engine settles what a delegated conversation owes as soon as it is live again: the panel
+    // posted between two of its turns, when there was no session to write into. Seeing that marker
+    // must rebuild the open transcript -- without posting an in-place rewrite a second time.
+    refreshed.length = 0
+    backendPosts.length = 0
+    pending.config.rewriteBackend = 'in-place'
+    pending.pendingBranch = null
+    pending.entries[0]!.inPlaceApplied = Date.now()
+    await inPlace.remount()
+    for (let tick = 0; tick < 4; tick++) await inPlace.tick()
+    check('an engine-applied rewrite rebuilds the transcript without a second post',
+      refreshed.length === 1 && refreshed[0] === 'session-1' && backendPosts.length === 0,
+      JSON.stringify({ refreshed, backendPosts }))
   } finally { inPlace.stop() }
   // A failure marker is not a child-exit notification. The panel must keep Stop enabled.
   globals.fetch = async () => ({ ok: true, json: async () => ({

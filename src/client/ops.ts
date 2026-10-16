@@ -317,6 +317,10 @@ export function owedInPlaceEntries(report: SessionReport | null | undefined): Co
     entry.failed !== true
     && entry.skipped !== true
     && entry.handoff === undefined
+    // The engine settles what a delegated conversation owes the moment it is live again; that write
+    // is already in the history, so the panel must not repeat it (an in-place rewrite is not
+    // idempotent).
+    && entry.inPlaceApplied === undefined
     && entryInForceHere(entry, report.sessionId))
 }
 

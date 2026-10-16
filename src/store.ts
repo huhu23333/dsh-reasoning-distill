@@ -79,6 +79,15 @@ export interface StoredEntry {
   repriceMiss?: true
   /** No auditable compression session could be opened; the rewrite still shipped. */
   sessionMissing?: true
+  /**
+   * When this engine itself wrote the distilled text into the history.
+   *
+   * Absent for a rewrite the panel applied (that call is recorded client-side) and for one still
+   * owed. A delegated conversation is disposed between its turns, so the panel's request can arrive
+   * at a moment when no live session exists -- the engine settles those on the next pre-step, and
+   * this is what stops anyone applying the same in-place rewrite twice.
+   */
+  inPlaceApplied?: number
 }
 
 /** Durable per-session record. */

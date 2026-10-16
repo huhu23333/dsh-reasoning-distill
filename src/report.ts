@@ -79,6 +79,7 @@ export function buildReport(
       targetMessageId: entry.targetMessageId,
       targetBlockIndex: entry.targetBlockIndex ?? -1,
       ...entry.handoff === undefined ? {} : { handoff: entry.handoff },
+      ...entry.inPlaceApplied === undefined ? {} : { inPlaceApplied: entry.inPlaceApplied },
       provider: entry.provider,
       model: entry.model,
       originalChars: entry.originalChars,
