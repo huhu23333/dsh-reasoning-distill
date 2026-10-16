@@ -131,9 +131,9 @@ export function installPromptFor(backendId: string, repo: string): string {
   return [
     `请在本工作区里安装并接入 DSH 的「助手消息改写后端」：${backendId}。`,
     '',
-    `第一步先读这两个文件（它们是本仓库唯一的事实来源）：${repo}/README.md 的「后端支持状态」与「安装与修补 message-edit 后端的完整流程」两节，以及 ${repo}/docs/message-edit-client-compat.md。`,
+    `第一步先读 ${repo}/README.md 的「助手消息改写后端」一节（含「旧后端 \`message-edit\`（保留兼容，不推荐）」与「（旧）\`message-edit\` 后端安装流程」）——它是这条流程的事实来源。`,
     '',
-    '这个后端是本仓库唯一验证过的：请严格按 README 的流程做（装 vendor/dsh-message-edit-0.2.3-patched4.tgz 或原版后跑 scripts/patch-message-edit.py），每步都用 README 给出的校验命令确认。',
+    '注意这是**旧后端（不推荐）**：每压缩一次就多一个分支会话（会堆满对话/归档列表），且要额外安装并修补 `dsh-message-edit`。请严格按 README 的流程做（装 vendor/dsh-message-edit-0.2.3-patched4.tgz 或原版后跑 scripts/patch-message-edit.py），每步都用 README 给出的校验命令确认。',
     '',
     '硬性要求：',
     `1. 只改与该后端安装相关的文件；不要改动本仓库的 scripts/**、src/**、vendor/**（除非你确认那正是修复所需，并在报告里逐条说明）。`,

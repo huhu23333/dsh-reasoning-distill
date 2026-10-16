@@ -1,7 +1,6 @@
-# 未修复清单（四方审查 + 26 轮修复之后）
+# 已知问题清单（未修复项）
 
-配套文件：`docs/review-2026-10-15.md`（完整发现台账 + 26 轮修复记录 + 状态表 §5）。
-审阅基线 `47f7523`；本清单对应的 HEAD 是写这份文件时的 `dev` 分支（见 §5 的提交链）。
+记录**当前仍未修复**的问题：每条都有触发条件、为什么没修或没定、以及需要谁拍板。文末 §9 是最近一次四方独立复核（2026-10-16）新增的条目。
 
 **一句话**：剩下的都是**需要人（或上游仓库）拍板的产品取舍**，不是"还没轮到"的活儿——每一轮修复者（flash 23 轮 → pro → sol → astra）都独立复核过它们，结论一致：没有"方向唯一 + 行为可证不变"的做法。
 
@@ -63,19 +62,17 @@
   - **资源与生命周期**：审计会话 writer 回收（B9）、sidecar 缓存/队列回收 + 驱逐不被排队写撤销（B27/B36）、id 复用时的状态残留（B26/B40）、安装器按作业取消（B28/B41）；
   - **功能/口径**：旧顶层限制值覆盖显式规则（B5/B16）、面板与运行时层序对齐、卸载语义定案为文档化（C3）、客户端与宿主相反的请求契约（B13）。
 - **不成立**：B15（"账目用错模型价格"）经 Lead 复核判为误报。
-- **其余**：`docs/review-2026-10-15.md` 的 §6 有 26 轮的逐轮记录（模型档位、处理条目、实证要点、存档提交）。
+- **历史修复记录不再单独保留**：本文件只留"还没做的"；已修项的提交可在 `git log` 里按条目号检索。
 
 ## 8. 怎么复核这份清单
 
 ```bash
 cd dsh-reasoning-distill
-git log --oneline 47f7523..HEAD     # 阶梯的全部改动
-npm run check                       # typecheck + smoke(190) + render(108)
-grep -n '| 未修 |' docs/review-2026-10-15.md   # 本清单的机器可读来源
-grep -n '^## ' docs/review-2026-10-15-unfixed.md
+npm run check                       # typecheck + smoke(233) + render(141)
+grep -n '^## ' docs/review-2026-10-16-unfixed.md   # 本清单的目录
 ```
 
-每条未修项的完整证据（含 `文件:行`、探针/复现方式、候选方案的取舍）都在 `docs/review-2026-10-15.md` §5 的对应行里。
+每条未修项的触发条件、证据（含 `文件:行`）与候选取舍都写在该条自己里。
 
 ---
 
@@ -130,7 +127,7 @@ grep -n '^## ' docs/review-2026-10-15-unfixed.md
 
 **N10【P3】in-place 的 `handoff` 永远回 `ok:false`（flash，Lead 已核对代码）**：in-place 成功时不再设 `pendingBranch`（`src/engine.ts:2499-2503`），而 `handoff` 在无 pending 时取 `ok = (error !== undefined)` ⇒ 成功的写回也被面板当成「被拒绝的结算」。
 
-**N11【P3】常驻芯片的失败没有进账本（flash）**：`ActivityChip.tsx:172-177` 只在 sessionStorage 记失败，不调 `settleHandoff(..., error)`（对比 `View.tsx:346-355`），与 `docs/acceptance.md` 的「失败会记录在条目上」不符。
+**N11【P3】常驻芯片的失败没有进账本（flash）**：`ActivityChip.tsx:172-177` 只在 sessionStorage 记失败，不调 `settleHandoff(..., error)`（对比 `View.tsx:346-355`），与面板一贯的约定（失败要记录在条目上、让用户看见）不符。
 
 ### 9.5 与 dsh-ops 的兼容性
 

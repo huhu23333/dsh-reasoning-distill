@@ -218,8 +218,8 @@
 ## 验证
 
 - 自动化检查：`npm run check`（宿主与客户端的类型检查 + 离线冒烟测试 + 客户端真渲染测试）。
-- 端到端验收证据（含宿主补丁的落盘、重启读回实验）：见 [`docs/acceptance.md`](docs/acceptance.md)。
-- 历史审查台账与未修复项：[`docs/review-2026-10-15.md`](docs/review-2026-10-15.md)、[`docs/review-2026-10-15-unfixed.md`](docs/review-2026-10-15-unfixed.md)（内部记录，使用者不必读）。
+- 宿主补丁的落盘/重启读回实验：`scripts/probe-inplace-durability.mjs`（脚本头部有用法）。
+- 已知问题清单：[`docs/review-2026-10-16-unfixed.md`](docs/review-2026-10-16-unfixed.md)。
 
 ## 安装
 
@@ -544,7 +544,7 @@ POST /message-edit
 - 未知的**必需**事件会在格式恢复时被**拒绝**（`session-format-v3-to-v4/src/validation.ts:52-65`）；把它标成 `ignorable` 又属语义错误（读者会跳过并重建出**不同的**模型历史）。结果就是：外部插件用投影会导致**重启后会话可能加载失败**——比"日志零足迹 + 包装派生"更糟；
 - 且无论投影与否，**原生页面都不会显示投影文本**（见第 2 点）。
 
-**想要"所见即短"只有两条路**：① 用分支功能创建**真实的短历史**会话；② 让宿主在 UI 层提供"显示压缩后内容"的开关（上游需求，见 `docs/upstream-compacted-view.md`）。
+**想要"所见即短"只有两条路**：① 用分支功能创建**真实的短历史**会话；② 让宿主在 UI 层提供"显示压缩后内容"的开关（属上游需求）。
 
 ## 已知限制
 

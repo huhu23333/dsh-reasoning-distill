@@ -690,12 +690,13 @@ check('every step state and verdict has its own words',
   && jobVerdict(jobFixture, t).includes('install.result.running')
   && jobVerdict({ ...jobFixture, phase: 'cancelled' }, t).includes('install.result.cancelled')
   && jobVerdict({ ...jobFixture, phase: 'failed', error: 'boom' }, t).includes('boom'))
-// The prompt has to send the agent to the real instructions and to the one verified backend.
+// The prompt has to send the agent to the real instructions, and it must say that this is the
+// legacy backend rather than presenting it as the recommended one.
 const verifiedPrompt = installPromptFor('message-edit', '/repo')
 check('the agent prompt names the backend and points at the real instructions',
   verifiedPrompt.includes('message-edit') && verifiedPrompt.includes('/repo/README.md') && verifiedPrompt.includes('/repo'))
-check('and it promises nothing beyond the verified procedure',
-  verifiedPrompt.includes('唯一验证过') && !verifiedPrompt.includes('不要伪造成功'))
+check('and it marks the prompt as the legacy path instead of over-promising',
+  verifiedPrompt.includes('旧后端') && verifiedPrompt.includes('不推荐') && !verifiedPrompt.includes('不要伪造成功'))
 // The built-in backend's prompt is the layout-agnostic half of its install: the agent runs the
 // script, and the script locates the checkout. A machine-specific directory here would be wrong on
 // every other machine, so the prompt is pinned against one.
