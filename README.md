@@ -65,16 +65,30 @@ DSH_PLUGIN_ROOTS="$DSH_HOME/profiles/web" python3 <本插件目录>/scripts/patc
 
 前置条件：Node >= 20；DSH 本体能正常启动（插件需要会话持久化 `sessionPersistence` 服务）。
 
+从 npm 安装：
+
+```bash
+dsh plugin --profile web add dsh-reasoning-distill
+```
+
+也可以直接从 GitHub 装源码。pnpm 会要求你允许它执行构建脚本 `prepare`：第一次 `add` 会失败并打印出包名，把包名加进 profile 的 `pnpm-workspace.yaml` 的 `allowBuilds` 后重试即可（这等于授权该包在安装时执行代码，请确认信任来源）：
+
+```bash
+dsh plugin --profile web add github:huhu23333/dsh-reasoning-distill
+```
+
+本地开发（从本仓库源码以 link: 方式装进 profile）：
+
 ```bash
 cd dsh-reasoning-distill
 npm install
 npm run build
-scripts/install.sh web        # 以 link: 方式装进 web profile
+scripts/install.sh web
 ```
 
-`scripts/install.sh` 做三件事：构建插件、把 profile 共享的 `@deepseek-ai/*` 运行时软链进插件、用官方 CLI（`pnpm dsh plugin --profile web add`）把本插件加进 profile。装完**重启一次 `dsh web`**（bundle 元数据要重启才会重新扫描）。
+装完**重启一次 `dsh web`**（bundle 元数据要重启才会重新扫描）。
 
-注意：之后只要重跑过 `npm install`（任何依赖变化），脚本建的软链会被清掉，需要重新执行一次 `scripts/install.sh`。
+`scripts/install.sh` 做三件事：构建插件、把 profile 共享的 `@deepseek-ai/*` 运行时软链进插件、用官方 CLI 把本插件加进 profile。注意：之后只要重跑过 `npm install`（任何依赖变化），脚本建的软链会被清掉，需要重新执行一次 `scripts/install.sh`。
 
 ### 2. 装好并选中一个后端
 
