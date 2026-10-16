@@ -7,7 +7,15 @@ import { settleHandoff } from './handoff.ts'
 import { NS } from './locales.ts'
 import css from './View.module.css'
 
-type Props = PropsRuntime<'conversation.view'> & PropsLocale<typeof NS> & { openSession: (id: string) => void }
+type Props = PropsRuntime<'conversation.view'> & PropsLocale<typeof NS> & {
+  openSession: (id: string) => void
+  /**
+   * Ask the shell to rebuild this conversation's history window after a write-back, so the
+   * rewritten reasoning replaces the superseded text without a page reload. Absent on a shell
+   * whose session face exposes no rebuild; the change then shows on the next read.
+   */
+  refreshTranscript?: (sessionId: string) => void
+}
 type Translate = Props['t']
 type Cached = { report?: SessionReport; loading: boolean; error?: string }
 
@@ -139,7 +147,7 @@ function Entry({ entry, sessionId, t, liveStockIds }: {
   </details>
 }
 
-export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
+export function ReasoningDistillView({ sessionId, openSession, refreshTranscript, t }: Props) {
   const [cache, setCache] = useState<Record<string, Cached>>({})
   const sequence = useRef(0)
   const applied = useRef(0)
@@ -337,6 +345,9 @@ export function ReasoningDistillView({ sessionId, openSession, t }: Props) {
         return
       }
       rememberRewriteOutcome(availableSessionStorage(), attemptKey)
+      // The record changed at its own seq, so nothing was appended and this open view still holds
+      // the superseded text; ask the shell to rebuild it now rather than at the next reload.
+      refreshTranscript?.(current.sessionId)
       const { verdict, recorded } = await settleHandoff(current, pending)
       if (shouldRetrySettle(verdict, recorded)) {
         // Keep the rewrite and retry only the settle on a later poll instead of

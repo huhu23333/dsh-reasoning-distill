@@ -166,6 +166,7 @@
    - **失败/拒绝/超时** → 如实记录 `handoff: failed`（或尚未 POST 前等待耗尽时 `skipped`）；不唤醒、不重发用户输入，**原回合照常继续**；历史重放替换仍生效。另有空闲兜底（`scheduleBranchAtIdle`：宿主暴露 `agent.whenIdle` 时，`whenIdle()` 之后再试一次 POST）——这条路径**是可达的**：`handOffToBranch` 的失败出口只在 generation 未变时才清掉待交接条目，而会话销毁/替换会递增 generation（`forgetSession`），所以交接途中会话被销毁/替换时条目会留下，下一次 `agent/pre-step` 就会触发这个兜底。宿主不暴露 `whenIdle` 时**不在 pre-step 之外补记失败原因**——曾有一个只负责这件事的 `failMissingIdleAgent`，它没有任何调用者，且它要记的原因会与 `handOffToBranch` 已经写下的重复，已作为死代码删除（见审查台账 B14；不是行为差异）。
    - **宿主边界，非插件缺陷**：分支后端在 `agent/pre-step` 阶段读源会话日志，不需要宿主的 maintenance 阶段，所以分支能在当前回合内就建好——这正是「在 pre-step 内 POST、成功即 reject」这一设计的原因（旧设计「先停回合再建分支」不可达：`runMaintenance` 在源 Agent 非 `idle` 时会直接抛错，DSH checkout 的 `packages/core/agent-loop/src/agent.ts:183-185`）。idle 到领取 maintenance 之间的 Stop 在宿主层是 no-op（`packages/core/agent/src/runtime-types.ts:176-179`），属于已知宿主边界，非本插件能修复。
 4. **就地型后端（内置 `in-place`）**：宿主不调（这条路由需要浏览器凭据）→ 由面板/常驻芯片在轮询中应用，随后调用 `handoff {cancel:false}` 清标记，**不打断你的回合**（它要发的那次请求已因重放替换而变短）。应用路径 `engine.applyInPlace` 会**再次确认补丁存在**，并**从 sidecar 记录里取目标消息 id**（调用方只能给 seq 与块下标）；补丁不在了就拒绝，并走与启动自检同一条「清选择 + 关总开关」的写入路径。
+   - **写回成功即重建视图**：follow 流只携带「快照 + 追加事件」，就地改写不追加任何事件，所以已打开的对话必须主动重读。写回成功后，前端**借客户端 Session（`sessions.retain` → `binding.session`，用完立刻 `release`）请求重建已打开的历史窗口**，`seq`/消息 id 不变但对话立即显示改写后的内容。重建入口（`resync`）用**特性探测**调用：没有它就退回「下次读取可见」，不报错、也不影响已落盘的历史。
 5. 无待办 → `next()` 正常进入模型调用。
 
 ### F. 压缩（宿主 compaction）后的账务

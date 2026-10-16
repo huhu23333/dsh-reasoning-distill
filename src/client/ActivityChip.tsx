@@ -45,6 +45,12 @@ type Props = PropsRuntime<'conversation.input.activity'> & PropsLocale<typeof NS
   sessionId: string
   /** Select one conversation through the UI navigation service. */
   openSession: (id: string) => void
+  /**
+   * Ask the shell to rebuild this conversation's history window after a write-back, so the
+   * rewritten reasoning replaces the superseded text without a page reload. Absent on a shell
+   * whose session face exposes no rebuild; the change then shows on the next read.
+   */
+  refreshTranscript?: (sessionId: string) => void
   /** Hide one conversation from the list, once its branch is on screen. */
   archiveSession: (id: string) => void
 }
@@ -101,7 +107,7 @@ export function freshHandoff(
   return best
 }
 
-export function CompressionActivity({ sessionId, openSession, archiveSession, onActiveChange, t }: Props) {
+export function CompressionActivity({ sessionId, openSession, archiveSession, refreshTranscript, onActiveChange, t }: Props) {
   const [live, setLive] = useState<Live>(IDLE)
   const [now, setNow] = useState(() => Date.now())
   const sequence = useRef(0)
@@ -171,6 +177,9 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, on
           return
         }
         rememberRewriteOutcome(availableSessionStorage(), key)
+        // The record changed at its own seq, so nothing was appended and this open view still holds
+        // the superseded text; ask the shell to rebuild it now rather than at the next reload.
+        refreshTranscript?.(report.sessionId)
         await settleHandoff(report, entry.id)
       }).catch(() => {
         applyingInPlace.current.delete(key)

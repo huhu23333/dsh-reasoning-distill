@@ -21,6 +21,7 @@ import { resolveRule } from '../src/config.ts'
 import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
 import { INSTALLABLE_BACKENDS, installPromptFor, type InstallJob } from '../src/install-shared.ts'
 import { en, zh, type Key } from '../src/client/locales.ts'
+import { refreshTranscript } from '../src/client/transcript.ts'
 
 let failures = 0
 const log: string[] = []
@@ -700,6 +701,15 @@ check('and it hardcodes no machine-specific directory',
   && !inPlacePrompt.includes('$HOME'))
 check('and it sends the agent to the real instructions and warns off hand-editing',
   inPlacePrompt.includes('/repo/README.md') && inPlacePrompt.includes('--revert') && inPlacePrompt.includes('不要手工编辑'))
+// The rebuild is the one thing that makes a landed rewrite visible without a reload, and it has
+// to be a no-op — never a thrown render or a failed write-back — on a shell that cannot do it.
+let rebuildCalls = 0
+check('a session that can rebuild its window is asked to, once per call',
+  refreshTranscript({ resync: () => { rebuildCalls += 1 } }) && rebuildCalls === 1)
+check('a session without the rebuild entry point is left alone',
+  refreshTranscript({}) === false && refreshTranscript(undefined) === false && rebuildCalls === 1)
+check('a rebuild that throws cannot fail the write-back that already landed',
+  refreshTranscript({ resync: () => { throw new Error('no window') } }) === false && rebuildCalls === 1)
 check('no render path threw', !rendered.some(markup => markup.includes('__THREW__')))
 
 // Effect-only regressions: the SSR checks above do not run the view's effects.
@@ -748,7 +758,13 @@ try {
     backendPosts.push(String(input))
     return { ok: true, json: async () => ({ ok: true, eventSeq: 2 }) } as Response
   }
-  const mount = (): ReturnType<typeof effectHarness> => effectHarness(() => ReasoningDistillView({ sessionId: 'session-1', openSession: noop, t } as never))
+  // The rewrite changed a record at its own seq, so the open view still holds the superseded
+  // reasoning: the driver has to ask the shell to rebuild the window, exactly once per landed
+  // rewrite and never for a request that was refused.
+  const refreshed: string[] = []
+  const mount = (): ReturnType<typeof effectHarness> => effectHarness(() => ReasoningDistillView({
+    sessionId: 'session-1', openSession: noop, refreshTranscript: (id: string) => { refreshed.push(id) }, t,
+  } as never))
   const inPlace = mount()
   try {
     for (let tick = 0; tick < 6; tick++) await inPlace.tick()
@@ -759,6 +775,8 @@ try {
     check('the built-in in-place backend is driven from the browser: posted once to our own route, then settled',
       backendPosts.length === 1 && backendPosts[0]!.endsWith(REWRITE_ROUTE) && settles >= 1,
       JSON.stringify({ backendPosts, settles, storage: [...storageData] }))
+    check('and the open transcript is rebuilt for the session the record changed in',
+      refreshed.length === 1 && refreshed[0] === 'session-1', JSON.stringify(refreshed))
     // The same driver must stay silent for a selection nothing answers for: this is the stale-id
     // case (a backend another build had), which the host clears and the panel must not chase.
     pending.config.rewriteBackend = 'placeholder'
@@ -770,8 +788,10 @@ try {
     try {
       for (let tick = 0; tick < 4; tick++) await unknown.tick()
       check('a selection nothing answers for posts nothing, settles nothing and claims nothing',
-        backendPosts.length === 0 && settles === 0 && !storageData.has('reasoning-distill:handoff:session-1:in-place-1'),
-        JSON.stringify({ backendPosts, settles, storage: [...storageData] }))
+        backendPosts.length === 0 && settles === 0 && !storageData.has('reasoning-distill:handoff:session-1:in-place-1')
+        // Nothing was written, so nothing may claim the transcript is stale.
+        && refreshed.length === 1,
+        JSON.stringify({ backendPosts, settles, refreshed, storage: [...storageData] }))
     } finally { unknown.stop() }
   } finally { inPlace.stop() }
   // A failure marker is not a child-exit notification. The panel must keep Stop enabled.

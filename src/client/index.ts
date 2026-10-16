@@ -9,6 +9,7 @@ import { ReasoningDistillSettings } from './Settings.tsx'
 import { CompressionActivity } from './ActivityChip.tsx'
 import { ReasoningDistillView } from './View.tsx'
 import { configureInstallBridge } from './install-bridge.ts'
+import { refreshTranscript, type RefreshableSession } from './transcript.ts'
 import { en, NS, zh } from './locales.ts'
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
@@ -69,6 +70,43 @@ export function apply(ctx: Context): void {
   }, ReasoningDistillSettings))
   // The composer seat already exists and is the one place a user looks when the
   // conversation seems stuck, so the wait names itself there.
+  /**
+   * Ask the shell to rebuild one conversation's history window.
+   *
+   * An in-place rewrite keeps every seq and appends nothing, so an already-open view keeps
+   * rendering the superseded reasoning until something reads the session again. The client Session
+   * that owns that window can rebuild it from the host, and it is the very object the conversation
+   * renders from: borrowing it through the published `sessions.retain` reference and asking it to
+   * rebuild updates the transcript in place. The reference is released immediately — the open view
+   * holds its own, so this one exists only for the call.
+   *
+   * The rebuild entry point is feature-detected (see `refreshTranscript`), and the client service
+   * shape is stated here because this plugin has no published types for it. A shell that offers
+   * neither keeps today's behaviour: the rewritten text appears on the next read.
+   * @param sessionId - conversation whose window may be stale.
+   */
+  const rebuildTranscript = (sessionId: string): void => {
+    const sessions = (ctx as unknown as { get(key: string): unknown }).get('sessions') as {
+      retain?(target: string, options: { source: string }): {
+        binding?: { session?: unknown }
+        release?(): void
+      } | undefined
+    } | undefined
+    let reference: { binding?: { session?: unknown }; release?(): void } | undefined
+    try {
+      reference = sessions?.retain?.(sessionId, { source: 'reasoning-distill' })
+    } catch {
+      // An id the client cannot resolve is not an error worth surfacing: nothing was written
+      // wrongly, the view simply keeps what it had until the next read.
+      return
+    }
+    if (reference === undefined) return
+    try {
+      refreshTranscript(reference.binding?.session as RefreshableSession | undefined)
+    } finally {
+      reference.release?.()
+    }
+  }
   ctx.slots.inject('conversation.input.activity', () => ctx.slots.register({
     name: 'conversation.input.activity', id: 'reasoning-distill', order: 30,
     locale: NS,
@@ -81,11 +119,15 @@ export function apply(ctx: Context): void {
       archiveSession: (id: string) => {
         void ctx.uiWorkspace.archiveSession(id as Parameters<typeof ctx.uiWorkspace.archiveSession>[0])
       },
+      refreshTranscript: rebuildTranscript,
     }),
   }, CompressionActivity))
   ctx.slots.inject('conversation.view', () => ctx.slots.register({
     name: 'conversation.view', id: 'reasoning-distill', order: 30,
     locale: NS, label: () => t('view.tab'),
-    inject: () => ({ openSession: (id: string) => ctx.uiWorkspace.openSession(id as SessionTarget) }),
+    inject: () => ({
+      openSession: (id: string) => ctx.uiWorkspace.openSession(id as SessionTarget),
+      refreshTranscript: rebuildTranscript,
+    }),
   }, ReasoningDistillView))
 }
