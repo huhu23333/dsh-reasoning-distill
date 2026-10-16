@@ -48,6 +48,33 @@ export function oneShotDepthDisabled(rule: StoredRule): boolean {
 }
 
 /**
+ * How one subagent kind's switch and its depth cap render in a rule row.
+ *
+ * One helper for both rows the panel draws — the default rule and each model's own entry — so a
+ * model row cannot end up being treated differently from the default one. `locked` is the
+ * backend's answer (`branchBackendBlocksSubagents`): a branch backend cannot serve a subagent
+ * session at all, so both the switch and the cap are uneditable and the switch reads off whatever
+ * the stored layer says.
+ * @param rule - the rule the row shows (resolved for a model entry).
+ * @param kind - which subagent kind the row is drawing.
+ * @param locked - whether the selected backend forbids every subagent kind.
+ * @returns the switch's checked/disabled state and whether its depth cap is editable.
+ */
+export function subagentKindControls(
+  rule: StoredRule,
+  kind: 'continuable' | 'oneShot',
+  locked: boolean,
+): { checked: boolean; disabled: boolean; depthDisabled: boolean } {
+  const on = (kind === 'continuable' ? rule.continuableSubagents : rule.oneShotSubagents) === true
+  return {
+    checked: locked ? false : on,
+    disabled: locked,
+    // The cap follows its own switch, and stays uneditable while the backend forbids the kind.
+    depthDisabled: locked || (kind === 'continuable' ? continuableDepthDisabled(rule) : oneShotDepthDisabled(rule)),
+  }
+}
+
+/**
  * Normalize one stored settings document for display and editing.
  *
  * Applies the same legacy derivation the engine resolver applies, so the panel

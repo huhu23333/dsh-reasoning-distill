@@ -819,6 +819,7 @@ async function runKind(
   ruleOverrides: Record<string, unknown>,
   descriptor?: 'one-shot' | 'continuable',
   backend = 'placeholder',
+  models: Record<string, unknown> = {},
 ): Promise<number> {
   // One engine per case, observing alone: production has a single plugin
   // instance, and two stores writing one sidecar would race on the rename.
@@ -828,7 +829,11 @@ async function runKind(
     ctx as never,
     // The kind switches are the subject here, so these cases select the in-place slot: a branch
     // backend pins both subagent kinds off (below), which would mask every assertion here.
-    makeConfig({ defaultRule: { get: () => kindRule(ruleOverrides) }, rewriteBackend: { get: () => backend } }) as never,
+    makeConfig({
+      defaultRule: { get: () => kindRule(ruleOverrides) },
+      models: { get: () => models },
+      rewriteBackend: { get: () => backend },
+    }) as never,
     store,
   )
   engine.start()
@@ -918,6 +923,12 @@ check('while the same backend still distills the main conversation',
   (await runKind('kb-main', plain, { enabled: true }, undefined, 'message-edit')) === 1)
 check('and turning the master switch off does not resurrect a subagent kind under it',
   (await runKind('kb-main-off', plain, { enabled: false, continuableSubagents: true }, undefined, 'message-edit')) === 0)
+// A model's own entry cannot re-enable a kind the backend refuses: the gate decides before the
+// resolved rule is consulted, which is what makes the panel's per-model lock authoritative
+// rather than merely what the switch happens to say.
+check('a model entry that states the kind on cannot re-enable it under a branch backend',
+  (await runKind('kb-model', child, { continuableSubagents: false }, 'continuable', 'message-edit',
+    { 'deepseek-flash': { enabled: true, continuableSubagents: true, oneShotSubagents: true } })) === 0)
 
 console.log('scenario 16b: the first pre-step writes the subagent switches off for a branch backend')
 handlers.clear()
@@ -1109,7 +1120,6 @@ check('the second replay credits the saving at the hit rate',
   Math.abs(afterSecond.liveSaved - ((saving20 * 2) + (saving20 * 0.04)) / 1_000_000) < 1e-12,
   `${afterSecond.liveSaved}`)
 
-const createdBefore21 = created.length
 console.log('scenario 29: a pre-step that joins the launch gate waits for the compression')
 handlers.clear()
 const store29 = new SidecarStore()

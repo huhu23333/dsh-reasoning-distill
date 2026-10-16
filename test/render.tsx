@@ -10,18 +10,16 @@ import type { ReactElement } from 'react'
 import { readFileSync } from 'node:fs'
 import { effectHarness } from './effect-harness.ts'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, signedCount, signedMoney, stockOfEntry } from '../src/client/View.tsx'
+import { ReasoningDistillView, ReportBody, stockOfEntry } from '../src/client/View.tsx'
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
-import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendUnusable, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendUnusable, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
 import { branchBackendBlocksSubagents } from '../src/backends.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { mergeRule, sparseOverride } from '../src/rule.ts'
 import { resolveRule } from '../src/config.ts'
 import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
 import { installPromptFor, type InstallJob } from '../src/install-shared.ts'
-import { liveAfterReport } from '../src/client/ActivityChip.tsx'
 
 let failures = 0
 const log: string[] = []
@@ -500,6 +498,29 @@ check('an already-pinned document is returned as the same object, so the effect 
   withoutSubagentKinds(pinned) === pinned)
 check('and a document that needs pinning is a new one',
   pinned !== subagentsOn)
+
+// Both rows the panel draws — the default rule and each model's own entry — go through
+// `subagentKindControls`, so a model row cannot be treated differently from the default one.
+const modelRow = mergeRule(FALLBACK_RULE, subagentsOn.defaultRule, { continuableSubagents: true, oneShotSubagents: true })
+check('unlocked, each row mirrors its own rule and only a missing kind locks its cap',
+  (() => {
+    const on = subagentKindControls({ continuableSubagents: true, oneShotSubagents: false }, 'continuable', false)
+    const off = subagentKindControls({ continuableSubagents: true, oneShotSubagents: false }, 'oneShot', false)
+    const absent = subagentKindControls({}, 'continuable', false)
+    return on.checked && !on.disabled && !on.depthDisabled
+      && !off.checked && !off.disabled && off.depthDisabled
+      && !absent.checked && !absent.disabled && absent.depthDisabled
+  })())
+const lockedDefault = subagentKindControls(subagentsOn.defaultRule, 'continuable', true)
+const lockedModel = subagentKindControls(modelRow, 'continuable', true)
+const lockedModelShot = subagentKindControls(modelRow, 'oneShot', true)
+check('locked, a model row reads exactly like the default row, whatever its own layer says',
+  JSON.stringify(lockedModel) === JSON.stringify(lockedDefault)
+  && lockedDefault.checked === false && lockedDefault.disabled && lockedDefault.depthDisabled
+  && lockedModelShot.checked === false && lockedModelShot.disabled && lockedModelShot.depthDisabled)
+check('and the switch cannot be flipped by the row itself: only the backend unlocks it',
+  subagentKindControls(modelRow, 'continuable', false).checked === true
+  && subagentKindControls(modelRow, 'continuable', false).disabled === false)
 
 // The regression: another client flipped compressSubagents to true while this
 // panel sat with an untouched draft derived from the older value. The save must

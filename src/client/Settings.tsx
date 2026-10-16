@@ -7,7 +7,7 @@ import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  REWRITE_BACKENDS, backendById, backendInstalled, backendReachable, backendOptionsVisible, forcesMasterOff, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle, withoutSubagentKinds,
+  REWRITE_BACKENDS, backendById, backendInstalled, backendReachable, backendOptionsVisible, forcesMasterOff, masterSwitchState, nextBackend, normalizeSettings, planSave, ruleFieldsIdle, subagentKindControls, withoutSubagentKinds,
   type ProbeAnswer,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
@@ -176,13 +176,17 @@ function RuleFields({ rule, catalog, onChange, t, isModel = false, subagentsLock
   // With all three kinds off this rule decides nothing, so the rest of its
   // settings cannot take effect and are shown locked.
   const idle = ruleFieldsIdle(rule)
+  // One helper for both rows: the default rule and each model entry draw their two subagent
+  // switches and caps through it, so the model rows get exactly the default row's treatment.
+  const continuable = subagentKindControls(rule, 'continuable', subagentsLocked)
+  const oneShot = subagentKindControls(rule, 'oneShot', subagentsLocked)
   return <div className={css.rule}>
     <div className={css.checks}>
       <Toggle label={t('settings.enabled')} checked={rule.enabled} onChange={enabled => change({ enabled })} />
-      <Toggle label={t('settings.continuable')} checked={subagentsLocked ? false : rule.continuableSubagents} disabled={subagentsLocked} onChange={continuableSubagents => change({ continuableSubagents })} />
-      <Count label={t('settings.maxDepth')} value={rule.continuableMaxDepth} disabled={subagentsLocked || continuableDepthDisabled(rule)} onChange={continuableMaxDepth => change({ continuableMaxDepth })} />
-      <Toggle label={t('settings.oneShot')} checked={subagentsLocked ? false : rule.oneShotSubagents} disabled={subagentsLocked} onChange={oneShotSubagents => change({ oneShotSubagents })} />
-      <Count label={t('settings.maxDepth')} value={rule.oneShotMaxDepth} disabled={subagentsLocked || oneShotDepthDisabled(rule)} onChange={oneShotMaxDepth => change({ oneShotMaxDepth })} />
+      <Toggle label={t('settings.continuable')} checked={continuable.checked} disabled={continuable.disabled} onChange={continuableSubagents => change({ continuableSubagents })} />
+      <Count label={t('settings.maxDepth')} value={rule.continuableMaxDepth} disabled={continuable.depthDisabled} onChange={continuableMaxDepth => change({ continuableMaxDepth })} />
+      <Toggle label={t('settings.oneShot')} checked={oneShot.checked} disabled={oneShot.disabled} onChange={oneShotSubagents => change({ oneShotSubagents })} />
+      <Count label={t('settings.maxDepth')} value={rule.oneShotMaxDepth} disabled={oneShot.depthDisabled} onChange={oneShotMaxDepth => change({ oneShotMaxDepth })} />
       {subagentsLocked && <span className={css.note} role="status">{t('settings.subagentsLocked')}</span>}
       <span className={css.note}>{t('settings.kindsHint')}</span>
       <span className={css.note}>{t('settings.maxDepthHint')}</span>

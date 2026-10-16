@@ -13,7 +13,7 @@ const stub = (name: string): string => `${here}/test/stubs/${name}`
 
 export default {
   name: `${ID}/smoke`,
-  entry: { smoke: 'test/smoke.ts', 'probe-whale': 'test/probe-whale.ts', 'probe-store': 'test/probe-store.ts' },
+  entry: { smoke: 'test/smoke.ts' },
   outDir: 'test/dist',
   format: ['esm'],
   platform: 'node',
