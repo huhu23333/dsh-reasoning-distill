@@ -51,6 +51,12 @@ export function registerRoutes(
       generation: number
     }
     stock(sessionId: string): { tokens: number; saved: number; ids: string[] } | undefined
+    /**
+     * One session this engine observed, by id; the root store cannot see delegated sessions.
+     *
+     * Optional on the type so the route can be driven by a stub that models only one half.
+     */
+    sessionFor?(sessionId: string): unknown
     handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }>
     hostPatchStatus(): HostPatchStatus
     applyInPlace(request: { sessionId: string; eventSeq: number; blockIndex: number; text: string }): Promise<{ ok: true; seq: number } | { ok: false; error: string }>
@@ -80,8 +86,15 @@ export function registerRoutes(
         // The panel only ever asks about its own session; refusing unknown ids
         // keeps this route from serving another session's private reasoning to a
         // caller that guesses or enumerates ids.
+        //
+        // The engine answers first: a delegated (subagent) session lives in its agent's scope, so
+        // the root store this route can reach does not carry it, while the engine attached it the
+        // moment the host created it. The store stays the fallback for a session this plugin has
+        // not observed yet.
         const sessions = child.get('sessions') as { get(id: string): unknown } | undefined
-        if (sessions?.get(sessionId) === undefined) return json({ error: 'unknown session' }, 404)
+        if ((engine.sessionFor?.(sessionId) ?? sessions?.get(sessionId)) === undefined) {
+          return json({ error: 'unknown session' }, 404)
+        }
         try {
           const record = await store.load(sessionId)
           const persistence = child.get('sessionPersistence') as { stat(id: string): Promise<unknown> }

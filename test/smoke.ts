@@ -2256,6 +2256,7 @@ check('late lines and duplicate exit cannot change a terminal job', first70.ok &
 
 console.log('scenario 71: the built-in in-place backend, its route, and the missing-patch path')
 let rewriteHandler: ((request: Request) => Promise<Response>) | undefined
+let reportHandler71: ((request: Request) => Promise<Response>) | undefined
 const patchState = { patched: true, functional: true }
 const claimedRewrites: Array<Record<string, unknown>> = []
 let applyResult: { ok: true; seq: number } | { ok: false; error: string } = { ok: true, seq: 2 }
@@ -2263,6 +2264,7 @@ const rewriteContext = {
   ...coldContext,
   connection: { fetch: { register: (route: { path: string; fetch: (request: Request) => Promise<Response> }) => {
     if (route.path === REWRITE_ROUTE) rewriteHandler = route.fetch
+    if (route.path === REPORT_ROUTE) reportHandler71 = route.fetch
     return async () => undefined
   } } },
   // coldContext's own inject hands the callback back to coldContext, whose connection is a
@@ -2274,10 +2276,23 @@ const rewriteEngine = {
   stock: () => undefined,
   handoff: async () => ({ ok: true, recorded: true }),
   hostPatchStatus: () => ({ ...patchState }),
+  // Only the engine can resolve a delegated session: it lives in its agent's scope, and the root
+  // store coldContext hands the route does not carry it.
+  sessionFor: (id: string) => id === 'delegated-1' ? { id } : undefined,
   applyInPlace: async (request: Record<string, unknown>) => { claimedRewrites.push(request); return applyResult },
 }
 registerRoutes(rewriteContext as never, makeConfig(), new SidecarStore(), rewriteEngine as never, coldRunner)
 
+const delegated71 = await reportHandler71?.(new Request('http://localhost/api/report', {
+  method: 'POST', body: JSON.stringify({ sessionId: 'delegated-1' }),
+}))
+check('the report route resolves a delegated session the root store cannot see',
+  delegated71?.status === 200, String(delegated71?.status))
+const neverSeen71 = await reportHandler71?.(new Request('http://localhost/api/report', {
+  method: 'POST', body: JSON.stringify({ sessionId: 'never-observed' }),
+}))
+check('and still refuses a session nothing has ever observed',
+  neverSeen71?.status === 404, String(neverSeen71?.status))
 const verdict71 = await rewriteHandler?.(new Request('http://localhost/api/rewrite'))
 const verdictBody71 = verdict71 === undefined ? undefined : await verdict71.json() as { patched: boolean; functional: boolean }
 check('the rewrite route reports the host patch verdict on GET',
@@ -2388,6 +2403,37 @@ check('the quick-install route accepts the built-in backend',
   JSON.stringify(installInPlaceBody71))
 installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'cancel' }) }))
 
+console.log('scenario 72: a delegated session is written back through the engine registry')
+handlers.clear()
+// A child session lives in its agent's scope: the root store this plugin reaches does not carry
+// it, and only the engine's own registry (filled when the host created the session) can resolve
+// the id. Resolving through the store alone is what made the panel 404 on every subagent.
+const delegatedSession = new FakeSession('delegated-1', { cwd: '/tmp' })
+const delegatedWrites: string[] = []
+;(delegatedSession as unknown as { rewriteReasoningBlock: (this: { id: string }, request: { text: string }) => unknown }).rewriteReasoningBlock = function (request) {
+  if (typeof this?.id !== 'string') throw new TypeError('rewriteReasoningBlock lost its receiver')
+  delegatedWrites.push(request.text)
+  return { type: 'assistant/message' }
+}
+class DelegatedStore extends SidecarStore {
+  override peek(id: string): SessionRecord | undefined {
+    if (id !== 'delegated-1') return super.peek(id)
+    return { entries: [{ id: 'e-2', targetSeq: 4, targetBlockIndex: 0, targetMessageId: 'm-4' }], countedThroughSeq: 0 } as unknown as SessionRecord
+  }
+}
+const delegatedEngine = new ReasoningDistillEngine(
+  { ...ctx, sessions: { ...ctx.sessions, get: () => undefined, list: () => [] } } as never,
+  makeConfig({ rewriteBackend: { get: () => 'in-place' } }) as never,
+  new DelegatedStore(),
+)
+delegatedEngine.start()
+await fire('session/created', delegatedSession)
+check('the engine attaches a session the root store cannot resolve',
+  delegatedEngine.sessionFor('delegated-1') === delegatedSession && delegatedEngine.sessionFor('nope') === undefined)
+const delegatedApplied = await delegatedEngine.applyInPlace({ sessionId: 'delegated-1', eventSeq: 4, blockIndex: 0, text: 'short' })
+check('and writes the rewrite back for that very session',
+  delegatedApplied.ok === true && delegatedWrites.length === 1 && delegatedWrites[0] === 'short',
+  JSON.stringify({ delegatedApplied, delegatedWrites }))
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

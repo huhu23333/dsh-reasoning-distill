@@ -408,6 +408,20 @@ export class ReasoningDistillEngine {
   }
 
   /**
+   * One session this engine observed, by id.
+   *
+   * The plugin's own registry, not the session store: a delegated (subagent) session lives in its
+   * agent's scope, so `ctx.sessions.get(id)` at this plugin's root cannot resolve it, while the
+   * engine attached it the moment the host created it — which is also what proves this plugin may
+   * answer for it at all. Returns undefined for an id this engine never saw.
+   * @param sessionId - session to resolve.
+   * @returns the attached session, when there is one.
+   */
+  sessionFor(sessionId: string): Session | undefined {
+    return this.current.get(sessionId)
+  }
+
+  /**
    * Clear a selected backend this host can no longer drive, the moment that becomes known.
    *
    * Same outcome as the startup check (see {@link checkBackend}), reached from the apply path when
@@ -1385,7 +1399,9 @@ export class ReasoningDistillEngine {
     if (!Number.isSafeInteger(eventSeq) || eventSeq < 0 || !Number.isSafeInteger(blockIndex) || blockIndex < 0) {
       return { ok: false, error: 'eventSeq and blockIndex must be non-negative integers' }
     }
-    const session = this.ctx.sessions.get(sessionId as SessionId)
+    // The engine's registry first: a delegated session is not in the root store this context can
+    // reach, and the registry holds exactly the objects this plugin attached.
+    const session = this.sessionFor(sessionId) ?? this.ctx.sessions.get(sessionId as SessionId)
     if (session === undefined) return { ok: false, error: 'unknown session' }
     const rewrite = rewriteEntryPoint(session)
     if (rewrite === undefined) {
