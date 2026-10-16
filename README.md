@@ -3,13 +3,13 @@
 把过长的模型思维链蒸馏成它的有效内核，并让**之后的每一次请求**都只回传蒸馏版——代价是被改写的那一步**首次回放按缓存未命中计费**，换取此后每一轮都更短的上下文。
 
 - **设置页**（Settings → 推理蒸馏）：总开关、默认规则（未单独配置的模型走这里）、逐模型规则、价格表、蒸馏提示词（可改、可恢复默认）。
-- **会话页**（对话 / 轨迹 / **推理蒸馏** / 上下文 / 画廊）：成功/尝试次数、每次的压缩原文与压缩结果、压缩会话内容与开销，以及金额核算。口径：
+- **会话页里的「推理蒸馏」标签页**：成功/尝试次数、每次的压缩原文与压缩结果、压缩会话内容与开销，以及金额核算。口径：
   - **成功 / 尝试**：尝试 = 记过的条目数（含蒸馏失败、节省不足未采用）；成功 = 真正采用了改写的条目。
   - **蒸馏开销**：每次蒸馏**实际花掉**的钱（失败、超时、未采用也计，因为钱真花了）。
   - **当前单次请求减量**（存量）：**这一次请求**因为仍然生效的改写而少带的估算 token，以及按命中价估算的金额。每成功采用一条改写加一次它的单次减量；被整段压缩淘汰的条目相应减掉，全部淘汰则归零。它是"只加一次"的存量，**不随请求次数增长**。
   - **历史累计节省**（流量）：每发生一次确实带着这些改写发出的请求，就按**那一次请求实际适用的价格**结算一笔，累加进总账，**永不重置**——即使改写后来失效、或上下文被压缩，过去已贡献的历史都保留。
   - **净收益** = 历史累计节省 − 蒸馏开销。
-  - **不显示"缓存失效增量"**：本插件只压缩**刚结束那一步**的新消息，**从不追溯改写已经发过**的内容——不存在"原来 a+b+c 已缓存、改成 a+b′+c 导致 b′+c 变未命中"的情形。但**这不等于断裂恒为零**：有三条回退路径会让已经发出去的蒸馏版与后续请求不一致（首次重放发原文、之后才发蒸馏版，或反之），那几条路径下被缓存的前缀确实会失效——见下文「关于"缓存断裂"这一项」。
+  - **不显示"缓存失效增量"**：正常路径下插件只压缩**刚结束那一步**的新消息，不会把已经缓存的前缀改成未命中；只有三条回退路径（sidecar 读失败后恢复、写回被延后、插件卸载/停用）会让已发出的内容再次变化，那几条路径下的前缀失效**没有单独计价**。
 
 ---
 
@@ -21,32 +21,6 @@
 
 > **后端怎么选**：推荐内置的 **`in-place`**。旧的 `message-edit` 每压缩一次就新建一个分支会话，聊久了会把对话列表和归档列表堆满，而且子代理/后台任务用不了（见「助手消息改写后端」）。
 4. 每一步结束时结算：这次替换让**之后每一次请求**少掉的输入 token，按当时的缓存命中价累加。
-
-## 为什么用"派生历史"这条缝，而不是投影事件
-
-仓库外的插件**无法**写自己的会话事件类型：`Session.append` 永远不写事件信封里的 `ignorable` 标记，而持久化读路径会拒绝一个未知且不可忽略的事件类型。所以本插件：
-
-- **不写入会话日志**（日志保持可被任何 build 读取、原始 reasoning 可审计）；
-- **包装两个访问器**：`Session.deriveMessages()`（请求构建与不变量比对都用它）**以及** `Session.deriveEventMessage()`——后者是宿主的 compaction（`compaction-basic` / `tool-result-pruner` / `image-offload`）逐节点重建"要压缩的对话"时走的那条缝。两个访问器由**同一套判据**回答，所以「请求带什么」与「压缩读什么」逐字节相同（见「压缩与派生的关系」）；
-- 自己的持久状态放在 `$DSH_HOME/reasoning-distill/<会话 id 净化>-<原始 id 的 sha256 前 16 位>.json` 的 sidecar 里（净化不是单射，`team/a` 与 `team?a` 都塌成 `team_a`，摘要后缀保证两者不撞同一个文件）。
-
-> 这条缝的代价：只有**发给模型的请求**和**宿主的压缩输入**变了；GUI 转录、轨迹页与上下文页仍显示原始思维链（`surface.ts` 规定人类转录只读 durable 原文）。这是有意的——审计与展示走日志，省钱走派生历史。
-
-## 压缩与派生的关系（两个访问器、三种情形）
-
-宿主的 token 计量与压缩走**不同**的读缝，这件事决定了本插件能保证什么：
-
-| 读缝 | 谁在用 | 本插件能否影响 |
-|---|---|---|
-| `Session.deriveEventMessage(event)`（**方法**，带投影表） | compaction 的输入、`deriveMessages()` 内部、tool-result-pruner、image-offload | ✅ **已包装**（与 `deriveMessages` 同一套判据） |
-| 自由函数 `deriveEventMessage(event)`（`token-meter/src/surface-fold.ts`、`surface-projection.ts`） | **token 计量**：压缩阈值、保留预算、"摘要必须更小"的判据 | ❌ 碰不到（插件的边界） |
-
-因此：
-
-- **压缩的输入**：与路由请求逐字节一致（同一判据 ⇒ 同样的文本、同样的 replay 载荷）。历史里已被 splice 接管的块，其事件仍带着**原文的 replay 载荷**（`message-edit` 只改 `content[i].text`），两条访问器都会把它洗成裸 `{type:'reasoning'}`，而 durable 日志一个字都不动。
-- **"该不该压缩"的估价**：按**日志**算。已成功交接的块，日志里就是蒸馏文本 ⇒ 估价正确；只有包裹生效（交接失败/跳过）或交接前的窗口里，日志还是原文 ⇒ 压力被**高估**（保守：不会漏压，但可能过早压一次）。
-- **摘要承接的是蒸馏后的内容**：`compaction-basic` 的 `buildSummarizationInput` 逐个事件调的是 **session 方法**（`region.ts:552,557`，已被包装），所以 summarizer 读到的就是上表的派生文本 ⇒ 生成的摘要也按蒸馏后的内容写。这是**改进**（压缩输入与请求内容一致），但它有一个**不可逆**的后果：摘要不是临时视图，它以 `compaction/summary` 与 checkpoint 的 `user/message` **追加进会话日志**（`region.ts:491,506`）⇒ 那段历史此后永久带着按蒸馏内容写成的摘要。本插件之后被卸载（`deactivate()` 把 `active` 置 false，`src/engine.ts:479-481`）或原块经交接离开本会话，都不会把它改回去——卸载只是**停止继续改写提示词**，没有任何"把已经汇总进去的蒸馏文本还原成原文"的机制。
-- **三种情形**（`rewriteKind`）：① 该会话仍承载这条改写 ⇒ 替换并**计费**；② 日志里已经是这条蒸馏文本（更早的分支 splice 进来的）⇒ 只**洗 replay 载荷**，不计费（那份节省属于接管的那个分支）；③ 都不是（失败、已交接给分支、或用户改过原文）⇒ **把日志自己的消息放回派生的那一格**，这样"某个派生在交接之前缓存过的替换"不会活过交接。
 
 ## 计费口径
 
@@ -287,7 +261,7 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
    pnpm dsh plugin --profile web add "$PLUGIN/vendor/dsh-message-edit-0.2.3-patched4.tgz"
    ```
 
-   ⚠️ 要装 **patched4**：`patched1`~`patched3` 只含客户端补丁，**不含任何会话格式修复**，用它建出来的分支会在重启后加载失败（详见「后端支持状态」与「安装与修补 `message-edit` 后端的完整流程」）。
+   ⚠️ 只装本仓库 `vendor/` 里的 **`patched4`**。更早的产物（`patched1`~`patched3`）只含客户端补丁、不含任何会话格式修复，用它们建出来的分支会在重启后加载失败；它们已从仓库移除。
 
    ⚠️ **不要给这个包改名**：它的客户端 bundle 里写死了 `id: "dsh-message-edit"`，一旦把 npm 包名改成别的（例如 `dsh-message-edit-patched`），DSH 就无法把 bundle 与插件行配对，**客户端半边（Timeline 标签页等）不会激活**——这正是"装了却看不到 Timeline"的原因。
 2. **装原版再打补丁**：`dsh plugin --profile web add dsh-message-edit`，
@@ -295,23 +269,12 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 
 之后重启 `dsh web`。**注意**：重装/升级该插件会覆盖补丁，需要重跑脚本（或改用它上游修复后的版本——上游只需把那一行 require 换成 `@deepseek-ai/dsh-client-store`）。
 
-## 分支型后端（`message-edit`）的交接行为（不推荐；选了它再读）
+## 分支型后端（`message-edit`）的交接行为（选了它才需要知道）
 
-时序（由宿主在 `agent/pre-step` 内完成，**客户端轮询不参与关键路径**）：
-
-1. **压缩期间原分支被卡住**：`agent/pre-step` 先 `await ensureLoaded()`、再 `await settle()`，等这次蒸馏彻底结束才组装请求（有测试断言"pre-step 确实等了 ≥40ms"，并用把蒸馏器改快的方式反向验证过它不是空测）。
-2. **压缩成功**（且选了 `message-edit` 这类**分支型**后端）→ 宿主在**发出任何请求之前**调用后端建好分支 → **`{kind:'reject'}` 终止本回合** → 面板看到报告里的 `branch` 后**自动打开新分支**。原会话**一次 API 都不会发出** ✓。
-3. **压缩失败**（或后端拒绝/超时，例如"无法从会话历史解析模型路由"、含工具调用被拒等）→ **不终止**，回合照常在原会话继续；失败原因在推理蒸馏页显示（`branchError`），不会静默重试。
-4. **建分支后自动归档原会话**（配置项 `archiveSuperseded`，**默认开启**）：面板打开新分支后，把被它替换掉的原会话**收进归档**——归档里的会话仍可找回。关掉这个开关就只切分支、原会话留在列表里。
-5. **就地型后端（内置 `in-place`）**：它的路由 `/api/reasoning-distill/rewrite` 在 `/api/*` 后面、需要浏览器凭据，宿主自己够不到 → 由**面板/常驻芯片**在线应用（清标记但不中止你的回合：`handoff {cancel:false}`）。请求体只有会话 id、目标 seq、块下标和文本：**消息 id 由宿主从 sidecar 记录里取**，面板无法把改写指向账本没记过的消息。它要发的那次请求本来就已被重放替换变短，所以不存在"用长上下文多花一次"的问题。
-
-**实现要点**：宿主侧建分支走 `http://127.0.0.1:<webServer.port>/message-edit`（该端点无需浏览器凭据）；`agent/pre-step` 返回 `PreStepDecision = {kind:'reject'}` 即可在请求组装前结束回合（这与宿主的 `archived-session-gate` 用的是同一个缝）。
-
-**失败与超时的语义**（设置项「分支超时（毫秒）」，**0 = 永不超时**，仅分支型后端启用）：
-
-- 建分支**不成功**（后端拒绝、报错、超时）→ **压根不建分支、当作无事发生**：回合照常继续，行为与"没选后端"完全一致 ✓；
-- 唯一的痕迹是**记录在那一条压缩条目上**（推理蒸馏页可见）：失败显示原因 + 已按原会话继续，成功显示分支 id（面板据此自动打开新分支）；
-- 超时值就是宿主等待后端的时限；设为 0 时宿主会一直等（后端最终返回就成交，否则会一直卡住——请自行权衡）。
+- 压缩成功后，宿主会**在发出任何请求之前**建好分支，并把本回合判为拒绝——原会话这一次请求不会发出去；面板自动切到新分支。
+- 默认把被替换掉的**原会话收进归档**（开关 `archiveSuperseded`，可关）。
+- 建分支失败（后端拒绝/超时）就当作没选后端：回合照常继续，只有那条压缩条目上记了原因。
+- 这正是它堆满列表的原因：每压一次多一个会话。内置 `in-place` 没有这套行为。
 
 ## 助手消息改写后端（设置里单选；不选则总开关锁定）
 
@@ -352,16 +315,6 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 - **脏文件守卫**：`--apply` 只放过「本补丁自己写脏」的文件（该文件的编辑已全部就位）；文件里有**别人**的未提交改动就拒绝（`--force` 可越过）。所以它不会覆盖你正在建的宿主工作。
 - **补丁只在被调用时生效**：它不改变任何既有路径的行为；插件被移除（或加载失败）后宿主与未装插件时完全一致，只是没有人再调用那个方法。
 
-**改了什么（6 个文件、14 处字面编辑）**：
-
-| 文件 | 编辑 |
-|---|---|
-| `packages/core/session/src/surface.ts` | 折叠管理器新增 `reset()`（丢弃折叠结果、从第一个事件重折），generation 计数器加上 `_generationBase`，使重折后派生消息缓存**必然**失效 |
-| `packages/core/session/src/index.ts` | 新增 `setRewriteSink`/`rewriteReasoningBlock`：校验目标（该 seq 必须是 `assistant/message`、`message.id` 必须一致、该块必须是 `reasoning`、文本非空），文本相同则**幂等**返回原事件；落地后清 `eventsSnapshot`、重折 surface、通知 sink |
-| `packages/session/session-persistence/src/handle.ts` + `src/index.ts` | `SessionHandle` 新增可选 `rewrite(events, options?)`：append-only 的事件流表达不了「原地替换」，所以由持久化层收下这条意图 |
-| `packages/session/session-persistence-jsonl/src/storage.ts` | 句柄在会话的**第一个事件**上安装 durable rewrite sink，并把替换串在 mutation chain 上（先 drain 再改写，避免缓冲里的旧副本把新文本盖回去） |
-| `packages/session/session-persistence-jsonl/src/index.ts` | `rewriteBatch`：读回整份日志、替换目标记录、整份重新编码后**原子替换**（`none` 直接重写行，`zstd` 从帧边界整段重编码）；记录不存在即拒绝 |
-
 **落盘实验（怎么证明「扛得住重启」）**：`scripts/probe-inplace-durability.mjs` 建一个真实会话、写一条带 reasoning 的 assistant 消息、调 `rewriteReasoningBlock`、`flush`，然后**换一个新 Context 从同一目录读回**。它同时钉住：`seq`/日志长度不变、`message.id` 不变、兄弟块不动、`deriveMessages()` 立刻反映改写、同文本再调一次幂等、四条拒绝路径。`none` 与 `zstd` 两种编码都跑过。
 
 ```bash
@@ -378,7 +331,7 @@ rm "$host/.dsh-inplace-probe.mjs"
 
 > 这个重建入口是**特性探测**的：宿主客户端若没有暴露它，插件不会报错、也不会影响已经落盘的历史，只是退回「下次读取时可见」（例如刷新页面）。
 
-> **`dsh web` 的运行方式**：本机这份宿主是 `node --import tsx/esm apps/cli/src/bin.ts web`（直接从 `src` 跑），所以补丁**只需重启**即生效；`--build` 那一步仍然有价值——它用 `tsc -b` 校验这 6 个文件并刷新 `lib/` 产物，供从构建产物运行的宿主使用。
+> **`dsh web` 的运行方式**：宿主若从源码运行（`node --import tsx/esm apps/cli/src/bin.ts web`），补丁**只需重启**即生效；若从构建产物运行，则要再跑一次 `--build`（它用 `tsc -b` 校验补丁改动的文件并刷新 `lib/`）。
 ### 启动时的后端自检（宿主侧，每个进程一次）
 
 面板的探针需要浏览器凭据才能问到 `/api/*`（宿主自己去问只会拿到平台自己的 401），所以**每次 dsh 启动后第一次走到请求前检查（`agent/pre-step`）时**，宿主自己做一次**只看插件清单**的自检——**与本次是否触发压缩、阈值多少都无关**：
@@ -389,97 +342,15 @@ rm "$host/.dsh-inplace-probe.mjs"
 - **读不到清单**（拿不到 `profileContext`）→ **什么都不改**：对这个宿主没有任何证据，就不写用户的设置。
 - 因此「**装着但已停用**」的后端在这里等同于**用不了**（它本来就没有路由）；面板的探针与它结论一致，两边都会把总开关锁成关，宿主的这次写入则把选中的名字也一起清掉。
 
-### （旧）`message-edit` 后端安装流程（保留兼容，不推荐）
+### （旧）`message-edit` 后端安装流程（不推荐）
 
-以 `web` profile 为例，`$DSH_HOME` 默认 `~/.dsh`。
+1. 装包：`pnpm dsh plugin --profile web add <本仓库>/vendor/dsh-message-edit-0.2.3-patched4.tgz`（**只装 `patched4`**）。
+2. 修补安装件：`python3 scripts/patch-message-edit.py`（幂等；`dsh plugin add` 覆盖安装后要重跑）。
+3. 复检已有会话仍可加载：`node scripts/scan-session-logs.mjs`。
+4. 重启 `dsh web`。
+5. 设置 → 推理蒸馏 → 选择 `message-edit`；选它时两条子代理开关会被强制关闭并置灰。
 
-> 下文用 `$PLUGIN` 指**本插件目录**、`$DSH_CHECKOUT` 指**这台机器上的 DSH 源码目录**。两者都不在任何固定位置，不要照抄示例里的绝对路径；`$DSH_CHECKOUT` 可以随时问补丁脚本：
->
-> ```bash
-> node "$PLUGIN/scripts/dsh-inplace-patch.mjs" --locate
-> ```
-
-**0. 确认目标路径**
-
-```bash
-cd "$PLUGIN"
-ls "$DSH_HOME/profiles/${DSH_PROFILE:-web}/node_modules/dsh-message-edit" 2>/dev/null || echo "尚未安装"
-```
-
-**1. 安装前置插件**（二选一）
-
-- **方式 A（推荐，直接用已打好补丁的包）**：
-
-  ```bash
-  cd "$DSH_CHECKOUT"
-  pnpm dsh plugin --profile web add \
-    "$PLUGIN/vendor/dsh-message-edit-0.2.3-patched4.tgz"
-  ```
-
-- **方式 B（装原版再打补丁）**：
-
-  ```bash
-  cd "$DSH_CHECKOUT"
-  pnpm dsh plugin --profile web add dsh-message-edit     # 或 @yunyv/dsh-message-edit
-  ```
-
-> `vendor/` 里的 `patched1`/`patched2`/`patched3` 是**历史产物，已被 `patched4` 取代**：`patched1` 只修了客户端 require 漂移，**不含任何会话格式修复**，用它建出来的分支会在重启后加载失败。要装就装 `patched4`。
->
-> ⚠️ **不要给这个包改名**：它的客户端 bundle 里写死了 `id: "dsh-message-edit"`；改成别的 npm 包名后 DSH 无法把 bundle 与插件行配对，**客户端半边（Timeline 页签等）不会激活**。
-
-**2. 打补丁**（方式 B 必做；方式 A 已含，但重跑无副作用）
-
-```bash
-cd "$PLUGIN"
-python3 scripts/patch-message-edit.py            # 自动发现已安装的 dsh-message-edit / @yunyv/dsh-message-edit
-```
-
-脚本是**幂等**的：写前先 `node --check`，失败就**不落盘**；改动前留 `*.orig-<时间戳>` 备份；已在补丁态会打印 `already patched`。可用参数：
-
-```bash
-DSH_PLUGIN_ROOTS=/some/other/profile python3 scripts/patch-message-edit.py   # 指定别的 profile
-python3 scripts/patch-message-edit.py <client.js 或 index.mjs 路径>          # 只处理一个文件
-```
-
-它改的东西（客户端 + 服务端两半）：
-
-1. 客户端 require 漂移：`@deepseek-ai/dsh-client-runtime/client` → `@deepseek-ai/dsh-client-store`（否则整个 `dsh web` 启动失败）；
-2. 子会话记录继承前缀：`meta.isSeeded: true` + `inheritedEventCount`，并在 seed 的切点插 `session/end-seed {inherited:true}`；
-3. 拷贝过来的**未结束回合先收尾**（`openTurnClosers(..., "forked")`），否则分支自己的回合打不开；
-4. 插件自有事件补 `ignorable: true`（否则持久化契约拒绝整份日志，会话从列表消失）；
-5. 分支保留源的 **protected surface head**（否则后续 `system/message` 非法）；
-6. 延迟交接把**触发它的用户消息**带进分支（否则那句话丢失）；
-7. Timeline 不把 `origin: "subagent"` 的子代理会话列为版本；审计会话不进会话 lineage。
-
-**3. 校验安装结果**
-
-```bash
-cd "$PLUGIN"
-python3 scripts/patch-message-edit.py            # 期望：already patched ×2
-tmp=$(mktemp -d) && tar -xzf vendor/dsh-message-edit-0.2.3-patched4.tgz -C "$tmp" \
-  && cmp "$tmp/package/index.mjs" "$DSH_HOME/profiles/web/node_modules/dsh-message-edit/index.mjs" \
-  && cmp "$tmp/package/client.js" "$DSH_HOME/profiles/web/node_modules/dsh-message-edit/client.js" \
-  && echo "安装件与 vendor 逐字节相同 ✓"; rm -rf "$tmp"
-node scripts/scan-session-logs.mjs               # 期望：VALID 全部、INVALID 0
-```
-
-**4. 重启 `dsh web`**
-
-服务端模块（`index.mjs`）**只在宿主启动时加载**：补丁后必须重启才生效（客户端半边硬刷新即可，但重启最保险）。
-
-**5. 在设置里启用**
-
-设置 → 推理蒸馏 →「助手消息改写后端」选 `message-edit`（不选后端时「启用思考压缩」会保持关闭并锁定，这是有意的闸门）→ 再打开总开关。
-
-选中分支型后端后，下方会多出**「分支后端专用选项」**（标题里带后端 id）：
-
-- **建分支后自动归档原会话**（`archiveSuperseded`，默认开）：新分支显示出来后把被替换的原会话收进归档，仍可在归档里找回；
-- **分支超时（毫秒）**（`branchTimeoutMs`）：宿主等待分支型后端建好分支的时限，0 = 永不超时；
-- **有后台工作/子代理时不压缩**（`skipWhileBusy`，默认开）：该会话还有运行中的后台任务或子代理时（宿主的作业注册表同时管两者），**当作没触发思考压缩**——不蒸馏、不建分支；关掉则照常压缩，被替换的原会话等那份工作结束再归档。
-
-**6. 重装/升级前置插件后必须重跑第 2 步**
-
-`dsh plugin add` 会覆盖安装件，补丁随之丢失；重跑 `patch-message-edit.py` 即可（幂等）。
+> 想改用上游原版包也可以（第 2 步同样适用），但原版缺少会话格式修复，建出来的分支可能在重启后加载失败。
 
 ### 快速安装后端（设置页按钮，免手敲命令）
 
@@ -508,43 +379,15 @@ node scripts/scan-session-logs.mjs               # 期望：VALID 全部、INVAL
 - 条目本身没有"应用/创建分支"按钮：交接由宿主或常驻驱动自动完成，页面只显示结果（分支 id、失败原因、"已按原会话继续"）。
 - ⚠️ **升级提示**：该配置项默认为空，所以**升级后需要先在设置里选一个后端**，否则思考压缩会保持关闭（这正是上面的规则所要求的）。
 
-## （旧）可选前置：`dsh-message-edit`（"以蒸馏版开分支"，不推荐）
+## （旧）「以蒸馏版开分支」按钮（不推荐）
 
-> 这是**旧后端**。它每压缩一次就新建一个分支会话，会把对话/归档列表堆满；推荐用内置的 `in-place`（见「助手消息改写后端」）。安装、修补、启用与自检流程见「（旧）`message-edit` 后端安装流程」。
+记录展开区有一个「以蒸馏版开分支」按钮：它调用 `dsh-message-edit` 的同源端点 `POST /message-edit` 新建一个分支会话。没装该前置时按钮不可用（端点 404），其余功能不受影响。
 
-插件页每条记录的展开区有一个 **「以蒸馏版开分支」** 按钮。它**不自己实现分支**，而是调用同源端点：
+推荐用内置 `in-place`：它就地改写，不产生分支。
 
-```
-POST /message-edit
-{ "action": "splice", "sessionId": "<会话>", "eventSeq": <该条 targetSeq>,
-  "blockIndex": <reasoning 块下标>, "text": "<蒸馏文本>" }
-→ 200 { "sessionId": "<新分支会话 id>", ... }
-```
+## 原生页面为什么显示原文（必要提示）
 
-该端点由 **`dsh-message-edit`**（`Moeblack/dsh-message-edit`，npm 包 `dsh-message-edit`）提供；它的语义是"**不改写历史事件、从目标回合之前创建一个新会话版本**"，因此：
-
-- 新分支的**对话/轨迹/上下文页**以及**宿主的压缩计量**看到的都是**压缩后**的历史 ✓（这正是"就地改日志"做不到的事）；
-- **原会话分毫不动**，随时可切回；创建成功后插件会用 `openSession` 直接打开新分支。
-
-**降级行为**：未安装该前置时端点返回 404，插件会显示"需要安装 dsh-message-edit 才能创建分支"，其余功能不受影响；`blockIndex < 0`（找不到 reasoning 块）、蒸馏文本为空、或该条已不在当前上下文中时，按钮显示为不可用而不是失败。
-
-## 设计边界：为什么原生页面显示原文
-
-**结论**：对话 / 轨迹 / 上下文页显示的是**原始推理**；只有**发给模型的请求**使用蒸馏后的文本。这是宿主的设计，不是本插件的能力缺口。
-
-证据（宿主源码，已逐条核对）：
-
-1. **位置替换对助手消息被运行时禁止**：`packages/core/session/src/surface.ts:329-365` 要求替换必须逐一引用被遮蔽节点，同时又规定 `assistant/message` **一旦携带 `sourceEventSeqs` 就抛错**；类型层同样（`core/session/src/types.ts:470-478` 里该字段为 `never`）。因此插件无法遮蔽已有助手节点。
-2. **人类转录只读"追加来源"的原始事件**：`surface.ts:78-85` 明说替换副本 **model-only**、转录必须读 durable 原文；原生 chat 直接取 `event.data.message.content`（`client/ui-chat/.../conversation-nodes/assistant.ts:190-205,292-300`），轨迹同理（`ui-trajectory/.../trajectory-assistant-definition.ts:254-269`），上下文页渲染的是 durable 节点内容。
-3. **压缩计量读逐事件原始文本**：`llm/token-meter/src/surface-fold.ts:17,111` 用的是**自由函数** `deriveEventMessage(event)`（不传投影表），所以**阈值、保留预算、"摘要必须更小"的判据**都按原文计算——本插件省下的 token **不会**降低压缩压力。**但压缩的输入已经被接上了**：`compaction-basic` 的 `buildSummarizationInput` 走的是 **session 方法**（`region.ts:552,557`），本插件包装了它，所以 summarizer 读到的是蒸馏文本（含洗过的 replay 载荷）——两个口径目前只在这条边界上不一致，且方向是"保守"（估价偏高）。
-
-**为什么不用 `registerMessageProjection`**（它确实存在：`core/session/src/index.ts:931-945`，可让模型可见面在原位置换成插件文本）：
-
-- 自定义投影事件必须声明 `@messageProjection`，而离线/浏览器/查询读取器只用**构建期目录**（`session-format-catalog/src/message-projections.ts:1-7` 目前只有 `imageOffloadProjection`）；
-- 未知的**必需**事件会在格式恢复时被**拒绝**（`session-format-v3-to-v4/src/validation.ts:52-65`）；把它标成 `ignorable` 又属语义错误（读者会跳过并重建出**不同的**模型历史）。结果就是：外部插件用投影会导致**重启后会话可能加载失败**——比"日志零足迹 + 包装派生"更糟；
-- 且无论投影与否，**原生页面都不会显示投影文本**（见第 2 点）。
-
-**想要"所见即短"只有两条路**：① 用分支功能创建**真实的短历史**会话；② 让宿主在 UI 层提供"显示压缩后内容"的开关（属上游需求）。
+对话/轨迹页显示的是**原始推理**，只有**发给模型的请求**使用蒸馏后的文本——这是宿主的设计（人类转录只读日志原文），不是本插件的缺口，也不是故障。想要所见即短，只能用分支型后端建一个真实的短历史会话。
 
 ## 已知限制
 
