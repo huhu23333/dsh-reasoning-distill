@@ -14,7 +14,8 @@ import { ReasoningDistillView, ReportBody, increasedOfEntry, reducedOfEntry, sig
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import type { SessionReport } from '../src/shared.ts'
 import { apply as applyClientPlugin } from '../src/client/index.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendUnusable, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendUnusable, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, continuableDepthDisabled, isStaleResponse, masterSwitchState, nextBackend, oneShotDepthDisabled, planSave, pendingRewriteOutcome, availableSessionStorage, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, ruleFieldsIdle, shouldRetrySettle, saveOperations, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
+import { branchBackendBlocksSubagents } from '../src/backends.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { mergeRule, sparseOverride } from '../src/rule.ts'
 import { resolveRule } from '../src/config.ts'
@@ -469,6 +470,36 @@ const afterUnrelatedEdit = sparseOverride(inheritedForModel, { ...statedPanel, t
 check('editing another field of a model entry does not freeze the retired ceiling into it',
   afterUnrelatedEdit.thresholdTokens === 1234
   && afterUnrelatedEdit.maxInputChars === undefined && afterUnrelatedEdit.maxOutputChars === undefined)
+
+console.log('client: a branch backend pins both subagent switches off')
+// The one question the engine's gate and this panel both ask, so a profile the panel never
+// touched and the panel itself cannot disagree about whether a subagent kind is allowed.
+check('the branch backend is the one that cannot serve a subagent session',
+  branchBackendBlocksSubagents('message-edit')
+  && !branchBackendBlocksSubagents('')
+  && !branchBackendBlocksSubagents('placeholder')
+  && !branchBackendBlocksSubagents('nope'))
+const subagentsOn = settings({
+  defaultRule: { ...settings().defaultRule, continuableSubagents: true, oneShotSubagents: true },
+  models: { 'deepseek-flash': { enabled: true, continuableSubagents: true } },
+})
+const pinned = withoutSubagentKinds(subagentsOn)
+check('pinning states both kinds off in the default rule and in every model entry',
+  pinned.defaultRule.continuableSubagents === false && pinned.defaultRule.oneShotSubagents === false
+  && pinned.models['deepseek-flash']!.continuableSubagents === false
+  && pinned.models['deepseek-flash']!.oneShotSubagents === false)
+check('and it leaves every other field of those layers as stored',
+  pinned.defaultRule.thresholdTokens === subagentsOn.defaultRule.thresholdTokens
+  && pinned.defaultRule.enabled === true
+  && pinned.models['deepseek-flash']!.enabled === true)
+check('what the engine resolves from the pinned document is the same answer, for either model',
+  ['deepseek-flash', 'another-model'].every(model =>
+    engineRule(pinned, model).continuableSubagents === false
+    && engineRule(pinned, model).oneShotSubagents === false))
+check('an already-pinned document is returned as the same object, so the effect cannot loop',
+  withoutSubagentKinds(pinned) === pinned)
+check('and a document that needs pinning is a new one',
+  pinned !== subagentsOn)
 
 // The regression: another client flipped compressSubagents to true while this
 // panel sat with an untouched draft derived from the older value. The save must

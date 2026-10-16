@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
+import { branchBackendBlocksSubagents } from '../backends.ts'
 import type { CatalogModel, CatalogReport } from '../shared.ts'
 import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  REWRITE_BACKENDS, backendById, backendInstalled, backendReachable, backendOptionsVisible, forcesMasterOff, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle,
+  REWRITE_BACKENDS, backendById, backendInstalled, backendReachable, backendOptionsVisible, forcesMasterOff, continuableDepthDisabled, masterSwitchState, nextBackend, normalizeSettings, oneShotDepthDisabled, planSave, ruleFieldsIdle, withoutSubagentKinds,
   type ProbeAnswer,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
@@ -166,8 +167,10 @@ function RouteFields({ rule, catalog, onChange, t, disabled = false }: {
   </div>
 }
 
-function RuleFields({ rule, catalog, onChange, t, isModel = false }: {
+function RuleFields({ rule, catalog, onChange, t, isModel = false, subagentsLocked = false }: {
   rule: ModelRule; catalog: CatalogReport | null; onChange: (value: ModelRule) => void; t: Translate; isModel?: boolean
+  /** Whether the selected backend cannot serve a subagent session at all. */
+  subagentsLocked?: boolean
 }) {
   const change = (next: Partial<ModelRule>) => onChange({ ...rule, ...next })
   // With all three kinds off this rule decides nothing, so the rest of its
@@ -176,10 +179,11 @@ function RuleFields({ rule, catalog, onChange, t, isModel = false }: {
   return <div className={css.rule}>
     <div className={css.checks}>
       <Toggle label={t('settings.enabled')} checked={rule.enabled} onChange={enabled => change({ enabled })} />
-      <Toggle label={t('settings.continuable')} checked={rule.continuableSubagents} onChange={continuableSubagents => change({ continuableSubagents })} />
-      <Count label={t('settings.maxDepth')} value={rule.continuableMaxDepth} disabled={continuableDepthDisabled(rule)} onChange={continuableMaxDepth => change({ continuableMaxDepth })} />
-      <Toggle label={t('settings.oneShot')} checked={rule.oneShotSubagents} onChange={oneShotSubagents => change({ oneShotSubagents })} />
-      <Count label={t('settings.maxDepth')} value={rule.oneShotMaxDepth} disabled={oneShotDepthDisabled(rule)} onChange={oneShotMaxDepth => change({ oneShotMaxDepth })} />
+      <Toggle label={t('settings.continuable')} checked={subagentsLocked ? false : rule.continuableSubagents} disabled={subagentsLocked} onChange={continuableSubagents => change({ continuableSubagents })} />
+      <Count label={t('settings.maxDepth')} value={rule.continuableMaxDepth} disabled={subagentsLocked || continuableDepthDisabled(rule)} onChange={continuableMaxDepth => change({ continuableMaxDepth })} />
+      <Toggle label={t('settings.oneShot')} checked={subagentsLocked ? false : rule.oneShotSubagents} disabled={subagentsLocked} onChange={oneShotSubagents => change({ oneShotSubagents })} />
+      <Count label={t('settings.maxDepth')} value={rule.oneShotMaxDepth} disabled={subagentsLocked || oneShotDepthDisabled(rule)} onChange={oneShotMaxDepth => change({ oneShotMaxDepth })} />
+      {subagentsLocked && <span className={css.note} role="status">{t('settings.subagentsLocked')}</span>}
       <span className={css.note}>{t('settings.kindsHint')}</span>
       <span className={css.note}>{t('settings.maxDepthHint')}</span>
     </div>
@@ -344,6 +348,13 @@ export function ReasoningDistillSettings({ form, t }: Props) {
     if (!forcesMasterOff(draft.rewriteBackend, draft.enabled, selectedReachable)) return
     setDraft(current => current == null ? current : { ...current, enabled: false })
   }, [draft, selectedReachable])
+  // The same rule for the two subagent switches: a switch this backend cannot honour must not
+  // stay on in storage, or the panel would show off while the engine kept attempting the hand-off.
+  // `withoutSubagentKinds` returns its input unchanged once every layer is pinned, so this settles.
+  useEffect(() => {
+    if (draft == null || !branchBackendBlocksSubagents(draft.rewriteBackend)) return
+    setDraft(current => current == null ? current : withoutSubagentKinds(current))
+  }, [draft])
 
   if (snapshot.status === 'loading' || !draft) return <div className={css.page}>{t('settings.loading')}</div>
   const writable = snapshot.status === 'ready' && snapshot.writable
@@ -354,6 +365,11 @@ export function ReasoningDistillSettings({ form, t }: Props) {
   const resolveModel = (id: string): CatalogModel =>
     (catalog?.models ?? []).find(model => model.id === id) ?? { provider: '', id, name: id, reasoningEfforts: [] }
   const master = masterSwitchState(draft.rewriteBackend, draft.enabled, selectedReachable)
+  // A branch backend hands a rewrite over by forking the conversation, and the host writes a
+  // delegation's parent relation when the child agent is created, so a hand-off inside a subagent
+  // would end that child's turn without an answer. Both subagent switches are therefore pinned
+  // off — shown locked, and written off so storage cannot disagree with the panel.
+  const subagentsLocked = branchBackendBlocksSubagents(draft.rewriteBackend)
   const ruleModels = ruleIds.map(resolveModel)
   const priceModels = priceIds.map(resolveModel)
   // Exactly what the engine will resolve, so the panel cannot show a rule the
@@ -403,7 +419,7 @@ export function ReasoningDistillSettings({ form, t }: Props) {
         <span className={css.note}>{t('settings.installHint')}</span>
       </div>
     </section>
-    <section className={css.section}><h3>{t('settings.default')}</h3><RuleFields rule={draft.defaultRule} catalog={catalog} t={t} onChange={defaultRule => update(current => ({ ...current, defaultRule }))} /></section>
+    <section className={css.section}><h3>{t('settings.default')}</h3><RuleFields rule={draft.defaultRule} catalog={catalog} t={t} subagentsLocked={subagentsLocked} onChange={defaultRule => update(current => ({ ...current, defaultRule }))} /></section>
     <section className={css.section}><div className={css.sectionHeading}><h3>{t('settings.models')}</h3>{catalogError && <button type="button" className={css.iconButton} title={t('settings.retry')} aria-label={t('settings.retry')} onClick={() => setCatalogAttempt(n => n + 1)}><IconRefreshOutlineRegular /></button>}</div>
       {catalogError && <p role="alert" className={css.error}>{t('settings.catalogFailure')}</p>}
       <p className={css.note}>{t('settings.modelsHint')}</p>
@@ -418,7 +434,7 @@ export function ReasoningDistillSettings({ form, t }: Props) {
       {ruleModels.map(model => <details key={model.id} className={css.item}>
         <summary><strong>{model.name}</strong><span className={css.muted}>{model.provider === '' ? model.id : `${model.provider}/${model.id}`}</span><span className={css.badge}>{t('settings.override')}</span></summary>
         <div className={css.itemBody}>
-          <RuleFields isModel rule={ruleOf(model)} catalog={catalog} t={t} onChange={next => update(current => ({
+          <RuleFields isModel rule={ruleOf(model)} catalog={catalog} t={t} subagentsLocked={subagentsLocked} onChange={next => update(current => ({
             ...current,
             // Store only what this model changes, so untouched fields keep
             // following the default rule instead of being frozen.

@@ -127,7 +127,13 @@ export interface BackendFixup {
    * The selection goes away. It names a plugin that is no longer installed, and leaving it stored
    * would keep the panel and every later process promising a hand-off that cannot happen.
    */
-  rewriteBackend: ''
+  rewriteBackend?: ''
+  /**
+   * Rule layers whose subagent switches a branch backend pins off, present only for the layers
+   * that do not already pin both kinds off.
+   */
+  defaultRule?: { continuableSubagents: false; oneShotSubagents: false }
+  models?: Record<string, { continuableSubagents: false; oneShotSubagents: false }>
 }
 
 /**
@@ -224,6 +230,22 @@ export function masterSwitchState(
 ): { checked: boolean; locked: boolean } {
   const locked = backendById(backend) === undefined || installed === false
   return { checked: locked ? false : enabled, locked }
+}
+
+/**
+ * Whether a selected backend rules out distilling a subagent session at all.
+ *
+ * A branch backend hands a rewrite over by forking the conversation, and the host writes a
+ * delegation's parent relation when the child agent is created: a fork cannot adopt it, so a
+ * hand-off that fired inside a subagent would end that child's turn without an answer while the
+ * work continued in a session nobody awaits. A backend of that kind therefore pins both subagent
+ * switches off — the engine refuses those kinds outright and the panel writes them off — and both
+ * ask this one question so they cannot disagree.
+ * @param backendId - the stored selection.
+ * @returns true when this backend cannot serve a subagent session.
+ */
+export function branchBackendBlocksSubagents(backendId: string): boolean {
+  return backendById(backendId)?.kind === 'branch'
 }
 
 /**

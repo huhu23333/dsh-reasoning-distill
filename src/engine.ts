@@ -21,8 +21,9 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-subagent'
 
-import { backendById, backendUnusable, missingBackendFixup, rewriteRequest, type BackendFixup } from './backends.ts'
+import { backendById, backendUnusable, branchBackendBlocksSubagents, missingBackendFixup, rewriteRequest, type BackendFixup } from './backends.ts'
 import { resolveRule, type Config, type ModelRule } from './config.ts'
+import { subagentKindsOffPatch } from './rule.ts'
 import { priceAt } from './peak.ts'
 import { DEFAULT_PROMPT, encloseDistillationData, looksLikeFinalReply } from './prompt.ts'
 import type { SessionRecord, SidecarStore, StoredEntry } from './store.ts'
@@ -418,14 +419,25 @@ export class ReasoningDistillEngine {
   private async checkBackend(): Promise<void> {
     const backend = this.config.rewriteBackend.get() ?? ''
     const active = this.activePlugins === undefined ? undefined : await this.activePlugins()
-    if (!backendUnusable(backend, active)) return
-    const plugin = backendById(backend)?.plugin
-    if (plugin === undefined) {
-      this.ctx.logger.warn('reasoning-distill: rewrite backend %s is not one this build can drive; clearing the selection', backend)
-    } else {
-      this.ctx.logger.warn('reasoning-distill: rewrite backend %s needs plugin %s, which the profile no longer lists; clearing the selection', backend, plugin)
+    let fixup: BackendFixup | undefined
+    if (backendUnusable(backend, active)) {
+      const plugin = backendById(backend)?.plugin
+      if (plugin === undefined) {
+        this.ctx.logger.warn('reasoning-distill: rewrite backend %s is not one this build can drive; clearing the selection', backend)
+      } else {
+        this.ctx.logger.warn('reasoning-distill: rewrite backend %s needs plugin %s, which the profile no longer lists; clearing the selection', backend, plugin)
+      }
+      fixup = missingBackendFixup(backend, this.config.enabled.get() === true)
+    } else if (branchBackendBlocksSubagents(backend)) {
+      // The switches cannot stay on under this backend: a hand-off inside a subagent ends that
+      // child's turn without an answer. The panel pins them off while it is selected, and a
+      // profile edited outside the panel — or one saved before this rule existed — still has to
+      // be brought in line, at the same first-pre-step check that clears an unusable selection.
+      fixup = subagentKindsOffPatch(this.config.defaultRule.get(), this.config.models.get())
+      if (fixup !== undefined) {
+        this.ctx.logger.warn('reasoning-distill: rewrite backend %s forks the conversation, which a delegation cannot follow; turning the subagent switches off', backend)
+      }
     }
-    const fixup = missingBackendFixup(backend, this.config.enabled.get() === true)
     if (fixup === undefined) return
     if (this.writeFixup === undefined) {
       this.ctx.logger.warn('reasoning-distill: the rewrite backend settings could not be cleared: the host exposes no settings service')
@@ -433,9 +445,11 @@ export class ReasoningDistillEngine {
     }
     try {
       await this.writeFixup(fixup)
-      this.ctx.logger.info(fixup.enabled === undefined
-        ? 'reasoning-distill: cleared the rewrite backend selection; the master switch was already off'
-        : 'reasoning-distill: cleared the rewrite backend selection and turned the master switch off')
+      this.ctx.logger.info(fixup.rewriteBackend === ''
+        ? fixup.enabled === undefined
+          ? 'reasoning-distill: cleared the rewrite backend selection; the master switch was already off'
+          : 'reasoning-distill: cleared the rewrite backend selection and turned the master switch off'
+        : 'reasoning-distill: turned the subagent switches off for a backend that cannot carry a delegation')
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: the rewrite backend settings could not be cleared: %o', error)
     }
@@ -601,6 +615,12 @@ export class ReasoningDistillEngine {
   private appliesTo(session: Session, rule: ModelRule): boolean {
     const kind = this.kindOf(session)
     if (kind === 'main') return rule.enabled
+    // A branch backend forks the conversation, and the host writes a delegation's parent relation
+    // when the child agent is created, so the fork cannot adopt it: a hand-off inside a subagent
+    // would end that child's turn without an answer. No stored switch may enable those kinds while
+    // such a backend is selected — the panel pins them off and the startup check writes that down,
+    // and this refuses them outright so a hand-edited profile cannot break a delegation either.
+    if (branchBackendBlocksSubagents(this.config.rewriteBackend.get() ?? '')) return false
     // A delegation deeper than the configured cap is left alone; `0` means the
     // switch applies at any depth.
     const depth = this.subagentDepth(session)

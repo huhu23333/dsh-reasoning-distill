@@ -46,6 +46,71 @@ export function mergeRule(
   }
 }
 
+/** Both subagent switches, stated off: how one rule layer pins a kind a backend cannot serve. */
+export interface SubagentKindsOff {
+  continuableSubagents: false
+  oneShotSubagents: false
+}
+
+/**
+ * The two subagent switches, off.
+ *
+ * Stating them is what pins them: a layer that leaves a kind switch out keeps inheriting it —
+ * from the built-in rule, where `continuableSubagents` is on, or from its own `enabled` through
+ * {@link withKindDefaults} — so an absent field cannot take a kind out of play.
+ */
+export const SUBAGENT_KINDS_OFF: SubagentKindsOff = {
+  continuableSubagents: false,
+  oneShotSubagents: false,
+}
+
+/**
+ * One stored layer with both subagent switches stated off.
+ *
+ * Generic in the layer's own type so a fully resolved rule stays assignable to itself: the panel
+ * edits resolved rules and sparse overrides with the same call.
+ * @param rule - the layer being pinned.
+ * @returns a copy that pins both kinds and changes nothing else.
+ */
+export function withSubagentKindsOff<T extends RuleOverride>(rule: T): T & SubagentKindsOff {
+  return { ...rule, ...SUBAGENT_KINDS_OFF }
+}
+
+/** What to write to take both subagent switches out of a backend's way. */
+export interface SubagentKindsOffPatch {
+  defaultRule: SubagentKindsOff
+  models?: Record<string, SubagentKindsOff>
+}
+
+/**
+ * The rule-layer patch that pins both subagent switches off wherever they could be on.
+ *
+ * `settings.update` merges plain objects recursively, so each layer here states only the two
+ * switches and leaves every other stored field alone. The default layer is always stated, because
+ * the built-in rule has the continuable kind on and an absent field would inherit it; a model
+ * layer is stated whenever it does not already pin both off, because a layer whose own `enabled`
+ * is true and which states neither kind switch would otherwise still derive the continuable kind
+ * on and shadow the default layer's answer.
+ * @param defaultRule - the stored default layer.
+ * @param models - the stored per-model layers.
+ * @returns the patch to write, or undefined when every layer already pins both off.
+ */
+export function subagentKindsOffPatch(
+  defaultRule: RuleOverride | undefined,
+  models: Record<string, RuleOverride> | undefined,
+): SubagentKindsOffPatch | undefined {
+  const pinned = (rule: RuleOverride | undefined): boolean =>
+    rule !== undefined && rule.continuableSubagents === false && rule.oneShotSubagents === false
+  const entries = Object.entries(models ?? {}).filter(([, rule]) => !pinned(rule))
+  if (pinned(defaultRule) && entries.length === 0) return undefined
+  return {
+    defaultRule: { ...SUBAGENT_KINDS_OFF },
+    ...entries.length === 0 ? {} : {
+      models: Object.fromEntries(entries.map(([id]) => [id, { ...SUBAGENT_KINDS_OFF }])),
+    },
+  }
+}
+
 /**
  * Reduce a resolved rule to the fields that differ from what it would inherit.
  *

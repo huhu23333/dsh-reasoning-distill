@@ -818,6 +818,7 @@ async function runKind(
   header: { cwd?: string; origin?: 'subagent'; delegationDepth?: number },
   ruleOverrides: Record<string, unknown>,
   descriptor?: 'one-shot' | 'continuable',
+  backend = 'placeholder',
 ): Promise<number> {
   // One engine per case, observing alone: production has a single plugin
   // instance, and two stores writing one sidecar would race on the rename.
@@ -825,7 +826,9 @@ async function runKind(
   const store = new SidecarStore()
   const engine = new ReasoningDistillEngine(
     ctx as never,
-    makeConfig({ defaultRule: { get: () => kindRule(ruleOverrides) } }) as never,
+    // The kind switches are the subject here, so these cases select the in-place slot: a branch
+    // backend pins both subagent kinds off (below), which would mask every assertion here.
+    makeConfig({ defaultRule: { get: () => kindRule(ruleOverrides) }, rewriteBackend: { get: () => backend } }) as never,
     store,
   )
   engine.start()
@@ -904,6 +907,83 @@ check('depth caps never touch main conversations',
 // A child the host marked as one but never gave a depth counts as a direct one.
 check('a deeper-cap does not silently disable an unlabelled child',
   (await runKind('kd-nodepth', { cwd: '/tmp', origin: 'subagent' }, { oneShotSubagents: true, oneShotMaxDepth: 1 }, 'one-shot')) === 1)
+// A branch backend forks the conversation and the fork cannot adopt the host's delegation
+// relation, so a hand-off inside a subagent would end that child's turn without an answer:
+// both subagent kinds are refused outright, whatever the stored switches say.
+check('a branch backend leaves a continuable child alone even with its switch on',
+  (await runKind('kb-cont', child, { continuableSubagents: true }, 'continuable', 'message-edit')) === 0)
+check('and a one-shot child too, even with its own switch on',
+  (await runKind('kb-shot', child, { oneShotSubagents: true }, 'one-shot', 'message-edit')) === 0)
+check('while the same backend still distills the main conversation',
+  (await runKind('kb-main', plain, { enabled: true }, undefined, 'message-edit')) === 1)
+check('and turning the master switch off does not resurrect a subagent kind under it',
+  (await runKind('kb-main-off', plain, { enabled: false, continuableSubagents: true }, undefined, 'message-edit')) === 0)
+
+console.log('scenario 16b: the first pre-step writes the subagent switches off for a branch backend')
+handlers.clear()
+const kindsHome = mkdtempSync(join(tmpdir(), 'rd-kinds-'))
+const kindsPrior = process.env['DSH_HOME']
+process.env['DSH_HOME'] = kindsHome
+/** One engine whose stored document is whatever the caller passes, plus its recorded fixups. */
+async function checkKindsFixture(
+  id: string,
+  rules: { defaultRule: Record<string, unknown>; models: Record<string, unknown> },
+): Promise<{ fixups: Record<string, unknown>[]; warnings: string[] }> {
+  const fixups: Record<string, unknown>[] = []
+  const engine = new ReasoningDistillEngine(
+    ctx as never,
+    makeConfig({
+      defaultRule: { get: () => rules.defaultRule },
+      models: { get: () => rules.models },
+      rewriteBackend: { get: () => 'message-edit' },
+    }) as never,
+    new SidecarStore(),
+    undefined,
+    async () => ['dsh-message-edit'],
+  )
+  engine.useSettingsWriter(async fixup => { fixups.push(fixup as Record<string, unknown>) })
+  engine.start()
+  const session = new FakeSession(id)
+  sessions.set(session.id, session)
+  await fire('session/created', session)
+  session.append('user/message', { id: `u-${id}`, role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+  await fire('agent/pre-step', { agent: { session } }, async () => undefined)
+  return { fixups, warnings: [] }
+}
+// The shipped default has the continuable kind on and the stored layer says nothing, so the
+// check cannot leave the field absent: it has to state both switches off. A model layer that
+// states `enabled: true` and neither kind switch would also derive the continuable kind on.
+const kindsNeeded = await checkKindsFixture('session-kinds-a', {
+  defaultRule: kindRule(),
+  models: { 'm-16b': { enabled: true, thresholdTokens: 900 } },
+})
+const kindsPatch = kindsNeeded.fixups[0] as {
+  defaultRule?: { continuableSubagents?: unknown; oneShotSubagents?: unknown }
+  models?: Record<string, { continuableSubagents?: unknown; oneShotSubagents?: unknown }>
+} | undefined
+check('a branch backend writes both subagent switches off on the first pre-step',
+  kindsNeeded.fixups.length === 1
+  && kindsPatch?.defaultRule?.continuableSubagents === false
+  && kindsPatch?.defaultRule?.oneShotSubagents === false
+  && kindsPatch?.models?.['m-16b']?.continuableSubagents === false
+  && kindsPatch?.models?.['m-16b']?.oneShotSubagents === false,
+  JSON.stringify(kindsNeeded.fixups))
+check('and the patch carries nothing else about those layers',
+  JSON.stringify(kindsPatch) === JSON.stringify({
+    defaultRule: { continuableSubagents: false, oneShotSubagents: false },
+    models: { 'm-16b': { continuableSubagents: false, oneShotSubagents: false } },
+  }),
+  JSON.stringify(kindsPatch))
+// A document that already pins both kinds off in both layers needs no write at all.
+const kindsPinned = await checkKindsFixture('session-kinds-b', {
+  defaultRule: { ...kindRule(), continuableSubagents: false, oneShotSubagents: false },
+  models: { 'm-16b': { enabled: true, continuableSubagents: false, oneShotSubagents: false } },
+})
+check('a document that already pins both subagent kinds off is left alone',
+  kindsPinned.fixups.length === 0, JSON.stringify(kindsPinned.fixups))
+await settleFor(async () => true)
+process.env['DSH_HOME'] = kindsPrior
+handlers.clear()
 
 console.log('scenario 18: a failed write leaves no unpersisted savings behind')
 handlers.clear()

@@ -13,7 +13,7 @@
  */
 
 import type { ModelPrices, ModelRule } from '../config.ts'
-import { FALLBACK_RULE, mergeRule, withKindDefaults, type RuleOverride, type RuleSource } from '../rule.ts'
+import { FALLBACK_RULE, mergeRule, withKindDefaults, withSubagentKindsOff, type RuleOverride, type RuleSource } from '../rule.ts'
 import { backendById, backendInstalled, masterSwitchState, type ProbeAnswer, type RewriteBackend } from '../backends.ts'
 import { entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
 
@@ -134,6 +134,35 @@ export type { BackendFixup, ProbeAnswer, RewriteBackend } from '../backends.ts'
  */
 export function forcesMasterOff(backend: string, enabled: boolean, installed?: boolean): boolean {
   return masterSwitchState(backend, enabled, installed).locked && enabled
+}
+
+/**
+ * Pin both subagent switches off in every rule layer of one draft.
+ *
+ * Used while a branch backend is selected: that backend hands a rewrite over by forking the
+ * conversation, and a fork cannot adopt the host's delegation relation, so a hand-off inside a
+ * subagent would end that child's turn without an answer. The switches cannot stay on in storage
+ * either — the panel would show them off while the engine kept that hand-off — so the document
+ * the panel would save states them off, and the host's first-pre-step check writes the same thing
+ * into a profile the panel never touched.
+ *
+ * Identity matters here: this returns the value it was given when every layer already pins both
+ * off, so the effect that applies it cannot loop on its own new object.
+ * @param value - the draft being edited.
+ * @returns the draft with both kinds pinned off, or the same object when it already is.
+ */
+export function withoutSubagentKinds(value: SettingsValue): SettingsValue {
+  const pinned = (rule: StoredRule): boolean =>
+    rule.continuableSubagents === false && rule.oneShotSubagents === false
+  const models = value.models ?? {}
+  if (pinned(value.defaultRule) && Object.values(models).every(pinned)) return value
+  const modelsOff: Record<string, StoredRule> = {}
+  for (const [id, rule] of Object.entries(models)) modelsOff[id] = pinned(rule) ? rule : withSubagentKindsOff(rule)
+  return {
+    ...value,
+    defaultRule: pinned(value.defaultRule) ? value.defaultRule : withSubagentKindsOff(value.defaultRule),
+    models: modelsOff,
+  }
 }
 
 /**
