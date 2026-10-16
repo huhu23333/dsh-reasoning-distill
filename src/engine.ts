@@ -574,8 +574,12 @@ export class ReasoningDistillEngine {
     const owed = record.entries.filter(entry =>
       entry.failed !== true
       && entry.skipped !== true
-      && entry.handoff === undefined
-      && entry.inPlaceApplied === undefined)
+      && entry.inPlaceApplied === undefined
+      // A failed hand-off note is *not* terminal for an in-place rewrite. Its usual cause is the
+      // panel posting between two of a delegated conversation's turns, when there was no session to
+      // write into -- the step that ends a turn is always owed at the moment the turn ends, so those
+      // were exactly the rewrites that never landed. The engine is the writer of record here.
+      && (entry.handoff === undefined || entry.handoff.state === 'failed'))
     if (owed.length === 0) return
     const seqs = new Set<number>(session.ownEvents().map(event => event.seq as number))
     let wrote = 0
@@ -599,7 +603,12 @@ export class ReasoningDistillEngine {
       if ((this.generation.get(session.id) ?? 0) !== generation) return
       const at = Date.now()
       await this.store.update(session.id, current => {
-        for (const item of current.entries) if (item.id === entry.id) item.inPlaceApplied = at
+        for (const item of current.entries) {
+          if (item.id !== entry.id) continue
+          item.inPlaceApplied = at
+          // The note explained why the panel could not write it; the write has now happened.
+          if (item.handoff?.state === 'failed') delete item.handoff
+        }
       })
       wrote += 1
     }

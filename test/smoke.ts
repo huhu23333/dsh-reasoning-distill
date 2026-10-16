@@ -2570,6 +2570,44 @@ check('a rewrite the panel could not apply is written once the conversation is l
   writes75.length === 1 && writes75[0]?.text === 'short' && writes75[0]?.seq === seq75, JSON.stringify(writes75))
 check('and the record says so, so nothing writes it a second time',
   (await store75.load(owedId)).entries.every(entry => entry.inPlaceApplied !== undefined))
+console.log('scenario 76: a failed hand-off note does not make an in-place rewrite terminal')
+handlers.clear()
+// The step that ends a turn is always owed when the turn ends, and the panel posts right then --
+// against a delegated conversation that is already disposed. "unknown session" is a liveness
+// accident, not a verdict on the rewrite, so the engine still settles it on the next pre-step.
+const failedId = 'failed-note-1'
+const store76 = new SidecarStore()
+const engine76 = new ReasoningDistillEngine(ctx as never, makeConfig({ rewriteBackend: { get: () => 'in-place' } }) as never, store76)
+engine76.start()
+const session76 = new FakeSession(failedId, { cwd: '/tmp', origin: 'subagent', delegationDepth: 1, createdAt: 6 })
+const writes76: Array<{ text?: string; seq?: number }> = []
+;(session76 as unknown as { rewriteReasoningBlock: (request: { text: string; seq: number }) => unknown }).rewriteReasoningBlock = function (request) {
+  writes76.push(request)
+  return { type: 'assistant/message' }
+}
+const target76 = session76.append('assistant/message', {
+  turn: 1, step: 2,
+  message: { id: 'm-76', role: 'assistant', content: [{ type: 'reasoning', text: 'y'.repeat(50) }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
+  stream: [],
+}).seq
+await store76.update(failedId, record => {
+  record.entries.push({
+    id: 'e-76', targetSeq: target76, targetMessageId: 'm-76', targetBlockIndex: 0, turn: 1, step: 2,
+    provider: 'deepseek-official', model: 'deepseek-flash', originalChars: 50, originalTokens: 12,
+    distilledText: 'settled', distilledChars: 7, distilledTokens: 3, savedTokensPerRequest: 9,
+    distill: { sessionId: '', requestText: '', responseText: '', inputTokens: 0, outputTokens: 0, cost: 0, startedAt: 0, finishedAt: 0, provider: '', model: '' },
+    cacheBreakTokens: 0, cacheBreakCost: 0, liveSaved: 0, appliedAt: 1,
+    handoff: { state: 'failed', error: 'unknown session', at: 2 },
+  } as never)
+})
+await fire('session/created', session76)
+await fire('agent/pre-step', { agent: { session: session76 } }, async () => undefined)
+check('a rewrite the panel recorded as failed is still settled once the conversation is live',
+  writes76.length === 1 && writes76[0]?.text === 'settled', JSON.stringify(writes76))
+const settled76 = (await store76.load(failedId)).entries[0]
+check('and the note that it failed is gone, because it no longer has',
+  settled76?.inPlaceApplied !== undefined && settled76?.handoff === undefined,
+  JSON.stringify({ inPlaceApplied: settled76?.inPlaceApplied, handoff: settled76?.handoff }))
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
