@@ -3,4 +3,5 @@ __pycache__/
 test/dist/
 *.log
 .DS_Store
-lib/
+/lib/
+# scripts/lib is source, not build output: the ignore above is anchored to the package root on purpose.
