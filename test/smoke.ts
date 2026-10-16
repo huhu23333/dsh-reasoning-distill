@@ -100,7 +100,7 @@ class FakeSession {
   readonly nodes: number[] = []
   constructor(
     readonly id: string,
-    readonly header: { cwd?: string; origin?: 'subagent'; delegationDepth?: number } = { cwd: '/tmp' },
+    readonly header: { cwd?: string; origin?: 'subagent'; delegationDepth?: number; createdAt?: number } = { cwd: '/tmp' },
   ) {}
 
   get seq(): number { return this.log.length }
@@ -2501,6 +2501,40 @@ check('a message without reasoning says so',
   (await runDecision('dec-none', { cwd: '/tmp' }, {}, {}, '   ')) === 'no-reasoning')
 check('and a step that did trigger leaves no decision behind',
   (await runDecision('dec-ok', { cwd: '/tmp' }, {}, {}, fatReasoning)) === undefined)
+console.log('scenario 74: a delegated conversation keeps its generation across its turns')
+handlers.clear()
+const engine74 = new ReasoningDistillEngine(ctx as never, makeConfig({ rewriteBackend: { get: () => 'in-place' } }) as never, new SidecarStore())
+engine74.start()
+// A delegated conversation is disposed and entered again per turn; the host writes the creation
+// stamp on its header, so the plugin can tell "the same conversation, a new object" from "a
+// cleared conversation that reused the id".
+const stamp = (createdAt: number) => ({ cwd: '/tmp', origin: 'subagent' as const, delegationDepth: 1, createdAt })
+const turnOne74 = new FakeSession('reenter-1', stamp(700))
+await fire('session/created', turnOne74)
+const generation74 = engine74.snapshot('reenter-1').generation
+await fire('session/disposed', turnOne74)
+check('disposing a conversation does not invalidate it while it may return',
+  engine74.snapshot('reenter-1').generation === generation74 && engine74.snapshot('reenter-1').generation === 1,
+  String(engine74.snapshot('reenter-1').generation))
+const turnTwo74 = new FakeSession('reenter-1', stamp(700))
+await fire('session/created', turnTwo74)
+check('and entering it again restores the generation its running work captured',
+  engine74.snapshot('reenter-1').generation === generation74 && engine74.sessionFor('reenter-1') === turnTwo74,
+  JSON.stringify({ generation74, now: engine74.snapshot('reenter-1').generation }))
+// The conservative half has to survive: an id reused by a *different* conversation still starts a
+// new generation, so work from the old one can never land in the new one's record.
+const cleared74 = new FakeSession('reenter-1', stamp(999))
+await fire('session/disposed', turnTwo74)
+await fire('session/created', cleared74)
+check('a cleared conversation reusing the id still starts a new generation',
+  engine74.snapshot('reenter-1').generation > generation74, String(engine74.snapshot('reenter-1').generation))
+// A header with no creation stamp keeps the old rule: nothing can prove it is the same conversation.
+const headless74 = new FakeSession('headless-1', { cwd: '/tmp' })
+await fire('session/created', headless74)
+const headlessGen = engine74.snapshot('headless-1').generation
+await fire('session/disposed', headless74)
+check('a session whose header carries no stamp is still invalidated by disposal',
+  engine74.snapshot('headless-1').generation === headlessGen + 1, String(engine74.snapshot('headless-1').generation))
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

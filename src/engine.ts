@@ -132,6 +132,20 @@ export class ReasoningDistillEngine {
    * answerable without reading a terminal.
    */
   private readonly lastDecision = new Map<string, { at: number; turn: number; step: number; reason: string }>()
+
+  /**
+   * Conversation identity last seen for one id: its session id plus the header's creation stamp.
+   *
+   * A delegated (subagent) conversation is disposed and entered again as its turns run, so the host
+   * hands this plugin a new Session object for the *same* conversation repeatedly. The generation
+   * exists so one conversation's work cannot land in a different one that reused the id, so it has to
+   * follow the conversation rather than the object: an object swap that keeps this identity is the
+   * same conversation and must not invalidate work already running for it.
+   */
+  private readonly conversationOf = new Map<string, string>()
+
+  /** Generation an id held when its conversation was disposed, so a re-entry can restore it. */
+  private readonly disposedAt = new Map<string, { identity: string; generation: number }>()
   /**
    * Sessions whose record cannot be read right now. Distillation is skipped for
    * them rather than spending money on a result that could not be stored; every
@@ -586,10 +600,20 @@ export class ReasoningDistillEngine {
     const attached = this.current.get(session.id)
     if (attached !== undefined && attached !== session) return
     this.current.delete(session.id)
-    // Disposal itself invalidates the generation: work already running for this id
-    // captured the old number, so its continuations (accounting, compaction,
-    // compression, hand-off) all stop writing even if the id is never reused.
-    this.generation.set(session.id, (this.generation.get(session.id) ?? 0) + 1)
+    // Disposal invalidates the generation: work already running for this id captured the old number,
+    // so its continuations (accounting, compaction, compression, hand-off) stop writing. A delegated
+    // conversation is disposed and entered again every turn, though, and killing its work at each
+    // turn boundary is exactly what made a subagent compress only its first step. So the bump is
+    // *deferred*: the identity is remembered here and a re-entry of the same conversation restores
+    // the number, while a different conversation reusing the id still bumps because its identity
+    // does not match.
+    const identity = conversationIdentity(session)
+    if (identity === undefined) {
+      // Nothing to recognize a re-entry by (an older header): keep the conservative rule.
+      this.generation.set(session.id, (this.generation.get(session.id) ?? 0) + 1)
+    } else {
+      this.disposedAt.set(session.id, { identity, generation: this.generation.get(session.id) ?? 0 })
+    }
     this.ownSessions.delete(session.id)
     this.sessionKind.delete(session.id)
     this.releaseSession(session.id)
@@ -742,12 +766,25 @@ export class ReasoningDistillEngine {
   private attach(session: Session): void {
     if (this.wrapped.has(session)) return
     this.wrapped.add(session)
-    // A session object is attached once, but the *id* can come back (a cleared or
-    // re-created conversation). Everything keyed by that id belongs to the
-    // previous generation, and a later compression must not write into the new
-    // one's record or block its requests.
-    this.generation.set(session.id, (this.generation.get(session.id) ?? 0) + 1)
-    this.releaseSession(session.id)
+    // A session object is attached once, but the *id* can come back: either the same conversation
+    // entered again (a delegated turn does exactly that) or a cleared/re-created conversation that
+    // reuses the id. Everything keyed by that id belongs to the previous *conversation*, and a later
+    // compression must not write into a different one's record or block its requests -- so the
+    // generation follows the conversation, not the object.
+    const identity = conversationIdentity(session)
+    const returned = identity === undefined ? undefined : this.disposedAt.get(session.id)
+    const same = identity !== undefined
+      && (this.conversationOf.get(session.id) === identity || returned?.identity === identity)
+    if (same) {
+      // Entered again: restore the generation the conversation had before its disposal, so work
+      // already running for it stays valid, and keep the id's state instead of releasing it.
+      if (returned?.identity === identity) this.generation.set(session.id, returned.generation)
+    } else {
+      this.generation.set(session.id, (this.generation.get(session.id) ?? 0) + 1)
+      this.releaseSession(session.id)
+    }
+    this.disposedAt.delete(session.id)
+    if (identity !== undefined) this.conversationOf.set(session.id, identity)
     this.current.set(session.id, session)
     const original = session.deriveMessages.bind(session)
     const engine = this
@@ -1432,8 +1469,12 @@ export class ReasoningDistillEngine {
       await this.clearUnusableBackend('the host patch is not applied on this host')
       return { ok: false, error: 'the host patch is not applied on this host' }
     }
-    const record = this.store.peek(sessionId)
-    const entry = record?.entries.find(item => item.targetSeq === eventSeq && item.targetBlockIndex === blockIndex)
+    // Load the record when the cache does not hold it: a delegated conversation is disposed and
+    // entered again between its turns, its cached record goes with the disposal, and refusing a
+    // recorded rewrite because this process happened not to have the file loaded yet left the
+    // reasoning unrewritten while the panel had already given up on it.
+    const record = this.store.peek(sessionId) ?? await this.store.load(sessionId)
+    const entry = record.entries.find(item => item.targetSeq === eventSeq && item.targetBlockIndex === blockIndex)
     if (entry === undefined) return { ok: false, error: 'no recorded rewrite for that event and block' }
     if (entry.targetMessageId === '') return { ok: false, error: 'the recorded rewrite carries no message id' }
     try {
@@ -2727,6 +2768,21 @@ function branchSignal(timeoutMs: number, turn?: AbortSignal): { signal?: AbortSi
 function reasoningBlockIndexOf(content: readonly ContentBlock[] | undefined): number {
   if (content === undefined) return -1
   return content.findIndex(block => block.type === 'reasoning' && typeof (block as { text?: string }).text === 'string')
+}
+
+/**
+ * Identity of the *conversation* a session object belongs to, or undefined when it cannot be told.
+ *
+ * The session id alone is not enough: an id can be reused by a cleared or re-created conversation.
+ * The creation stamp the host writes on the header is what separates the two, so a header without one
+ * (older logs, a test double) deliberately yields undefined and keeps the conservative behaviour.
+ * @param session - session object to identify.
+ * @returns `id#createdAt`, or undefined when the header carries no creation stamp.
+ */
+function conversationIdentity(session: { id: string; header: unknown }): string | undefined {
+  const createdAt = (session.header as { createdAt?: unknown } | undefined)?.createdAt
+  if (typeof createdAt !== 'number') return undefined
+  return `${session.id}#${createdAt}`
 }
 
 function withinDepth(depth: number, maxDepth: number): boolean {

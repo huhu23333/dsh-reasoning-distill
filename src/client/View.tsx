@@ -437,9 +437,9 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
         </div>)}
       </section>}
       <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}
-        {/* "Why did nothing happen" is the one question an empty ledger cannot answer from the
-            entries alone, so the engine's last decision is shown while there is nothing else. */}
-        {report.entries.length === 0 && report.lastDecision != null && <p className={css.muted}>{t('view.notTriggered')}: {report.lastDecision.turn}/{report.lastDecision.step} · {t(`view.why.${report.lastDecision.reason}` as Key)}</p>}
+        {/* "Why did nothing happen" is the one question the entries cannot answer, and it stays
+            worth asking after an earlier step did compress. */}
+        {report.lastDecision != null && <p className={css.muted}>{t('view.notTriggered')}: {report.lastDecision.turn}/{report.lastDecision.step} · {t(`view.why.${report.lastDecision.reason}` as Key)}</p>}
         {report.entries.map(entry => <Entry key={entry.id} entry={entry} sessionId={report.sessionId} t={t} liveStockIds={report.stockIds} />)}</section>
       <section className={css.section}><h3>{t('view.sessions')}</h3>{report.entries.map(entry => <SessionRow key={entry.id} entry={entry} t={t} openSession={openSession} />)}</section>
     </>}
