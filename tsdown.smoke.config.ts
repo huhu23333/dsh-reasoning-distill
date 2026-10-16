@@ -1,6 +1,6 @@
 /**
- * Offline smoke-test bundle: bundles `test/smoke.ts` with the two host packages
- * aliased to local stubs, so the engine can run under plain Node without the
+ * Offline smoke-test bundle: bundles `test/smoke.ts` with the host packages it
+ * touches aliased to local stubs, so the engine can run under plain Node without the
  * DSH runtime. Test-only; never shipped.
  * @module dsh-reasoning-distill/tsdown.smoke.config
  */
@@ -24,6 +24,9 @@ export default {
   sourcemap: false,
   alias: {
     '@deepseek-ai/dsh-llm': stub('dsh-llm.ts'),
+    // The session package is aliased too: the host-patch self-check imports the class at runtime,
+    // and without a stub the bundle would pull the real host build (and its cordis graph) in.
+    '@deepseek-ai/dsh-session': stub('dsh-session.ts'),
     '@deepseek-ai/schemastery': stub('schemastery.ts'),
   },
   deps: {

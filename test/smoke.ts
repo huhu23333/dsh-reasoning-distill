@@ -22,7 +22,7 @@ const { apply: applyPlugin, inject: requiredServices } = await import('../src/in
 const { SidecarStore, dshHome, legacySidecarPath, sidecarPath } = await import('../src/store.ts')
 const { buildReport } = await import('../src/report.ts')
 const { registerRoutes } = await import('../src/route.ts')
-const { HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE } = await import('../src/shared.ts')
+const { HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE } = await import('../src/shared.ts')
 const { InstallRunner } = await import('../src/install.ts')
 const { INSTALLABLE_BACKENDS, INSTALL_STEPS } = await import('../src/install-shared.ts')
 const { DEFAULT_RULE, resolveRule } = await import('../src/config.ts')
@@ -818,7 +818,7 @@ async function runKind(
   header: { cwd?: string; origin?: 'subagent'; delegationDepth?: number },
   ruleOverrides: Record<string, unknown>,
   descriptor?: 'one-shot' | 'continuable',
-  backend = 'placeholder',
+  backend = 'in-place',
   models: Record<string, unknown> = {},
 ): Promise<number> {
   // One engine per case, observing alone: production has a single plugin
@@ -827,8 +827,8 @@ async function runKind(
   const store = new SidecarStore()
   const engine = new ReasoningDistillEngine(
     ctx as never,
-    // The kind switches are the subject here, so these cases select the in-place slot: a branch
-    // backend pins both subagent kinds off (below), which would mask every assertion here.
+    // The kind switches are the subject here, so these cases select the built-in in-place backend:
+    // a branch backend pins both subagent kinds off (below), which would mask every assertion here.
     makeConfig({
       defaultRule: { get: () => kindRule(ruleOverrides) },
       models: { get: () => models },
@@ -2253,6 +2253,140 @@ const ended70 = first70.ok ? JSON.stringify(first70.job) : ''
 children70[0]!.line('##STEP verify')
 children70[0]!.exit(0)
 check('late lines and duplicate exit cannot change a terminal job', first70.ok && JSON.stringify(first70.job) === ended70)
+
+console.log('scenario 71: the built-in in-place backend, its route, and the missing-patch path')
+let rewriteHandler: ((request: Request) => Promise<Response>) | undefined
+const patchState = { patched: true, functional: true }
+const claimedRewrites: Array<Record<string, unknown>> = []
+let applyResult: { ok: true; seq: number } | { ok: false; error: string } = { ok: true, seq: 2 }
+const rewriteContext = {
+  ...coldContext,
+  connection: { fetch: { register: (route: { path: string; fetch: (request: Request) => Promise<Response> }) => {
+    if (route.path === REWRITE_ROUTE) rewriteHandler = route.fetch
+    return async () => undefined
+  } } },
+  // coldContext's own inject hands the callback back to coldContext, whose connection is a
+  // different one; the rewrite route has to register against this one.
+  inject: (_deps: string[], callback: (child: unknown) => void) => callback(rewriteContext),
+}
+const rewriteEngine = {
+  snapshot: () => ({ active: [], blockingSince: null, blockingReason: null, pendingBranch: null, generation: 0 }),
+  stock: () => undefined,
+  handoff: async () => ({ ok: true, recorded: true }),
+  hostPatchStatus: () => ({ ...patchState }),
+  applyInPlace: async (request: Record<string, unknown>) => { claimedRewrites.push(request); return applyResult },
+}
+registerRoutes(rewriteContext as never, makeConfig(), new SidecarStore(), rewriteEngine as never, coldRunner)
+
+const verdict71 = await rewriteHandler?.(new Request('http://localhost/api/rewrite'))
+const verdictBody71 = verdict71 === undefined ? undefined : await verdict71.json() as { patched: boolean; functional: boolean }
+check('the rewrite route reports the host patch verdict on GET',
+  verdict71?.status === 200 && verdictBody71?.patched === true && verdictBody71?.functional === true,
+  JSON.stringify(verdictBody71))
+const probe71 = await rewriteHandler?.(new Request('http://localhost/api/rewrite', { method: 'POST', body: JSON.stringify({ probe: true }) }))
+const probeBody71 = probe71 === undefined ? undefined : await probe71.json() as { patched: boolean; functional: boolean }
+check('the chooser probe is answered with the same verdict and applies nothing',
+  probe71?.status === 200 && probeBody71?.patched === true && claimedRewrites.length === 0,
+  JSON.stringify({ probeBody71, applied: claimedRewrites.length }))
+const applied71 = await rewriteHandler?.(new Request('http://localhost/api/rewrite', { method: 'POST', body: JSON.stringify({ sessionId: 's-1', eventSeq: 2, blockIndex: 0, text: 'short' }) }))
+const appliedBody71 = applied71 === undefined ? undefined : await applied71.json() as { ok: boolean; eventSeq: number }
+check('a rewrite request reaches the engine and answers with the seq it wrote',
+  applied71?.status === 200 && appliedBody71?.ok === true && appliedBody71?.eventSeq === 2
+  && claimedRewrites[0]?.['sessionId'] === 's-1' && claimedRewrites[0]?.['eventSeq'] === 2
+  && claimedRewrites[0]?.['blockIndex'] === 0 && claimedRewrites[0]?.['text'] === 'short',
+  JSON.stringify({ appliedBody71, claimedRewrites }))
+applyResult = { ok: false, error: 'no recorded rewrite for that event and block' }
+const refused71 = await rewriteHandler?.(new Request('http://localhost/api/rewrite', { method: 'POST', body: JSON.stringify({ sessionId: 's-1', eventSeq: 9, blockIndex: 0, text: 'x' }) }))
+const refusedBody71 = refused71 === undefined ? undefined : await refused71.json() as { ok: boolean; error: string }
+check('an engine refusal is reported as a refusal, not as success',
+  refused71?.status === 400 && refusedBody71?.ok === false && refusedBody71.error.length > 0,
+  JSON.stringify(refusedBody71))
+patchState.patched = false
+patchState.functional = false
+const unpatched71 = await rewriteHandler?.(new Request('http://localhost/api/rewrite', { method: 'POST', body: JSON.stringify({ sessionId: 's-1', eventSeq: 2, blockIndex: 0, text: 'x' }) }))
+const unpatchedBody71 = unpatched71 === undefined ? undefined : await unpatched71.json() as { ok: boolean; patched: boolean }
+check('an unpatched host refuses the rewrite and says why, without reaching the engine',
+  unpatched71?.status === 503 && unpatchedBody71?.ok === false && unpatchedBody71.patched === false
+  && claimedRewrites.length === 2,
+  JSON.stringify({ unpatchedBody71, applied: claimedRewrites.length }))
+patchState.patched = true
+patchState.functional = true
+
+// The engine half: the recorded message id picks the target, and a host that lost the patch has
+// its selection cleared the moment that is discovered.
+const rewritesSeen: Array<Record<string, unknown>> = []
+const patchSession = new FakeSession('s-inplace', { cwd: '/tmp' })
+// The receiver matters: the real entry point reads `this.log`, `this.surfaceManager` and
+// `this.rewriteSink`, so a version that extracted the method without binding it would throw here
+// exactly as it did on a live host (the self-check reported patched:true, functional:false).
+;(patchSession as unknown as { rewriteReasoningBlock: (this: { id: string }, request: Record<string, unknown>) => unknown }).rewriteReasoningBlock = function (request) {
+  if (typeof this?.id !== 'string') throw new TypeError('rewriteReasoningBlock lost its receiver')
+  rewritesSeen.push({ ...request, session: this.id })
+  return { type: 'assistant/message' }
+}
+const inPlaceSessions = new Map<string, FakeSession>([[patchSession.id, patchSession]])
+class InPlaceStore extends SidecarStore {
+  override peek(id: string): SessionRecord | undefined {
+    if (id !== 's-inplace') return super.peek(id)
+    return { entries: [{ id: 'e-1', targetSeq: 2, targetBlockIndex: 0, targetMessageId: 'm-2' }], countedThroughSeq: 0 } as unknown as SessionRecord
+  }
+}
+const inPlaceEngine = new ReasoningDistillEngine(
+  { ...ctx, sessions: { ...ctx.sessions, get: (id: string) => inPlaceSessions.get(id) } } as never,
+  makeConfig({ rewriteBackend: { get: () => 'in-place' } }) as never,
+  new InPlaceStore(),
+)
+const appliedInPlace = await inPlaceEngine.applyInPlace({ sessionId: 's-inplace', eventSeq: 2, blockIndex: 0, text: 'short' })
+check('the engine rewrites through the host entry point, with the message id the ledger recorded',
+  appliedInPlace.ok === true && appliedInPlace.seq === 2 && rewritesSeen.length === 1
+  && rewritesSeen[0]?.['messageId'] === 'm-2' && rewritesSeen[0]?.['seq'] === 2
+  && rewritesSeen[0]?.['blockIndex'] === 0 && rewritesSeen[0]?.['text'] === 'short'
+  && rewritesSeen[0]?.['session'] === 's-inplace',
+  JSON.stringify({ appliedInPlace, rewritesSeen }))
+// The extraction itself, pinned: the returned callable keeps the session it came from, and an
+// unpatched host yields nothing at all.
+const { rewriteEntryPoint } = await import('../src/host-patch.ts')
+const receiver71 = {
+  calls: 0,
+  rewriteReasoningBlock(this: { calls: number }, _request: unknown): unknown {
+    this.calls += 1
+    return { type: 'assistant/message' }
+  },
+}
+const bound71 = rewriteEntryPoint(receiver71)
+bound71?.({ seq: 0 as never, messageId: 'm', blockIndex: 0, text: 'x' })
+check('an extracted host entry point keeps the session as its receiver', receiver71.calls === 1)
+check('and a host without the entry point yields none',
+  rewriteEntryPoint({}) === undefined && rewriteEntryPoint(undefined) === undefined && rewriteEntryPoint(null) === undefined)
+const unknownSession71 = await inPlaceEngine.applyInPlace({ sessionId: 'nope', eventSeq: 2, blockIndex: 0, text: 'short' })
+const noRecord71 = await inPlaceEngine.applyInPlace({ sessionId: 's-inplace', eventSeq: 7, blockIndex: 0, text: 'short' })
+const emptyText71 = await inPlaceEngine.applyInPlace({ sessionId: 's-inplace', eventSeq: 2, blockIndex: 0, text: '' })
+const badIndex71 = await inPlaceEngine.applyInPlace({ sessionId: 's-inplace', eventSeq: 2, blockIndex: -1, text: 'short' })
+check('every refusal path answers with a reason and never calls the host',
+  unknownSession71.ok === false && noRecord71.ok === false && emptyText71.ok === false && badIndex71.ok === false
+  && rewritesSeen.length === 1,
+  JSON.stringify({ unknownSession71, noRecord71, emptyText71, badIndex71 }))
+const bareSession71 = new FakeSession('s-bare', { cwd: '/tmp' })
+const bareSessions71 = new Map<string, FakeSession>([[bareSession71.id, bareSession71]])
+const bareFixups71: Record<string, unknown>[] = []
+const bareEngine71 = new ReasoningDistillEngine(
+  { ...ctx, sessions: { ...ctx.sessions, get: (id: string) => bareSessions71.get(id) } } as never,
+  makeConfig({ rewriteBackend: { get: () => 'in-place' } }) as never,
+  new SidecarStore(),
+)
+bareEngine71.useSettingsWriter(async fixup => { bareFixups71.push(fixup as unknown as Record<string, unknown>) })
+const bareResult71 = await bareEngine71.applyInPlace({ sessionId: 's-bare', eventSeq: 2, blockIndex: 0, text: 'short' })
+check('a host that lost the patch refuses and clears the selection, switch included',
+  bareResult71.ok === false && bareFixups71.length === 1 && bareFixups71[0]?.['rewriteBackend'] === ''
+  && bareFixups71[0]?.['enabled'] === false,
+  JSON.stringify({ bareResult71, bareFixups71 }))
+
+const installInPlace71 = await installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'start', backendId: 'in-place' }) }))
+const installInPlaceBody71 = installInPlace71 === undefined ? undefined : await installInPlace71.json() as { job?: { backendId?: string } }
+check('the quick-install route accepts the built-in backend',
+  installInPlace71?.status === 200 && installInPlaceBody71?.job?.backendId === 'in-place',
+  JSON.stringify(installInPlaceBody71))
+installHandler?.(new Request('http://localhost/api/install', { method: 'POST', body: JSON.stringify({ action: 'cancel' }) }))
 
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)

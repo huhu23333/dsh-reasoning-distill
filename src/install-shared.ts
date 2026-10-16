@@ -64,7 +64,9 @@ export interface InstallStatus {
  * The steps the scripted `message-edit` install reports.
  *
  * Ordered: the runner marks a step running when its marker arrives, so an install
- * that dies half way leaves the later steps pending and the panel honest.
+ * that dies half way leaves the later steps pending and the panel honest. One list serves every
+ * backend, and a backend with nothing to do for a step reports that step done rather than skipping
+ * it: the in-place install has no companion package, so its `install` step says exactly that.
  */
 export const INSTALL_STEPS: readonly { id: string; label: string }[] = [
   { id: 'resolve', label: '定位 DSH checkout 与 profile' },
@@ -76,12 +78,13 @@ export const INSTALL_STEPS: readonly { id: string; label: string }[] = [
 /**
  * Backends the quick-install page lists.
  *
- * Only a backend the page can actually install belongs here: the in-place slot in
- * {@link REWRITE_BACKENDS} is a placeholder with nothing to install, so it is deliberately
- * absent and the route refuses it like any other id it does not know.
+ * Both are installable, and each installs what it actually needs: `message-edit` is a companion
+ * package the page adds to the profile and then patches, while `in-place` is this plugin's own
+ * backend whose entire prerequisite is a patch to the host, so its quick install *is* that patch.
  */
 export const INSTALLABLE_BACKENDS: readonly InstallableBackend[] = [
   { id: 'message-edit' },
+  { id: 'in-place' },
 ]
 
 /** The installable entry for one backend id, when the page knows it. */
@@ -100,6 +103,31 @@ export function installableBackend(id: string): InstallableBackend | undefined {
  * @returns the prompt text.
  */
 export function installPromptFor(backendId: string, repo: string): string {
+  if (backendId === 'in-place') {
+    return [
+      '请为这台机器上的 DSH 打上「原位改写」后端的宿主补丁：这个后端内置在本插件里，安装就是打补丁，不需要安装任何伴随包。',
+      '',
+      '宿主源码位置因机器而异，**不要假设任何目录布局**：补丁脚本自己定位，你只需要执行它。',
+      '',
+      `第一步先读 ${repo}/README.md 的「内置原位后端（in-place）与宿主补丁」一节，那里有这 14 处编辑改了什么、以及怎么回退。`,
+      '',
+      `定位（只打印，不改任何文件）：node ${repo}/scripts/dsh-inplace-patch.mjs --locate`,
+      `打补丁并校验构建：node ${repo}/scripts/dsh-inplace-patch.mjs --apply --build`,
+      `复核：node ${repo}/scripts/dsh-inplace-patch.mjs --check（打全输出 PATCHED，未打输出 NOT PATCHED 且退出码 1）`,
+      '',
+      '定位顺序：--checkout > $DSH_HOST_CHECKOUT > $DSH_CHECKOUT > 从当前工作目录向上找到第一个含 packages/core/session/src/surface.ts 的目录 > 从 @deepseek-ai/dsh-session 反解出的包目录向上找。全部找不到时会列出试过哪些路径并退出 1 —— 这时请用 `--checkout <这台机器上 DSH 源码的实际目录>` 重跑，不要猜、也不要把路径写死进任何文件。',
+      '',
+      '脚本的行为契约：逐条字面编辑，任何一处锚点对不上就整体拒绝、不做部分写入；写入失败回滚；目标文件里有**别人**的未提交改动就拒绝（--force 可越过，但除非你确认那正是修复所需，否则不要用）。',
+      '',
+      '硬性要求：',
+      '1. 不要手工编辑宿主源码：只通过该脚本打补丁，这样 --revert 才能逐字节回到 HEAD。',
+      '2. 想验证「改动扛得住重启」，按脚本头部说明把 probe-inplace-durability.mjs 复制进 checkout 运行（它用临时目录，不留残留）。',
+      '3. 需要重启「dsh web」才生效：**不要自己重启**，把命令写进报告让用户执行。',
+      '4. 最后给出报告：--locate 定位到的 checkout、--check 前后输出、tsc -b 是否通过、哪些假定没被证实、以及用户下一步该做什么。',
+      '',
+      `回退：node ${repo}/scripts/dsh-inplace-patch.mjs --revert --build`,
+    ].join('\n')
+  }
   return [
     `请在本工作区里安装并接入 DSH 的「助手消息改写后端」：${backendId}。`,
     '',

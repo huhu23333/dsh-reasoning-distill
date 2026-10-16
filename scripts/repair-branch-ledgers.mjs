@@ -15,13 +15,14 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { checkoutFromArgv, dshHome } from './lib/dsh-paths.mjs';
 
 const apply = process.argv.includes('--apply');
 const argOf = (flag, fallback) => {
   const at = process.argv.indexOf(flag);
   return at >= 0 && process.argv[at + 1] !== undefined ? process.argv[at + 1] : fallback;
 };
-const home = argOf('--home', process.env.DSH_HOME ?? path.join(os.homedir(), '.dsh'));
+const home = argOf('--home', dshHome());
 const ledgerDir = path.join(home, 'reasoning-distill');
 const sessionsRoot = path.join(home, 'sessions');
 

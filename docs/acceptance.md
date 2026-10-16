@@ -14,25 +14,27 @@
 
 | 设置项 | 默认 | 含义 | 影响 |
 |---|---|---|---|
-| 启用思考压缩（`enabled`） | 关（默认） | 插件总开关。关闭后不再有任何蒸馏调用 | **未选择改写后端时被强制关闭并置灰**（面板、引擎、报告三处一致）；选择后端后解锁，是否打开由你决定；**存的后端本版本不认识 / 是占位条目 / 其插件不在 profile 的已启用清单里时，宿主在启动后第一次 pre-step 会清空该选择并把它写成关**（见三、E.0） |
+| 启用思考压缩（`enabled`） | 关（默认） | 插件总开关。关闭后不再有任何蒸馏调用 | **未选择改写后端时被强制关闭并置灰**（面板、引擎、报告三处一致）；选择后端后解锁，是否打开由你决定；**存的后端本版本不认识 / 是占位条目 / 其插件不在 profile 的已启用清单里 / 是宿主补丁型而宿主自检明确回答没有补丁时，宿主在启动后第一次 pre-step 会清空该选择并把它写成关**（见三、E.0） |
 
 ### 2. 助手消息改写后端
 
 | 设置项 | 默认 | 含义 |
 |---|---|---|
-| 助手消息改写后端（`rewriteBackend`，单选） | **空（不选）** | 谁来把蒸馏结果**写回会话历史**。只列出已安装的后端（探针规则见下），未安装的置灰；**占位条目没有探针，因此恒不可选**；点已选中的那行=取消选择 |
+| 助手消息改写后端（`rewriteBackend`，单选） | **空（不选）** | 谁来把蒸馏结果**写回会话历史**。只列出**可用**的后端（探针规则见下），不可用的置灰；**宿主补丁型后端（`in-place`）还要通过宿主补丁自检（`patched` 且 `functional`）才可选**；点已选中的那行=取消选择 |
 | 分支超时（毫秒）（`branchTimeoutMs`） | **0** | 宿主等待**分支型**后端建好分支的时限；**0 = 永不超时**。仅选中分支型后端时可编辑，否则置灰 |
 
-两个后端条目及其契约（第二个是**占位**，没有实现）：
+两个后端条目及其契约：
 
 | id | 前置插件 | 请求 | 语义 | 谁来调用 |
 |---|---|---|---|---|
 | `message-edit` | `dsh-message-edit`（或 `@yunyv/dsh-message-edit`） | `POST /message-edit {action:'splice', sessionId, eventSeq, blockIndex, text}`（`edit` 会丢工具调用与后续步骤，故不用） | **另开分支会话**（新版本，原会话不动） | **宿主**（`127.0.0.1:<webServer.port>`，无需浏览器凭据）→ 在 `agent/pre-step` 内提交；成功后当前回合被 reject、由新分支接管，失败则原回合正常答复 |
-| `placeholder` | —（无） | —（不发任何请求，`rewriteRequest` 对它返回 undefined） | **无实际内容**：只占住 in-place 那个槽位，将来接真后端时改这一条 | —（无从调用：没有路由、没有插件名，行内显示「占位（尚未实现，不可选）」且恒不可选） |
+| `in-place` | —（无；**由本插件自己的宿主半边提供服务**，前置条件是宿主补丁） | `POST /api/reasoning-distill/rewrite {sessionId, eventSeq, blockIndex, text}`（**消息 id 由宿主从 sidecar 记录里取**，请求体不带） | **就地改写日志本身**：同一个 seq、同一条消息就地换掉 reasoning 块，日志长度与所有 seq 不变 | **面板/常驻芯片**（该路由在 `/api/*` 后面，需要浏览器凭据）→ 应用后调用 `handoff {cancel:false}` |
 
-**安装探测**（界面挂载时对每个**有探针**的后端发一次探针）：**`404` 且响应不是 JSON** 才算"未安装"——已安装的后端连自己的错误（会话不存在、请求体不合法）也是用自己的 JSON 信封回答 404。占位条目没有 `probe`，因此既不发探针也不可能变"已安装"，永远不会被选中。
+**安装探测**（界面挂载时对每个**有探针**的后端发一次探针）：**`404` 且响应不是 JSON** 才算"未安装"——已安装的后端连自己的错误（会话不存在、请求体不合法）也是用自己的 JSON 信封回答 404。**宿主补丁型后端多一道**：`in-place` 的探针打的是本插件自己的路由，能回答只证明插件加载了，所以还要看响应体里的 `{ patched, functional }` 自检，两个都为 `true` 才可选（纯函数 `backendSelectable` / `hostPatchReady`）。
 
-> 此前这里列的后两个后端（`msg-edit` / `context-shaping`）都是未验证的 in-place 型，已连同它们的契约、安装条目、文案、打包脚本与 vendor 产物一起移除；in-place **机制**（前端写回驱动、认领标记、`handoff {cancel:false}`）保留在代码里，只是当前没有真实后端可驱动。
+> 此前这里列的后两个后端（`msg-edit` / `context-shaping`）都是未验证的 in-place 型，已连同它们的契约、安装条目、文案、打包脚本与 vendor 产物一起移除；in-place **机制**（前端写回驱动、认领标记、`handoff {cancel:false}`）保留在代码里，现在由本插件内置的 `in-place` 后端使用。
+>
+> **内置 `in-place` 的宿主补丁**：补丁给宿主 `Session` 加上 `rewriteReasoningBlock`，并在 `SessionHandle` 上加上可选的 `rewrite`（append-only 的事件流表达不了「原地替换」，jsonl 侧以「整份重新编码 + 原子替换」落地）。`--apply` / `--check` / `--revert` 由 `scripts/dsh-inplace-patch.mjs` 一条命令负责：逐条字面编辑、锚点对不上就整体拒绝、脏文件守卫只放过本补丁自己写脏的文件。**落盘实验**（`scripts/probe-inplace-durability.mjs`）证明改 → flush → 换新 Context 读回拿到的是改写后的文本（`none` / `zstd` 都跑过）。**语义变化**：原 reasoning **不再留在日志里**，审计只能依赖 sidecar 的 `distill.requestText` / `distill.responseText`。
 
 ### 3. 默认规则 / 逐模型规则（同一组字段）
 
@@ -156,14 +158,14 @@
 5. **内容指纹**：条目另记**蒸馏来源思考的指纹**（`originalHash` ✓）；同 id、同 seq 下思考被**编辑**后 ✓，该条目**不再替换** ✓（不改写用户的编辑 ✓），下一次请求的判定直接反映出来 ✓。
 
 ### E. 请求前等待与空闲时分支交接（`agent/pre-step`）
-0. **每个进程一次的启动自检**（在任何规则判定之前，与本次是否触发压缩无关）：按 `<profile>/package.json` 的 `dsh.profile.bundles`（经 `profileContext.dir` 定位）判断存的那个后端还能不能用——只读 `bundles` 不读 `dependencies`，因为后者里的包可能只是装了但没启用、不提供路由；宿主够不到后端路由（`/api/*` 要浏览器凭据，宿主自己问只有 401），所以宿主侧只能看这份清单加上自己的注册表。**用不了**有三种（纯函数 `backendUnusable`）：① 该 id **本版本不认识**（被删掉的后端、别的版本写的值）；② 该 id 是**占位条目**（没有实现，且它那行是禁用的，面板自己清不掉，只有宿主能清）；③ 它登记了插件名而清单里没有。此时：打一条 warn，并**写一次**设置（`settings.update('reasoning-distill', …)`，与面板保存同一条路径、同样落盘）——**清空选定后端 `rewriteBackend: ''`**，总开关仍为开则**同时**写 `enabled: false`，已关则只清空选择（`missingBackendFixup` 纯函数决定这组字段；选中的名字比它依赖的东西活得久）。**读不到清单 → 一律不改配置**（对这个宿主没有任何证据）。「装着但已停用」等同于用不了。自检由 `backendChecked` 保证进程内只跑一次；它排在同步序言（单飞登记与等待上限的计算）之后、本次请求任何规则判定之前。
+0. **每个进程一次的启动自检**（在任何规则判定之前，与本次是否触发压缩无关）：按 `<profile>/package.json` 的 `dsh.profile.bundles`（经 `profileContext.dir` 定位）判断存的那个后端还能不能用——只读 `bundles` 不读 `dependencies`，因为后者里的包可能只是装了但没启用、不提供路由；宿主够不到后端路由（`/api/*` 要浏览器凭据，宿主自己问只有 401），所以宿主侧只能看这份清单加上自己的注册表。**用不了**有四种（纯函数 `backendUnusable`）：① 该 id **本版本不认识**（被删掉的后端、别的版本写的值）；② 该 id 是**占位条目**（没有实现，且它那行是禁用的，面板自己清不掉，只有宿主能清）；③ 它登记了插件名而清单里没有；④ 它是**宿主补丁型**后端而宿主自检**明确回答没有补丁**（`hostPatch === false`）——还没问过时（`undefined`）什么都不动，否则第一次 pre-step 就会把可用配置清掉。宿主补丁型的判定不看清单：它的路由是本插件自己的。此时：打一条 warn，并**写一次**设置（`settings.update('reasoning-distill', …)`，与面板保存同一条路径、同样落盘）——**清空选定后端 `rewriteBackend: ''`**，总开关仍为开则**同时**写 `enabled: false`，已关则只清空选择（`missingBackendFixup` 纯函数决定这组字段；选中的名字比它依赖的东西活得久）。**读不到清单 → 一律不改配置**（对这个宿主没有任何证据）。「装着但已停用」等同于用不了。自检由 `backendChecked` 保证进程内只跑一次；它排在同步序言（单飞登记与等待上限的计算）之后、本次请求任何规则判定之前。
 1. `await ensureLoaded()`：确保记录可读（读不到则本步不压缩）；有限规则的等待也以该规则自己的 `timeoutMs` 为截止（**不加任何宽限**；`ruleBackstopMs()` 取各规则上限的最大值，任一条为 0 即视为不限），重入不重新计时，过期后放行原请求并禁止同一挂起门闩迟到启动。
 2. `await settle()`：**等这次蒸馏彻底结束**（原回合在此期间等待；活动指示器显示原因与已等待时间）。
 3. **分支型后端**：压缩成功后，在**当前 `agent/pre-step` 内**直接向后端提交一次非幂等 POST（`action:'splice'`，等待上限 = `branchTimeoutMs`，0=永不超时）；下一次请求的 `deriveMessages` 替换与建分支成功与否无关：
    - **成功** → 记录 `handoff: created` + `branchId`，面板轮询后**自动打开新分支**；当前回合当场 `return {kind:'reject'}`，后续步骤在新分支里带着压缩后的上下文继续（原回合不重排输入、也不追加合成消息）。
    - **失败/拒绝/超时** → 如实记录 `handoff: failed`（或尚未 POST 前等待耗尽时 `skipped`）；不唤醒、不重发用户输入，**原回合照常继续**；历史重放替换仍生效。另有空闲兜底（`scheduleBranchAtIdle`：宿主暴露 `agent.whenIdle` 时，`whenIdle()` 之后再试一次 POST）——这条路径**是可达的**：`handOffToBranch` 的失败出口只在 generation 未变时才清掉待交接条目，而会话销毁/替换会递增 generation（`forgetSession`），所以交接途中会话被销毁/替换时条目会留下，下一次 `agent/pre-step` 就会触发这个兜底。宿主不暴露 `whenIdle` 时**不在 pre-step 之外补记失败原因**——曾有一个只负责这件事的 `failMissingIdleAgent`，它没有任何调用者，且它要记的原因会与 `handOffToBranch` 已经写下的重复，已作为死代码删除（见审查台账 B14；不是行为差异）。
-   - **宿主边界，非插件缺陷**：分支后端在 `agent/pre-step` 阶段读源会话日志，不需要宿主的 maintenance 阶段，所以分支能在当前回合内就建好——这正是「在 pre-step 内 POST、成功即 reject」这一设计的原因（旧设计「先停回合再建分支」不可达：`runMaintenance` 在源 Agent 非 `idle` 时会直接抛错，`/home/huhu233/otherProject/deepseek-harness/packages/core/agent-loop/src/agent.ts:183-185`）。idle 到领取 maintenance 之间的 Stop 在宿主层是 no-op（`packages/core/agent/src/runtime-types.ts:176-179`），属于已知宿主边界，非本插件能修复。
-4. **就地型后端**（当前只有占位条目，没有实现）：宿主不调（这些端点需要浏览器凭据）→ 由面板在轮询中应用，随后调用 `handoff {cancel:false}` 清标记，**不打断你的回合**（它要发的那次请求已因重放替换而变短）。占位条目发不出请求（`rewriteRequest` 返回 undefined），所以驱动在认领之前就跳过它：既不 POST、也不清标记。
+   - **宿主边界，非插件缺陷**：分支后端在 `agent/pre-step` 阶段读源会话日志，不需要宿主的 maintenance 阶段，所以分支能在当前回合内就建好——这正是「在 pre-step 内 POST、成功即 reject」这一设计的原因（旧设计「先停回合再建分支」不可达：`runMaintenance` 在源 Agent 非 `idle` 时会直接抛错，DSH checkout 的 `packages/core/agent-loop/src/agent.ts:183-185`）。idle 到领取 maintenance 之间的 Stop 在宿主层是 no-op（`packages/core/agent/src/runtime-types.ts:176-179`），属于已知宿主边界，非本插件能修复。
+4. **就地型后端（内置 `in-place`）**：宿主不调（这条路由需要浏览器凭据）→ 由面板/常驻芯片在轮询中应用，随后调用 `handoff {cancel:false}` 清标记，**不打断你的回合**（它要发的那次请求已因重放替换而变短）。应用路径 `engine.applyInPlace` 会**再次确认补丁存在**，并**从 sidecar 记录里取目标消息 id**（调用方只能给 seq 与块下标）；补丁不在了就拒绝，并走与启动自检同一条「清选择 + 关总开关」的写入路径。
 5. 无待办 → `next()` 正常进入模型调用。
 
 ### F. 压缩（宿主 compaction）后的账务
@@ -173,7 +175,7 @@
 ### G. 持久化与接口
 - 每会话一个 sidecar：`<DSH_HOME>/reasoning-distill/<会话 id 净化 + sha256 前 16 位>.json`；原子写、进程内串行队列、单飞读；损坏/无权限 → **暂停付费压缩且不覆盖记录**，但请求派生仍回退到日志原文以保持会话可用，恢复可读后前缀可能再次改变；旧命名记录只有**自证归属**才采纳，损坏的旧文件按"不可读"处理。同一 `$DSH_HOME` 需要单宿主写入：多进程的队列互不协调，后写者可能覆盖先写者的条目。
 - `skipWhileBusy` 只覆盖宿主 job 注册表。`dsh-ops` 的 FastCtx 私有后台作业不在其中，自动分支交接可能让新会话失去这些作业的 output/kill 权限；在这类作业结束前应避免自动分支交接。
-- 路由：`POST /api/reasoning-distill/report`（报告）、`GET /api/reasoning-distill/catalog`（模型目录）、`POST /api/reasoning-distill/handoff`（清交接标记 + 按需停止回合）、`GET|POST /api/reasoning-distill/install`（后端安装：`GET` 读当前作业 / 可安装后端 / 步骤 / 插件目录，`POST` 传 `action:'start'|'cancel'`；安装跑在宿主进程里，关掉页面不中断，见 `src/route.ts:103-134`）。
+- 路由：`POST /api/reasoning-distill/report`（报告）、`GET /api/reasoning-distill/catalog`（模型目录）、`POST /api/reasoning-distill/handoff`（清交接标记 + 按需停止回合）、`GET|POST /api/reasoning-distill/install`（后端安装：`GET` 读当前作业 / 可安装后端 / 步骤 / 插件目录，`POST` 传 `action:'start'|'cancel'`；安装跑在宿主进程里，关掉页面不中断）、`GET|POST /api/reasoning-distill/rewrite`（内置 `in-place` 后端：`GET` 报宿主补丁自检结论，`POST {probe:true}` 用同一结论回答面板探针，`POST {sessionId,eventSeq,blockIndex,text}` 执行一次改写，未打补丁时 503）。
 - 客户端轮询：会话页每 4 秒（并在窗口重新聚焦时）读一次报告；输入框指示器每 2 秒。响应按"已应用的最新序号"排序，慢响应不会丢、旧响应不会覆盖新状态。
 
 ---
@@ -207,6 +209,6 @@
 
 **多 reasoning 块消息不压缩（已知限制）**：重放会把一条消息里的**所有** reasoning 块合并成一条 ✓，而分支型后端一次只替换**一个**块 ✓ → 若压缩多块消息 ✓，分支里会留下**其余原文** ✓（泄漏未压缩内容 ✓，且与报告的节省不符 ✗）。因此本插件**只压缩恰好一条 reasoning 块**的消息 ✓（0 条或 2 条以上都跳过并记日志 ✓）：宁可少压，也绝不制造"重放与分支不一致" ✗。
 
-**后端响应的判定**：就地型后端的响应体形状不统一，因此**缺 `ok` 字段视为成功**、**显式 `ok: false` 视为拒绝**、**非 2xx 一律失败** ✓；失败会记录在条目上并显示，绝不会静默算作完成 ✓。（当前只有占位条目，这段判定留给将来接上的就地后端；`rewriteApplyOutcome` 的纯函数测试仍在。）
+**后端响应的判定**：后端响应体形状不统一，因此**缺 `ok` 字段视为成功**、**显式 `ok: false` 视为拒绝**、**非 2xx 一律失败** ✓；失败会记录在条目上并显示，绝不会静默算作完成 ✓。（内置 `in-place` 返回 `{ok:true,eventSeq}` 或 `{ok:false,error}`，走同一条判定；`rewriteApplyOutcome` 的纯函数测试仍在。）
 
 **就地交接的重载限制**：面板在后端请求结束后、向宿主发送 settle 前，把该次结果按 `${sessionId}:${entryId}` 记入当前标签页的 `sessionStorage`；同标签页重载或视图重新挂载只重试 settle，不重复发送非幂等的后端 POST。此记录不跨独立标签页共享；当 `sessionStorage` 不可用（包括读取属性本身抛错）或被清空时，跳过当前标签页的防重复保护，面板仍继续调用后端并 settle，不会因存储不可用而崩溃；若请求已在后端生效但页面在收到响应并记入存储前中断，结果也仍不可确认。这些情形可能重复发送，后端本身没有幂等键可供消除该风险。

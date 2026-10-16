@@ -12,19 +12,20 @@ import { effectHarness } from './effect-harness.ts'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, stockOfEntry } from '../src/client/View.tsx'
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
-import type { SessionReport } from '../src/shared.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendUnusable, claimRewriteAttempt, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
+import { REWRITE_ROUTE, type SessionReport } from '../src/shared.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendSelectable, backendUnusable, claimRewriteAttempt, hostPatchReady, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
 import { branchBackendBlocksSubagents } from '../src/backends.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { mergeRule, sparseOverride } from '../src/rule.ts'
 import { resolveRule } from '../src/config.ts'
 import { InstallBackendPanel, jobVerdict, stepMark } from '../src/client/InstallBackend.tsx'
-import { installPromptFor, type InstallJob } from '../src/install-shared.ts'
+import { INSTALLABLE_BACKENDS, installPromptFor, type InstallJob } from '../src/install-shared.ts'
+import { en, zh, type Key } from '../src/client/locales.ts'
 
 let failures = 0
 const log: string[] = []
-function check(label: string, ok: boolean): void {
-  log.push(`  ${ok ? 'ok  ' : 'FAIL'} ${label}`)
+function check(label: string, ok: boolean, detail?: string): void {
+  log.push(`  ${ok ? 'ok  ' : 'FAIL'} ${label}${ok || detail === undefined ? '' : ' :: ' + detail}`)
   if (!ok) failures += 1
 }
 
@@ -181,10 +182,11 @@ check('empty text cannot be bridged', rewriteRequest('message-edit', 's', { targ
 check('a session without an id cannot be bridged', rewriteRequest('message-edit', '', { targetSeq: 1, targetBlockIndex: 0 }, 'x') === undefined)
 
 console.log('client: the rewrite backend registry drives the panel')
-check('one backend is offered, plus the in-place slot still waiting for an implementation',
+check('two backends are offered: the verified companion, and the built-in in-place one',
   REWRITE_BACKENDS.length === 2
-  && backendById('message-edit')?.kind === 'branch'
-  && backendById('placeholder')?.kind === 'in-place' && backendById('placeholder')?.placeholder === true)
+  && backendById('message-edit')?.kind === 'branch' && backendById('message-edit')?.hostPatch === undefined
+  && backendById('in-place')?.kind === 'in-place' && backendById('in-place')?.hostPatch === true
+  && backendById('placeholder') === undefined)
 // Detection must not confuse a backend's own 404 ("no such session") with a
 // missing route: the former answers with its JSON envelope.
 // Measured on a live host: a route that does not exist is answered by the web server —
@@ -199,7 +201,7 @@ const absentApi = { status: 401, contentType: 'text/plain', body: 'unauthorized'
 // exactly the case the driver has to survive: owed by kind, and undrivable by request.
 const reportInPlace = {
   sessionId: 'session-seat-1',
-  config: { rewriteBackend: 'placeholder' },
+  config: { rewriteBackend: 'in-place' },
   entries: [
     { id: 'owed-1', targetSeq: 20, turn: 1, step: 1, appliedAt: 1, distilledText: 'Distilled', savedTokensPerRequest: 10, liveRequests: 0, liveSaved: 0, frozenSaved: 0, sessionLive: true, originalChars: 9, distilledChars: 1, originalTokens: 9, distilledTokens: 1, cacheBreakTokens: 0, cacheBreakCost: 0, targetBlockIndex: 0, active: true, provider: 'p', model: 'm', distill: {},  },
     { id: 'done-1', targetSeq: 20, turn: 1, step: 1, appliedAt: 1, distilledText: 'Distilled', savedTokensPerRequest: 10, liveRequests: 0, liveSaved: 0, frozenSaved: 0, sessionLive: true, originalChars: 9, distilledChars: 1, originalTokens: 9, distilledTokens: 1, cacheBreakTokens: 0, cacheBreakCost: 0, targetBlockIndex: 0, active: true, provider: 'p', model: 'm', distill: {}, handoff: { state: 'skipped', at: 1 } },
@@ -235,10 +237,37 @@ check('an empty or unknown id resolves to no backend',
 // startup check reads the profile's active plugin list instead. Only a list that was read *and*
 // lacks the plugin may close the switch down; every weaker answer leaves the user's setting alone.
 const active = ['dsh-base', 'dsh-message-edit']
-check('every backend names the plugin that serves it, except the slot that has no route at all',
-  REWRITE_BACKENDS.filter(backend => backend.placeholder !== true).every(backend => (backend.plugin ?? '') !== '')
-  && REWRITE_BACKENDS.filter(backend => backend.placeholder === true).every(backend =>
-    backend.plugin === undefined && backend.probe === undefined))
+check('a companion backend names its plugin; the built-in one names none but still has a route',
+  REWRITE_BACKENDS.filter(backend => backend.hostPatch !== true).every(backend => (backend.plugin ?? '') !== '')
+  && REWRITE_BACKENDS.filter(backend => backend.hostPatch === true).every(backend =>
+    backend.plugin === undefined && backend.probe?.path === REWRITE_ROUTE))
+// A host-patch backend is drivable only on a patched host, and the answer has to come from the
+// host itself: true opens it, false closes it, and 'not asked yet' leaves it alone.
+check('the built-in backend needs the host patch, and only a real answer closes it',
+  !backendUnusable('in-place', active, true) && backendUnusable('in-place', active, false)
+  && !backendUnusable('in-place', active) && !backendUnusable('in-place', undefined, true))
+check('and the profile list does not decide the built-in backend either way',
+  backendUnusable('in-place', ['nothing-at-all'], true) === false
+  && backendUnusable('in-place', undefined, false) === true)
+check('a companion backend ignores the host-patch verdict',
+  !backendUnusable('message-edit', active, true) && backendUnusable('message-edit', ['dsh-base'], true))
+// The probe verdict: answering proves the plugin is loaded, the body proves the host can rewrite.
+const patchOk = { status: 200, contentType: 'application/json', body: '{"patched":true,"functional":true}' }
+const patchBroken = { status: 200, contentType: 'application/json', body: '{"patched":true,"functional":false}' }
+const patchAbsent = { status: 200, contentType: 'application/json', body: '{"patched":false,"functional":false}' }
+check('the built-in backend is selectable only when the verdict says patched and working',
+  backendSelectable(backendById('in-place')!, patchOk, absentShell)
+  && !backendSelectable(backendById('in-place')!, patchBroken, absentShell)
+  && !backendSelectable(backendById('in-place')!, patchAbsent, absentShell)
+  // The shell's own answer is still absence, whatever it carries.
+  && !backendSelectable(backendById('in-place')!, patchOk, patchOk))
+check('a companion backend is selectable on its own answer alone',
+  backendSelectable(backendById('message-edit')!, { status: 404, contentType: 'application/json', body: '{"error":"no such session"}' }, absentShell)
+  && !backendSelectable(backendById('message-edit')!, absentShell, absentShell))
+check('a probe body that is not a verdict is not a patched host',
+  !hostPatchReady('') && !hostPatchReady('not json') && !hostPatchReady('{"patched":true}')
+  && !hostPatchReady('{"functional":true}') && !hostPatchReady('{"patched":"yes","functional":true}')
+  && hostPatchReady('{"patched":true,"functional":true}'))
 check('a plugin the active list does not carry is reported missing',
   backendMissingFrom('dsh-message-edit', ['dsh-base']) && backendMissingFrom('dsh-message-edit', []))
 check('a plugin the active list carries is found, by name or by repository spec',
@@ -295,14 +324,24 @@ check('the branch backend is asked to splice the reasoning block',
   JSON.stringify(branchCall))
 check('a missing block index cannot be sent to the branch backend',
   rewriteRequest('message-edit', 'session-1', { ...target, targetBlockIndex: -1 }, 'short') === undefined)
-check('the placeholder backend is asked for nothing',
-  rewriteRequest('placeholder', 'session-1', target, 'short') === undefined
-  && rewriteRequest('placeholder', '', target, 'short') === undefined)
+const inPlaceCall = rewriteRequest('in-place', 'session-1', target, 'short')
+check('the built-in in-place backend is asked over this plugin\'s own route',
+  inPlaceCall?.path === REWRITE_ROUTE && inPlaceCall.body['sessionId'] === 'session-1'
+  && inPlaceCall.body['eventSeq'] === 12 && inPlaceCall.body['blockIndex'] === 2
+  && inPlaceCall.body['text'] === 'short', JSON.stringify(inPlaceCall))
+// The message id is deliberately absent: the route takes it from the sidecar record, so a caller
+// that guessed a seq cannot aim the rewrite at a message the ledger never named.
+check('the in-place request never carries a message id of the caller\'s choosing',
+  inPlaceCall !== undefined && !Object.hasOwn(inPlaceCall.body, 'messageId'))
+check('a request the in-place backend cannot honour is not sent',
+  rewriteRequest('in-place', 'session-1', { ...target, targetBlockIndex: -1 }, 'short') === undefined
+  && rewriteRequest('in-place', '', target, 'short') === undefined
+  && rewriteRequest('in-place', 'session-1', target, '') === undefined)
 check('no backend means no request at all', rewriteRequest('', 'session-1', target, 'short') === undefined)
 check('empty text is never sent', rewriteRequest('message-edit', 'session-1', target, '') === undefined)
 
 console.log('client: activating the chosen backend again clears it')
-check('clicking another backend switches to it', nextBackend('message-edit', 'placeholder') === 'placeholder')
+check('clicking another backend switches to it', nextBackend('message-edit', 'in-place') === 'in-place')
 check('clicking a backend when none is chosen selects it', nextBackend('', 'message-edit') === 'message-edit')
 // A radio input cannot fire change once checked, which is exactly why the panel
 // must model deselection itself.
@@ -611,7 +650,16 @@ check('the quick-install page is absent while it is closed',
 const installPage = tryRender(<InstallBackendPanel open onClose={noop} t={t} />)
 check('it lists the installable backends and their install note',
   installPage.includes('message-edit') && installPage.includes('install.note.message-edit')
-  && !installPage.includes('placeholder'))
+  // The built-in in-place backend is installable too, and the page has to offer it: its install
+  // is the host patch, which is a route, not a package.
+  // Both ids are listed; the note shown belongs to the selected one, so the notes are checked
+  // against the locale tables instead (a missing key would render as a raw key string).
+  && installPage.includes('in-place') && !installPage.includes('placeholder'))
+check('every installable backend has an install note in both languages',
+  INSTALLABLE_BACKENDS.every(backend => {
+    const key = `install.note.${backend.id}` as Key
+    return typeof zh[key] === 'string' && zh[key] !== '' && typeof en[key] === 'string' && en[key] !== ''
+  }))
 check('it states the trade-off of both install routes',
   installPage.includes('install.mode.script.pros') && installPage.includes('install.mode.script.cons')
   && installPage.includes('install.mode.agent.pros') && installPage.includes('install.mode.agent.cons'))
@@ -639,6 +687,19 @@ check('the agent prompt names the backend and points at the real instructions',
   verifiedPrompt.includes('message-edit') && verifiedPrompt.includes('/repo/README.md') && verifiedPrompt.includes('/repo'))
 check('and it promises nothing beyond the verified procedure',
   verifiedPrompt.includes('唯一验证过') && !verifiedPrompt.includes('不要伪造成功'))
+// The built-in backend's prompt is the layout-agnostic half of its install: the agent runs the
+// script, and the script locates the checkout. A machine-specific directory here would be wrong on
+// every other machine, so the prompt is pinned against one.
+const inPlacePrompt = installPromptFor('in-place', '/repo')
+check('the built-in backend prompt names the patch script, both routes, and discovery',
+  inPlacePrompt.includes('/repo/scripts/dsh-inplace-patch.mjs') && inPlacePrompt.includes('--locate')
+  && inPlacePrompt.includes('--apply') && inPlacePrompt.includes('--check') && inPlacePrompt.includes('--checkout')
+  && inPlacePrompt.includes('$DSH_HOST_CHECKOUT') && inPlacePrompt.includes('$DSH_CHECKOUT'))
+check('and it hardcodes no machine-specific directory',
+  !inPlacePrompt.includes('/home/') && !inPlacePrompt.includes('~/') && !inPlacePrompt.includes('otherProject')
+  && !inPlacePrompt.includes('$HOME'))
+check('and it sends the agent to the real instructions and warns off hand-editing',
+  inPlacePrompt.includes('/repo/README.md') && inPlacePrompt.includes('--revert') && inPlacePrompt.includes('不要手工编辑'))
 check('no render path threw', !rendered.some(markup => markup.includes('__THREW__')))
 
 // Effect-only regressions: the SSR checks above do not run the view's effects.
@@ -670,34 +731,48 @@ try {
       opened.length === 1 && opened[0] === 'newer-branch')
   } finally { branch.stop(); Date.now = clock }
 
-  // The in-place slot is a placeholder, so an owed rewrite must not be posted and must not be
-  // settled: nothing answers for that backend. The POST half of this driver therefore has no
-  // backend to run against any more — when a real in-place backend is implemented, this check
-  // goes back to driving one (its end-to-end form is in the history before this change).
+  // The in-place backend is real now, so this drives its whole browser half: the panel posts the
+  // rewrite to this plugin's own route, accepts the success envelope, and settles the hand-off with
+  // the host. The remount must not post it a second time — the recorded outcome is what stops it.
   const pending = modernReport()
-  pending.config.rewriteBackend = 'placeholder'
+  pending.config.rewriteBackend = 'in-place'
   pending.entries[0]!.id = 'in-place-1'
   pending.entries[0]!.targetMessageId = 'm-12'
   pending.entries[0]!.distilledText = 'capped'
   pending.pendingBranch = 'in-place-1'
-  let backendPosts = 0
+  const backendPosts: string[] = []
   let settles = 0
   globals.fetch = async (input: RequestInfo | URL) => {
     if (String(input).includes('/report')) return { ok: true, json: async () => pending } as Response
-    if (String(input).includes('/handoff')) { settles++; return { ok: true, json: async () => ({ ok: true, recorded: false }) } as Response }
-    backendPosts++
-    return { ok: true, json: async () => ({ ok: true }) } as Response
+    if (String(input).includes('/handoff')) { settles++; return { ok: true, json: async () => ({ ok: true, recorded: true }) } as Response }
+    backendPosts.push(String(input))
+    return { ok: true, json: async () => ({ ok: true, eventSeq: 2 }) } as Response
   }
   const mount = (): ReturnType<typeof effectHarness> => effectHarness(() => ReasoningDistillView({ sessionId: 'session-1', openSession: noop, t } as never))
   const inPlace = mount()
   try {
-    await inPlace.tick()
-    await inPlace.tick()
+    for (let tick = 0; tick < 6; tick++) await inPlace.tick()
     await inPlace.remount()
-    await inPlace.tick()
-    check('a backend with no implementation posts nothing, settles nothing and claims nothing',
-      backendPosts === 0 && settles === 0 && !storageData.has('reasoning-distill:handoff:session-1:in-place-1'),
+    for (let tick = 0; tick < 4; tick++) await inPlace.tick()
+    // The remount settles again on purpose (the host is asked to record it once more), but the
+    // rewrite itself must never be posted twice: a second in-place rewrite is not a no-op.
+    check('the built-in in-place backend is driven from the browser: posted once to our own route, then settled',
+      backendPosts.length === 1 && backendPosts[0]!.endsWith(REWRITE_ROUTE) && settles >= 1,
       JSON.stringify({ backendPosts, settles, storage: [...storageData] }))
+    // The same driver must stay silent for a selection nothing answers for: this is the stale-id
+    // case (a backend another build had), which the host clears and the panel must not chase.
+    pending.config.rewriteBackend = 'placeholder'
+    pending.pendingBranch = 'in-place-1'
+    storageData.clear()
+    backendPosts.length = 0
+    settles = 0
+    const unknown = mount()
+    try {
+      for (let tick = 0; tick < 4; tick++) await unknown.tick()
+      check('a selection nothing answers for posts nothing, settles nothing and claims nothing',
+        backendPosts.length === 0 && settles === 0 && !storageData.has('reasoning-distill:handoff:session-1:in-place-1'),
+        JSON.stringify({ backendPosts, settles, storage: [...storageData] }))
+    } finally { unknown.stop() }
   } finally { inPlace.stop() }
   // A failure marker is not a child-exit notification. The panel must keep Stop enabled.
   globals.fetch = async () => ({ ok: true, json: async () => ({

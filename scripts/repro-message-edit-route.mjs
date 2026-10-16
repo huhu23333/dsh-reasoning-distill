@@ -14,8 +14,9 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { profilePluginDir } from './lib/dsh-paths.mjs';
 
-const bundle = process.argv[2] ?? path.join(os.homedir(), '.dsh/profiles/web/node_modules/dsh-message-edit/index.mjs');
+const bundle = process.argv[2] ?? path.join(profilePluginDir('dsh-message-edit'), 'index.mjs');
 const log = process.argv[3] ?? process.env.DSH_SESSION_LOG;
 if (log === undefined || log === '') {
   console.error('usage: node scripts/repro-message-edit-route.mjs [bundle] <session.v4.jsonl.zstd>');

@@ -22,6 +22,9 @@
     "README.md",
     "docs",
     "scripts/install-backend.sh",
+    "scripts/lib",
+    "scripts/dsh-inplace-patch.mjs",
+    "scripts/probe-inplace-durability.mjs",
     "scripts/patch-message-edit.py",
     "vendor/dsh-message-edit-0.2.3-patched4.tgz"
   ],

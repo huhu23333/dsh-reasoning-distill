@@ -14,8 +14,9 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { checkoutFromArgv, profilePluginDir } from './lib/dsh-paths.mjs';
 
-const bundle = process.argv[2] ?? path.join(os.homedir(), '.dsh/profiles/web/node_modules/dsh-message-edit/index.mjs');
+const bundle = process.argv[2] ?? path.join(profilePluginDir('dsh-message-edit'), 'index.mjs');
 const log = process.argv[3] ?? process.env.DSH_SESSION_LOG;
 if (log === undefined || log === '') {
   console.error('usage: node scripts/repro-message-edit-operation.mjs [bundle] <session.v4.jsonl.zstd>');
@@ -49,7 +50,7 @@ const agent = {
 
 // The host validates a branch seed with the real Session constructor; use it so a
 // seed the host would reject cannot pass this harness.
-const checkout = process.env.DSH_CHECKOUT ?? '/home/huhu233/otherProject/deepseek-harness';
+const checkout = checkoutFromArgv(process.argv).root;
 let SessionApi;
 try {
   SessionApi = await import(pathToFileURL(path.join(checkout, 'packages/core/session/lib/index.js')).href);

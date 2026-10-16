@@ -781,9 +781,16 @@ CANDIDATES = (
 
 
 def installed_candidates() -> list[pathlib.Path]:
-    """Client bundles of every known package, installed or not."""
+    """Client bundles of every known package, installed or not.
+
+    The profile layout follows the host's own conventions -- DSH_HOME, then DSH_PROFILE -- and
+    DSH_PLUGIN_ROOTS (used by install-backend.sh, which knows the exact profile it installed into)
+    is consulted first, so nothing here assumes a particular home or profile name.
+    """
     import os
-    roots = [pathlib.Path.home() / ".dsh/profiles/web/node_modules"]
+    home = pathlib.Path(os.environ.get("DSH_HOME") or pathlib.Path.home() / ".dsh")
+    profile = os.environ.get("DSH_PROFILE") or "web"
+    roots = [home / "profiles" / profile / "node_modules"]
     roots.extend(pathlib.Path(p) / "node_modules" for p in os.environ.get("DSH_PLUGIN_ROOTS", "").split(":") if p)
     return [root / name / "client.js" for root in roots for name in CANDIDATES]
 

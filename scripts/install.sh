@@ -36,7 +36,10 @@ ln -s "$SHARED" "$PLUGIN_DIR/node_modules/@deepseek-ai"
 echo "install: adding the plugin to profile '$PROFILE'"
 # `dsh plugin` forwards its arguments to pnpm inside the profile directory and
 # reconciles newly installed bundles into dsh.profile.bundles.
-(cd /home/huhu233/otherProject/deepseek-harness && pnpm dsh plugin --profile "$PROFILE" add "$PLUGIN_DIR")
+# The DSH source checkout is FOUND, never assumed: an explicit DSH_CHECKOUT wins, otherwise the
+# plugin's shared resolver walks up from this process's cwd and from the host's session package.
+CHECKOUT="${DSH_CHECKOUT:-${DSH_HOST_CHECKOUT:-$(node "$PLUGIN_DIR/scripts/dsh-inplace-patch.mjs" --locate)}}"
+(cd "$CHECKOUT" && pnpm dsh plugin --profile "$PROFILE" add "$PLUGIN_DIR")
 
 echo
 echo "install: done. Restart 'dsh web' once so the Loader rescans the profile"

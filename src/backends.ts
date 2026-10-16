@@ -8,6 +8,8 @@
  * @module dsh-reasoning-distill/backends
  */
 
+import { REWRITE_ROUTE } from './shared.ts'
+
 /**
  * One companion that can write a distilled rewrite into the session's history.
  *
@@ -35,6 +37,16 @@ export interface RewriteBackend {
    */
   placeholder?: true
   /**
+   * Whether this plugin serves the backend itself, behind a patch to the host.
+   *
+   * A companion backend proves itself by answering on its own route, and the host can tell from
+   * the profile's active plugin list whether that route still exists. This one has no companion
+   * package to look for: its route is this plugin's own, so the only thing that decides whether it
+   * can be driven is whether the host carries the patch — a question about the host, not the
+   * profile. Both halves ask the patch's own self-check rather than guessing from a route.
+   */
+  hostPatch?: true
+  /**
    * Package that owns this backend's route, when a plugin does.
    *
    * The panel proves a backend is installed by probing it, but the host cannot: an in-place
@@ -55,11 +67,13 @@ export const REWRITE_BACKENDS: readonly RewriteBackend[] = [
     probe: { method: 'POST', path: '/message-edit', body: { action: 'edit', sessionId: '', eventSeq: 0, blockIndex: 0, text: 'probe' } },
   },
   {
-    // Nothing answers for this one: it holds the in-place slot, and {@link rewriteRequest}
-    // returns nothing for it, so selecting it could never write anything back.
-    id: 'placeholder',
+    // The built-in in-place backend: this plugin's own host half does the rewriting, and the host
+    // patch is what makes that possible. There is no companion package to name, and the probe is
+    // this plugin's own route, so the answer is the patch self-check rather than a third party.
+    id: 'in-place',
     kind: 'in-place',
-    placeholder: true,
+    hostPatch: true,
+    probe: { method: 'POST', path: REWRITE_ROUTE, body: { probe: true } },
   },
 ]
 
@@ -99,19 +113,30 @@ export function backendMissingFrom(plugin: string | undefined, activePlugins: re
 /**
  * Whether the stored selection is one this host cannot drive.
  *
- * Three ways to be stuck, and all of them are stale state the plugin itself would never write:
- * the id belongs to another build (a backend since removed, or one this version does not have),
- * the id is a placeholder (nothing answers for it, and its row is disabled, so the panel cannot
- * clear it either — the host is the only one that can), or it names a plugin the profile no
- * longer loads. A profile that cannot be read answers false throughout: with no evidence about
- * this host, no write.
+ * Ways to be stuck, and all of them are stale state the plugin itself would never write: the id
+ * belongs to another build (a backend since removed, or one this version does not have), the id is
+ * a placeholder (nothing answers for it, and its row is disabled, so the panel cannot clear it
+ * either — the host is the only one that can), the backend needs the host patch and this host
+ * demonstrably lacks it, or the id names a plugin the profile no longer loads. Everything weaker
+ * answers false: no evidence about this host means no write.
  * @param backend - the stored backend id.
  * @param activePlugins - the profile's active plugin entries; undefined when it could not be read.
+ * @param hostPatch - the patch self-check's verdict for a host-patch backend; false only when the
+ *   host was actually asked and answered that the patch is absent.
  * @returns whether the selection has to be cleared.
  */
-export function backendUnusable(backend: string, activePlugins: readonly string[] | undefined): boolean {
-  if (backend === '' || activePlugins === undefined) return false
+export function backendUnusable(
+  backend: string,
+  activePlugins: readonly string[] | undefined,
+  hostPatch?: boolean,
+): boolean {
+  if (backend === '') return false
   const known = backendById(backend)
+  // A backend this plugin serves itself turns on the host patch, not on the profile: only a host
+  // that was actually asked and answered "no patch" closes the selection. `undefined` is the
+  // startup state where no session has been seen yet, and it must not clear a working setup.
+  if (known?.hostPatch === true) return hostPatch === false
+  if (activePlugins === undefined) return false
   if (known === undefined || known.placeholder === true) return true
   return backendMissingFrom(known.plugin, activePlugins)
 }
@@ -177,6 +202,42 @@ export function backendInstalled(answer: ProbeAnswer, baseline: ProbeAnswer): bo
   return answer.status !== baseline.status
     || (answer.contentType ?? '') !== (baseline.contentType ?? '')
     || answer.body.trim() !== baseline.body.trim()
+}
+
+/**
+ * Whether a host-patch backend's probe body reports a patched, working host.
+ *
+ * The route belongs to this plugin, so its answering at all only proves the plugin is loaded. The
+ * body is the self-check's verdict, and both halves have to hold: a host that exposes the entry
+ * point but cannot rewrite with it is exactly the broken state the user must not select.
+ * @param body - the probe response body.
+ * @returns whether the patch is present and functional.
+ */
+export function hostPatchReady(body: string): boolean {
+  try {
+    const parsed: unknown = JSON.parse(body)
+    if (parsed === null || typeof parsed !== 'object') return false
+    const verdict = parsed as { patched?: unknown; functional?: unknown }
+    return verdict.patched === true && verdict.functional === true
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Whether a probe of this backend proves it can be selected.
+ *
+ * A companion backend proves itself by answering as itself (see {@link backendInstalled}); a
+ * host-patch backend answers through this plugin's own route, so answering only proves the plugin
+ * is loaded and the body has to carry the patch verdict on top.
+ * @param backend - registry entry being probed.
+ * @param answer - the backend path's answer.
+ * @param baseline - an impossible sibling path's answer.
+ * @returns whether the panel may offer this backend.
+ */
+export function backendSelectable(backend: RewriteBackend, answer: ProbeAnswer, baseline: ProbeAnswer): boolean {
+  if (!backendInstalled(answer, baseline)) return false
+  return backend.hostPatch === true ? hostPatchReady(answer.body) : true
 }
 
 /**
@@ -266,6 +327,15 @@ export function rewriteRequest(
   if (sessionId === '' || text === '') return undefined
   const backend = backendById(backendId)
   if (backend === undefined || backend.placeholder === true) return undefined
+  if (backend.hostPatch === true) {
+    if (entry.targetBlockIndex < 0) return undefined
+    // Our own route: it looks the recorded message id up host-side, so the panel cannot aim the
+    // rewrite at a message the ledger never named.
+    return {
+      path: REWRITE_ROUTE,
+      body: { sessionId, eventSeq: entry.targetSeq, blockIndex: entry.targetBlockIndex, text },
+    }
+  }
   if (backend.id === 'message-edit') {
     if (entry.targetBlockIndex < 0) return undefined
     // A compression branch must be *this* conversation with one block rewritten:

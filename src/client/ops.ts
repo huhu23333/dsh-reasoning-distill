@@ -14,7 +14,7 @@
 
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { FALLBACK_RULE, mergeRule, withKindDefaults, withSubagentKindsOff, type RuleOverride, type RuleSource } from '../rule.ts'
-import { backendById, backendInstalled, masterSwitchState, type ProbeAnswer, type RewriteBackend } from '../backends.ts'
+import { backendById, backendSelectable, masterSwitchState, type ProbeAnswer, type RewriteBackend } from '../backends.ts'
 import { entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
 
 /** Sparse per-model rule as stored, matching what the host schema accepts. */
@@ -143,7 +143,7 @@ export function isStaleResponse(request: number, applied: number): boolean {
 }
 
 export {
-  REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendOptionsVisible, backendUnusable, masterSwitchState, missingBackendFixup, nextBackend, rewriteRequest,
+  REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendOptionsVisible, backendSelectable, backendUnusable, hostPatchReady, masterSwitchState, missingBackendFixup, nextBackend, rewriteRequest,
 } from '../backends.ts'
 export type { BackendFixup, ProbeAnswer, RewriteBackend } from '../backends.ts'
 
@@ -199,9 +199,13 @@ export function withoutSubagentKinds(value: SettingsValue): SettingsValue {
  * selected backend without knowing the chooser's table: probe the backend's own path and a sibling
  * path that cannot exist, and treat only a *different* answer as proof the backend replied. A
  * backend with no route to ask — a placeholder — is simply not reachable.
+ *
+ * A host-patch backend answers on this plugin's own route, so replying at all only proves the
+ * plugin is loaded: `backendSelectable` also reads the patch verdict out of the body, which is
+ * what actually decides whether the rewrite can be driven.
  * @param backend - registry entry to probe.
- * @returns whether the backend answered as itself; false when there is nothing to ask, or when the
- *   request itself failed.
+ * @returns whether the backend can be selected; false when there is nothing to ask, the answer is
+ *   the shell's, or a host-patch host reports itself unpatched or broken.
  */
 export async function backendReachable(backend: RewriteBackend): Promise<boolean> {
   const route = backend.probe
@@ -221,7 +225,7 @@ export async function backendReachable(backend: RewriteBackend): Promise<boolean
   try {
     const answer = await probe(route.path)
     const absent = await probe(route.path + '-absent')
-    return backendInstalled(answer, absent)
+    return backendSelectable(backend, answer, absent)
   } catch {
     return false
   }

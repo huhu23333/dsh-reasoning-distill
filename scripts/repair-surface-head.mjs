@@ -30,14 +30,15 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { pathToFileURL } from 'node:url';
+import { checkoutFromArgv, dshHome } from './lib/dsh-paths.mjs';
 
 const apply = process.argv.includes('--apply');
 const argOf = (flag, fallback) => {
   const at = process.argv.indexOf(flag);
   return at >= 0 && process.argv[at + 1] !== undefined ? process.argv[at + 1] : fallback;
 };
-const root = argOf('--root', path.join(os.homedir(), '.dsh', 'sessions'));
-const checkout = argOf('--checkout', path.join(os.homedir(), 'otherProject', 'deepseek-harness'));
+const root = argOf('--root', path.join(dshHome(), 'sessions'));
+const checkout = checkoutFromArgv(process.argv).root;
 
 const session = await import(pathToFileURL(path.join(checkout, 'packages/core/session/lib/index.js')).href);
 const format = await import(pathToFileURL(path.join(checkout, 'packages/session/session-format-v3-to-v4/lib/index.js')).href);

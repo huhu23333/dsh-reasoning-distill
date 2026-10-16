@@ -36,15 +36,16 @@ import os from 'node:os';
 import path from 'node:path';
 import zlib from 'node:zlib';
 import { pathToFileURL } from 'node:url';
+import { checkoutFromArgv, dshHome } from './lib/dsh-paths.mjs';
 
 const apply = process.argv.includes('--apply');
 const argOf = (flag, fallback) => {
   const at = process.argv.indexOf(flag);
   return at >= 0 && process.argv[at + 1] !== undefined ? process.argv[at + 1] : fallback;
 };
-const root = argOf('--root', path.join(os.homedir(), '.dsh', 'sessions'));
-const hostPath = argOf('--host', path.join(os.homedir(), 'otherProject', 'deepseek-harness', 'packages', 'core', 'session', 'lib', 'index.js'));
-const checkout = argOf('--checkout', path.join(os.homedir(), 'otherProject', 'deepseek-harness'));
+const root = argOf('--root', path.join(dshHome(), 'sessions'));
+const checkout = checkoutFromArgv(process.argv).root;
+const hostPath = argOf('--host', path.join(checkout, 'packages', 'core', 'session', 'lib', 'index.js'));
 
 let host;
 try {

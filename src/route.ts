@@ -8,9 +8,9 @@ import type { Context } from '@deepseek-ai/cordis'
 
 import type { Config } from './config.ts'
 import { buildCatalog, buildReport } from './report.ts'
-import type { ActiveCompression, BlockingReason } from './shared.ts'
+import type { ActiveCompression, BlockingReason, HostPatchStatus } from './shared.ts'
 import type { SidecarStore } from './store.ts'
-import { CATALOG_ROUTE, HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE } from './shared.ts'
+import { CATALOG_ROUTE, HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE } from './shared.ts'
 import { INSTALLABLE_BACKENDS, INSTALL_STEPS, installableBackend } from './install-shared.ts'
 import { pluginRoot, type InstallRunner } from './install.ts'
 
@@ -52,6 +52,8 @@ export function registerRoutes(
     }
     stock(sessionId: string): { tokens: number; saved: number; ids: string[] } | undefined
     handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }>
+    hostPatchStatus(): HostPatchStatus
+    applyInPlace(request: { sessionId: string; eventSeq: number; blockIndex: number; text: string }): Promise<{ ok: true; seq: number } | { ok: false; error: string }>
   },
   runner: InstallRunner,
 ): void {
@@ -189,5 +191,42 @@ export function registerRoutes(
         }
       },
     }), 'reasoning-distill: handoff route')
+
+    child.effect(() => register({
+      path: REWRITE_ROUTE,
+      methods: ['GET', 'POST'],
+      requestBody: 'buffered',
+      // The built-in in-place backend's only route, and it is ours: GET reports the host-patch
+      // verdict, POST performs one rewrite. The chooser's probe is a POST carrying a probe marker,
+      // and it is answered with the same verdict, so one route serves the panel and the self-check
+      // alike. Every answer is JSON, including a refusal: the chooser compares this route's answer
+      // against an impossible sibling path's, so a silent answer would read as "not installed".
+      fetch: async (request: Request): Promise<Response> => {
+        try {
+          const patch = engine.hostPatchStatus()
+          if (request.method === 'GET') return json({ ...patch })
+          const body = await request.json() as {
+            probe?: unknown
+            sessionId?: unknown
+            eventSeq?: unknown
+            blockIndex?: unknown
+            text?: unknown
+          }
+          if (body.probe === true) return json({ ...patch })
+          if (!patch.patched || !patch.functional) {
+            return json({ ok: false, error: 'the host patch is not applied on this host', ...patch }, 503)
+          }
+          const applied = await engine.applyInPlace({
+            sessionId: typeof body.sessionId === 'string' ? body.sessionId : '',
+            eventSeq: typeof body.eventSeq === 'number' ? body.eventSeq : Number.NaN,
+            blockIndex: typeof body.blockIndex === 'number' ? body.blockIndex : Number.NaN,
+            text: typeof body.text === 'string' ? body.text : '',
+          })
+          return applied.ok ? json({ ok: true, eventSeq: applied.seq }) : json({ ok: false, error: applied.error }, 400)
+        } catch (error: unknown) {
+          return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500)
+        }
+      },
+    }), 'reasoning-distill: rewrite route')
   })
 }

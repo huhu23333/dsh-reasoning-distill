@@ -263,3 +263,26 @@ export const REPORT_ROUTE = '/api/reasoning-distill/report'
 export const HANDOFF_ROUTE = '/api/reasoning-distill/handoff'
 export const CATALOG_ROUTE = '/api/reasoning-distill/catalog'
 export const INSTALL_ROUTE = '/api/reasoning-distill/install'
+/**
+ * Same-origin route that performs one in-place reasoning rewrite and reports the host patch.
+ *
+ * This plugin serves it itself: the built-in in-place backend has no companion package, so the
+ * route that writes the rewrite and the route that says whether the host can write it at all are
+ * the same one. `GET` answers the patch verdict, `POST` applies a rewrite (or answers the same
+ * verdict when the body is the chooser's probe).
+ */
+export const REWRITE_ROUTE = '/api/reasoning-distill/rewrite'
+
+/** What the host patch self-check found, as both halves of this plugin report it. */
+export interface HostPatchStatus {
+  /** The host exposes the in-place rewrite entry point at all. */
+  patched: boolean
+  /** The entry point really rewrites one reasoning block in place, idempotently. */
+  functional: boolean
+  /**
+   * Why the self-check failed, when it did. Absent for a host whose patch works; a host that has
+   * the entry point but cannot use it says so instead of leaving the panel with a bare "not
+   * functional".
+   */
+  detail?: string
+}

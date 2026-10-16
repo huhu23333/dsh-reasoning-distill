@@ -15,9 +15,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { profilePluginDir } from './lib/dsh-paths.mjs';
 
 const P0_MESSAGE = "Cannot read properties of undefined (reading 'length')";
-const pluginDir = process.argv[2] ?? path.join(os.homedir(), '.dsh/profiles/web/node_modules/dsh-message-edit');
+const pluginDir = process.argv[2] ?? profilePluginDir('dsh-message-edit');
 const installed = path.join(pluginDir, 'index.mjs');
 const legacyStart = 'function flattenLineage(root, descendants) {';
 const boundedStart = 'function boundedInteger(name, fallback, maximum) {';

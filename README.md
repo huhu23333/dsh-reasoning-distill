@@ -269,8 +269,8 @@
 
 ## 验证状态
 
-> **只验证过一种组合**：当前宿主版本 + 当前版本的 `message-edit` 后端（`vendor/dsh-message-edit-0.2.3-patched4.tgz`，即 `v1.0.0` 产物）。
-> 后端单选里还有一个 `placeholder` **占位条目**：它没有任何实现（没有路由、没有插件名、不发请求），只是占住 in-place 那个槽位，行内显示「占位（尚未实现，不可选）」并恒不可选 —— 见「助手消息改写后端」→「后端支持状态」。
+> **验证过两种组合**：当前宿主版本 + 当前版本的 `message-edit` 后端（`vendor/dsh-message-edit-0.2.3-patched4.tgz`，即 `v1.0.0` 产物），以及**当前宿主版本 + 本仓库的宿主补丁**（内置 `in-place` 后端，见「内置原位后端与宿主补丁」）。
+> `in-place` 没有任何前置插件：它的路由就是本插件自己的宿主半边，能不能用**完全取决于宿主有没有打上补丁**，所以面板会先向 `GET /api/reasoning-distill/rewrite` 要一次真实自检结论（`patched` + `functional`），两者都过才可选。
 
 已做：
 - **客户端测试** 55 项（渲染 48 + 设置写入规划 7）（`npm run test:render`）：用 `react-dom/server` 真渲染三个客户端组件，覆盖现代报告、**旧宿主报告（版本错配）**、失败条目、空会话、加载/错误态。这条是补出来的——"渲染期抛错 → 整页空白"已经发生过两次（一次是配置表单绑定丢了 `this`，一次是我在 `report` 声明之前引用它，TDZ 抛错），所以现在渲染路径有测试兜着；我还临时把那个 TDZ 放回去验证过：测试确实会崩。
@@ -344,8 +344,9 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 
 1. **用打好补丁的包**：`vendor/dsh-message-edit-0.2.3-patched4.tgz`（**保持包名 `dsh-message-edit`**，只把版本标为 `0.2.3-patched4`）：
    ```bash
-   cd /home/huhu233/otherProject/deepseek-harness
-   pnpm dsh plugin --profile web add /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill/vendor/dsh-message-edit-0.2.3-patched4.tgz
+   # $PLUGIN = 本插件目录，$DSH_CHECKOUT = 这台机器上 DSH 源码目录（两者位置因机器而异）
+   cd "$DSH_CHECKOUT"
+   pnpm dsh plugin --profile web add "$PLUGIN/vendor/dsh-message-edit-0.2.3-patched4.tgz"
    ```
 
    ⚠️ 要装 **patched4**：`patched1`~`patched3` 只含客户端补丁，**不含任何会话格式修复**，用它建出来的分支会在重启后加载失败（详见「后端支持状态」与「安装与修补 `message-edit` 后端的完整流程」）。
@@ -364,7 +365,7 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 2. **压缩成功**（且选了 `message-edit` 这类**分支型**后端）→ 宿主在**发出任何请求之前**调用后端建好分支 → **`{kind:'reject'}` 终止本回合** → 面板看到报告里的 `branch` 后**自动打开新分支**。原会话**一次 API 都不会发出** ✓。
 3. **压缩失败**（或后端拒绝/超时，例如"无法从会话历史解析模型路由"、含工具调用被拒等）→ **不终止**，回合照常在原会话继续；失败原因在推理蒸馏页显示（`branchError`），不会静默重试。
 4. **建分支后自动归档原会话**（配置项 `archiveSuperseded`，**默认开启**）：面板打开新分支后，把被它替换掉的原会话**收进归档**——归档里的会话仍可找回。关掉这个开关就只切分支、原会话留在列表里。
-5. **就地型后端**：它们的 `/api/*` 路由需要浏览器凭据，宿主够不到 → 由**面板/常驻芯片**在线应用（清标记但不中止你的回合：`handoff {cancel:false}`）。它要发的那次请求本来就已被重放替换变短，所以不存在"用长上下文多花一次"的问题。**当前这个槽位只有占位条目**（见下），它发不出任何请求，所以驱动会在认领之前就跳过它：既不 POST、也不清标记。机制本身完整保留在代码里，接上真有路由的后端即恢复。
+5. **就地型后端（内置 `in-place`）**：它的路由 `/api/reasoning-distill/rewrite` 在 `/api/*` 后面、需要浏览器凭据，宿主自己够不到 → 由**面板/常驻芯片**在线应用（清标记但不中止你的回合：`handoff {cancel:false}`）。请求体只有会话 id、目标 seq、块下标和文本：**消息 id 由宿主从 sidecar 记录里取**，面板无法把改写指向账本没记过的消息。它要发的那次请求本来就已被重放替换变短，所以不存在"用长上下文多花一次"的问题。
 
 **实现要点**：宿主侧建分支走 `http://127.0.0.1:<webServer.port>/message-edit`（该端点无需浏览器凭据）；`agent/pre-step` 返回 `PreStepDecision = {kind:'reject'}` 即可在请求组装前结束回合（这与宿主的 `archived-session-gate` 用的是同一个缝）。
 
@@ -381,7 +382,7 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 | 后端 id | 前置插件 | 调用 | 语义 |
 |---|---|---|---|
 | `message-edit` | `dsh-message-edit` 或 `@yunyv/dsh-message-edit` | `POST /message-edit` `{action:'splice', sessionId, eventSeq, blockIndex, text}`（`edit` 会丢工具调用与后续步骤，故不用） | **另开分支会话**（新增版本，原会话不动） |
-| `placeholder` | —（无） | —（不发任何请求） | **无实际内容**：只占住 in-place 那个槽位；没有探针、没有插件名，因此恒显示「占位（尚未实现，不可选）」且不可选 |
+| `in-place` | —（无；**由本插件自己的宿主半边提供服务**） | `POST /api/reasoning-distill/rewrite` `{sessionId, eventSeq, blockIndex, text}` | **就地改写日志本身**：同一个 seq、同一条消息就地换掉 reasoning 块，不分叉会话、不产生新会话；前置条件是**宿主补丁**（见下） |
 
 ### 后端支持状态（先读这一段）
 
@@ -396,25 +397,60 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 | 后端 id | 前置插件 | 验证状态 |
 |---|---|---|
 | `message-edit` | `dsh-message-edit` / `@yunyv/dsh-message-edit` | ✅ **唯一验证过的后端**：建分支、压缩自动交接、重启后仍能加载、跨回合交接不丢用户消息，全都只在它上面真实跑过 |
-| `placeholder` | —（无） | ⬜ **无实现**：占位条目，不接受选择、不参与任何交接 |
+| `in-place` | —（无；宿主补丁） | ✅ **已实现并做过落盘实验**：改 → flush → 换一个新 Context 从磁盘读回，`none` 与 `zstd` 两种编码都验证过；未打补丁的宿主上**不可选**，启动自检会清掉过期选择 |
 
-> **`msg-edit`（`@moton16/dsh-msg-edit`）与 `context-shaping`（`zeranhub/dsh-context-shaping`）已在本版本中删除**：两者都是从未安装、从未修补、从未探测过的 in-place 后端，契约全属假定。它们的注册表条目、请求映射、安装条目、文案、打包脚本（`scripts/package-msg-edit.py`）与 vendor 产物一起移除了；in-place **机制**（前端写回驱动、认领标记、`handoff {cancel:false}`、`rewriteApplyOutcome`）整体保留，由 `placeholder` 占住槽位，将来接真后端时只需实现这一条。
+> **`msg-edit`（`@moton16/dsh-msg-edit`）与 `context-shaping`（`zeranhub/dsh-context-shaping`）已在本版本中删除**：两者都是从未安装、从未修补、从未探测过的 in-place 后端，契约全属假定。它们的注册表条目、请求映射、安装条目、文案、打包脚本（`scripts/package-msg-edit.py`）与 vendor 产物一起移除了；in-place **机制**（前端写回驱动、认领标记、`handoff {cancel:false}`、`rewriteApplyOutcome`）整体保留，现在由本插件内置的 `in-place` 后端使用。
 
 **⚠️ message-edit 的已知残缺（选它之前先读）**：它是「**不想给 DSH 打补丁时**的残缺方案」。宿主目前**没有**把运行中的工作交给另一个会话的 API，所以：
 
 - **不支持子代理、团队成员、后台任务**：分支是源会话的副本，而子代理/后台作业在宿主里**绑定创建它的那个会话**（作业的 owner 是活的 Agent，只有它自己的会话能看见；子代理的父关系由 provider 创建时写死，**只有祖先能 interrupt、只有相邻 Agent 能 sendMessage**）→ 分支**既不能接管、也不能指挥或停止它们**。已经在跑的话，默认靠 `skipWhileBusy` 让这种会话**不触发压缩**来回避；真要迁移必须等宿主加 API（例如 `subagents.reparent` / `jobs.reassign`）。
-- 因此它只适合「单会话、不开子代理、不开后台任务」的场景。原位编辑型后端才能避开这个限制，但本仓库没有可用的那种后端（`placeholder` 只是槽位）。
+- 因此它只适合「单会话、不开子代理、不开后台任务」的场景。**原位编辑型后端（内置 `in-place`）能避开这个限制**：它不分叉、不新建会话，子代理与后台作业仍留在原会话里，所以两条子代理开关不会被钉死。
 - **子代理这一半已经被开关兜住**：选中它时两条子代理开关被**强制关掉并置灰**（面板），宿主的**首次 pre-step 自检**还会把同样的事实写进设置（`subagentKindsOffPatch`，与"无后端则清选择 + 关总开关"共用同一条写入路径）；引擎的触发门（`appliesTo`）也会**直接拒绝**子代理会话，所以即使有人在面板外手改配置，也不会发生"在子代理里交接"。**后台作业**那一半仍需 `skipWhileBusy`（默认开）来回避。
 - 另：即使插件被停用，宿主对不存在的路由回的是 **405 空体**（`/api/*` 则是平台自己的 **401 unauthorized**）而不是 404，所以可用性判定必须**跟一个不可能存在的同级路径对比**（`backendInstalled` 已按实测改成这样）——这正是此前「停用了却还能选」的原因。
 
-因此：**请只选 `message-edit`**。`placeholder` 永远不可选；想接入别的后端，需要先做完整的接口核对与补丁适配，那属于尚未开始的工作。
+因此：**要分支型行为就选 `message-edit`；要就地改写、并且愿意给宿主打补丁，就选内置的 `in-place`**。想接入别的后端，需要先做完整的接口核对与补丁适配，那属于尚未开始的工作。
 
+### 内置原位后端（`in-place`）与宿主补丁
+
+`in-place` 是本插件**自己**提供的后端（不是伴随插件），它唯一的前置条件是**给 DSH 本体打一个补丁**：宿主 `Session` 上新增 `rewriteReasoningBlock({ seq, messageId, blockIndex, text })`，把日志里那条 `assistant/message` 的 reasoning 块**就地**换掉。**同一个会话、同一条消息、同一个 seq、日志长度不变**：不分叉、不新建会话、不 reject 当前回合、不需要归档源会话。
+
+- **快速安装 = 打补丁**：`node scripts/dsh-inplace-patch.mjs --apply --build`（设置页「快速安装后端」选 `in-place`、再选「用脚本安装」走的就是这条；`scripts/install-backend.sh` 会先 `--locate` 报告定位结果，应用后用 `--check` 复检）。「让 agent 安装」同样可用：提示词里给的就是这三条命令。
+- **不假设 DSH 装在哪**：脚本按 `--checkout` > `$DSH_HOST_CHECKOUT` > `$DSH_CHECKOUT` > 当前工作目录向上找（特征文件 `packages/core/session/src/surface.ts`）> 从 `@deepseek-ai/dsh-session` 反解出的包目录向上找的顺序定位；全都找不到就列出试过的路径并以退出码 1 结束，绝不猜。`--locate` 只打印定位结果。
+- **`--check`**：逐条报告每个编辑是 applied / absent / anchor missing；未打全输出 `NOT PATCHED` 并以退出码 1 结束，打全输出 `PATCHED`。
+- **`--revert`**：按同一组 (before, after) **反向替换**，回到与 HEAD 逐字节相同；随后 `--build` 即可。
+- **锚点对不上就整体拒绝**：任何一处锚点变了都不做**部分写入**；写入过程中失败会回滚全部目标文件。
+- **脏文件守卫**：`--apply` 只放过「本补丁自己写脏」的文件（该文件的编辑已全部就位）；文件里有**别人**的未提交改动就拒绝（`--force` 可越过）。所以它不会覆盖你正在建的宿主工作。
+- **补丁只在被调用时生效**：它不改变任何既有路径的行为；插件被移除（或加载失败）后宿主与未装插件时完全一致，只是没有人再调用那个方法。
+
+**改了什么（6 个文件、14 处字面编辑）**：
+
+| 文件 | 编辑 |
+|---|---|
+| `packages/core/session/src/surface.ts` | 折叠管理器新增 `reset()`（丢弃折叠结果、从第一个事件重折），generation 计数器加上 `_generationBase`，使重折后派生消息缓存**必然**失效 |
+| `packages/core/session/src/index.ts` | 新增 `setRewriteSink`/`rewriteReasoningBlock`：校验目标（该 seq 必须是 `assistant/message`、`message.id` 必须一致、该块必须是 `reasoning`、文本非空），文本相同则**幂等**返回原事件；落地后清 `eventsSnapshot`、重折 surface、通知 sink |
+| `packages/session/session-persistence/src/handle.ts` + `src/index.ts` | `SessionHandle` 新增可选 `rewrite(events, options?)`：append-only 的事件流表达不了「原地替换」，所以由持久化层收下这条意图 |
+| `packages/session/session-persistence-jsonl/src/storage.ts` | 句柄在会话的**第一个事件**上安装 durable rewrite sink，并把替换串在 mutation chain 上（先 drain 再改写，避免缓冲里的旧副本把新文本盖回去） |
+| `packages/session/session-persistence-jsonl/src/index.ts` | `rewriteBatch`：读回整份日志、替换目标记录、整份重新编码后**原子替换**（`none` 直接重写行，`zstd` 从帧边界整段重编码）；记录不存在即拒绝 |
+
+**落盘实验（怎么证明「扛得住重启」）**：`scripts/probe-inplace-durability.mjs` 建一个真实会话、写一条带 reasoning 的 assistant 消息、调 `rewriteReasoningBlock`、`flush`，然后**换一个新 Context 从同一目录读回**。它同时钉住：`seq`/日志长度不变、`message.id` 不变、兄弟块不动、`deriveMessages()` 立刻反映改写、同文本再调一次幂等、四条拒绝路径。`none` 与 `zstd` 两种编码都跑过。
+
+```bash
+# 先让补丁脚本报告它定位到的 checkout（不假设任何目录布局，也从不写死路径）
+host="$(node scripts/dsh-inplace-patch.mjs --locate)" || { echo '用 --checkout 指定 DSH 源码目录'; exit 1; }
+cp scripts/probe-inplace-durability.mjs "$host/.dsh-inplace-probe.mjs"
+(cd "$host" && node --import tsx/esm .dsh-inplace-probe.mjs)
+rm "$host/.dsh-inplace-probe.mjs"
+```
+
+> **语义变化（选它之前必须知道）**：`message-edit` 走「另开分支」，原会话的日志**保持原文**；内置 `in-place` 是**把日志里那条 reasoning 就地换掉**——原文**不再留在日志里**。因此事后审计只能依赖插件 sidecar 里记的 `distill.requestText` / `distill.responseText`，而不是回读会话日志。
+
+> **`dsh web` 的运行方式**：本机这份宿主是 `node --import tsx/esm apps/cli/src/bin.ts web`（直接从 `src` 跑），所以补丁**只需重启**即生效；`--build` 那一步仍然有价值——它用 `tsc -b` 校验这 6 个文件并刷新 `lib/` 产物，供从构建产物运行的宿主使用。
 ### 启动时的后端自检（宿主侧，每个进程一次）
 
 面板的探针需要浏览器凭据才能问到 `/api/*`（宿主自己去问只会拿到平台自己的 401），所以**每次 dsh 启动后第一次走到请求前检查（`agent/pre-step`）时**，宿主自己做一次**只看插件清单**的自检——**与本次是否触发压缩、阈值多少都无关**：
 
 - **信号**：profile 的**已启用插件清单** `dsh.profile.bundles`（`<profile>/package.json`，由启动器提供的 `profileContext.dir` 定位；插件管理器 add / remove / 停用会同步改它）。**只看 `bundles`，不看 `dependencies`**：写在后者里的包可能只是**装了但没启用**，它不提供任何路由。
-- **什么时候算「存的那个后端用不了」**（`backendUnusable`，三选一）：① 那个 id **本版本不认识**（被删掉的后端、或别的版本写的值）；② 那个 id 是**占位条目**——它没有任何实现，而且它的行是禁用的，面板自己也清不掉它，只有宿主能清；③ 它登记了插件名，而清单**读到了却没有它**。
+- **什么时候算「存的那个后端用不了」**（`backendUnusable`）：① 那个 id **本版本不认识**（被删掉的后端、或别的版本写的值）；② 那个 id 是**占位条目**（本版本已无这种条目，机制保留）；③ 它登记了插件名，而清单**读到了却没有它**；④ 它是**宿主补丁型**后端（`in-place`）而宿主自检**明确回答没有补丁**——注意只有真的问过并得到「没有」才会清，还没问过（`undefined`）时什么都不动，否则第一个 pre-step 就会把可用配置清掉。
 - **此时做什么**：打一条 warn，并**写一次设置**（走设置服务 `settings.update('reasoning-distill', …)`，与面板保存同一条路径，落盘进 profile patch）：**清空选定后端**（`rewriteBackend: ''`），并在总开关仍为开时**同时把它关掉**（`enabled: false`）。总开关本来就是关的，就只清空那个过期名字。选中的名字比它依赖的东西活得久，留着会让面板和之后每个进程继续承诺一次交不出去的写回。
 - **读不到清单**（拿不到 `profileContext`）→ **什么都不改**：对这个宿主没有任何证据，就不写用户的设置。
 - 因此「**装着但已停用**」的后端在这里等同于**用不了**（它本来就没有路由）；面板的探针与它结论一致，两边都会把总开关锁成关，宿主的这次写入则把选中的名字也一起清掉。
@@ -423,11 +459,17 @@ python3 scripts/patch-message-edit.py <client.js 路径>                  # 指�
 
 以 `web` profile 为例，`$DSH_HOME` 默认 `~/.dsh`。
 
+> 下文用 `$PLUGIN` 指**本插件目录**、`$DSH_CHECKOUT` 指**这台机器上的 DSH 源码目录**。两者都不在任何固定位置，不要照抄示例里的绝对路径；`$DSH_CHECKOUT` 可以随时问补丁脚本：
+>
+> ```bash
+> node "$PLUGIN/scripts/dsh-inplace-patch.mjs" --locate
+> ```
+
 **0. 确认目标路径**
 
 ```bash
-cd /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill
-ls "$DSH_HOME/profiles/web/node_modules/dsh-message-edit" 2>/dev/null || echo "尚未安装"
+cd "$PLUGIN"
+ls "$DSH_HOME/profiles/${DSH_PROFILE:-web}/node_modules/dsh-message-edit" 2>/dev/null || echo "尚未安装"
 ```
 
 **1. 安装前置插件**（二选一）
@@ -435,15 +477,15 @@ ls "$DSH_HOME/profiles/web/node_modules/dsh-message-edit" 2>/dev/null || echo "�
 - **方式 A（推荐，直接用已打好补丁的包）**：
 
   ```bash
-  cd /home/huhu233/otherProject/deepseek-harness
+  cd "$DSH_CHECKOUT"
   pnpm dsh plugin --profile web add \
-    /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill/vendor/dsh-message-edit-0.2.3-patched4.tgz
+    "$PLUGIN/vendor/dsh-message-edit-0.2.3-patched4.tgz"
   ```
 
 - **方式 B（装原版再打补丁）**：
 
   ```bash
-  cd /home/huhu233/otherProject/deepseek-harness
+  cd "$DSH_CHECKOUT"
   pnpm dsh plugin --profile web add dsh-message-edit     # 或 @yunyv/dsh-message-edit
   ```
 
@@ -454,7 +496,7 @@ ls "$DSH_HOME/profiles/web/node_modules/dsh-message-edit" 2>/dev/null || echo "�
 **2. 打补丁**（方式 B 必做；方式 A 已含，但重跑无副作用）
 
 ```bash
-cd /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill
+cd "$PLUGIN"
 python3 scripts/patch-message-edit.py            # 自动发现已安装的 dsh-message-edit / @yunyv/dsh-message-edit
 ```
 
@@ -478,7 +520,7 @@ python3 scripts/patch-message-edit.py <client.js 或 index.mjs 路径>          
 **3. 校验安装结果**
 
 ```bash
-cd /home/huhu233/otherProject/dsh-local-items/dsh-reasoning-distill
+cd "$PLUGIN"
 python3 scripts/patch-message-edit.py            # 期望：already patched ×2
 tmp=$(mktemp -d) && tar -xzf vendor/dsh-message-edit-0.2.3-patched4.tgz -C "$tmp" \
   && cmp "$tmp/package/index.mjs" "$DSH_HOME/profiles/web/node_modules/dsh-message-edit/index.mjs" \
@@ -509,7 +551,7 @@ node scripts/scan-session-logs.mjs               # 期望：VALID 全部、INVAL
 
 设置 → 推理蒸馏 →「助手消息改写后端」旁边有 **「快速安装后端」** 按钮，点开是一个独立页面：
 
-1. **选择后端**：列出**可安装**的后端——当前只有 `message-edit`（本仓库唯一验证过的）。`placeholder` 是占位条目，不在可安装列表里，走这个路由会被直接拒绝。
+1. **选择后端**：列出**可安装**的后端——`message-edit`（伴随插件：装包 + 补丁 + 校验）与 `in-place`（内置后端：**安装就是给宿主打补丁**，`install-backend.sh` 会跑 `dsh-inplace-patch.mjs --apply --build` 再用 `--check` 复检）。
 2. **选择方式**（页面同时给出两者优劣）：
    - **用脚本安装（推荐）**：跑本仓库的 `scripts/install-backend.sh <后端>`，步骤是「定位 checkout/profile → 官方 CLI 装入 profile → 打补丁 → 校验安装件与 vendor 逐字节一致」。页面显示**逐步进度 + 安装输出**，随时可**取消**；**安装跑在宿主进程里，关掉页面（甚至刷新）也不会中断，回来继续看到同一份进度与结果**。前提：本机有 `pnpm` 与 `python3`。
    - **让 agent 安装**：选一个**工作区**，确认后跳到该工作区的**新会话**，安装提示词已经**填进输入框**（发不发由你决定）。agent 会读 README 自己排查，但结果不保证、会真实消耗额度并改动文件。
@@ -517,15 +559,15 @@ node scripts/scan-session-logs.mjs               # 期望：VALID 全部、INVAL
 
 脚本的失败语义：任一步失败即以 `##FAIL` 结束并保留输出；进度只有成功/失败/已取消三种终态，不会假装成功。
 
-**原位后端的写回由谁发起**：in-place 后端的路由在 `/api/*` 后面，需要**浏览器凭据**，宿主自己够不到，所以写回只能由**前端**发起。此前它只在「推理蒸馏」标签页里做（打开该标签才挂载 ✗），而宿主的「待应用」标记**每个会话只留最新一个** ✗ —— 于是连续压缩时除最后一条外都不会被写回，对话页就一直显示原文。现在改为：**常驻座位**（输入框上方的芯片）每次拿到报告就**逐条判断**，凡是「在生效、没被拒、没有交接记录」的条目就发写回并结算；两个驱动之间用**浏览器存储里的认领标记**（60 秒过期）避免重复发送。因此**不需要打开报告标签**。这段驱动当前没有可驱动的后端（`placeholder` 发不出请求），接上真 in-place 后端即恢复。
+**原位后端的写回由谁发起**：in-place 后端的路由在 `/api/*` 后面，需要**浏览器凭据**，宿主自己够不到，所以写回只能由**前端**发起。此前它只在「推理蒸馏」标签页里做（打开该标签才挂载 ✗），而宿主的「待应用」标记**每个会话只留最新一个** ✗ —— 于是连续压缩时除最后一条外都不会被写回，对话页就一直显示原文。现在改为：**常驻座位**（输入框上方的芯片）每次拿到报告就**逐条判断**，凡是「在生效、没被拒、没有交接记录」的条目就发写回并结算；两个驱动之间用**浏览器存储里的认领标记**（60 秒过期）避免重复发送。因此**不需要打开报告标签**。内置 `in-place` 后端就由这条驱动写回。
 
-**探测规则**：插件页挂载时对每个**有探针**的后端发一次探针请求；**`404` 且响应不是 JSON** 才算"未安装"——因为已安装的后端连自己的错误（会话不存在、请求体不合法）也是用它自己的 JSON 信封回答 `404`，单看状态码会误判成没装。`placeholder` 没有探针，所以既不发请求也永远不可选。
+**探测规则**：插件页挂载时对每个**有探针**的后端发一次探针请求；**`404` 且响应不是 JSON** 才算"未安装"——因为已安装的后端连自己的错误（会话不存在、请求体不合法）也是用它自己的 JSON 信封回答 `404`，单看状态码会误判成没装。**宿主补丁型后端多一道**：`in-place` 的探针打的是本插件自己的路由，**能回答只证明插件加载了**，所以还要看响应体里的 `{ patched, functional }` 自检结论，两个都为 `true` 才可选。
 
 **已知不能接入的**：`yumiao-dev/dsh-chat-thinking-editor` 只通过浏览器的 `assistantEdit/replace` **Remote**（RPC 通道）暴露能力，没有 HTTP 面，我们的客户端无法直接调用 → 记入不支持。
 
 规则（与面板实现一致）：
 
-- **只列出已安装的后端**：插件页挂载时各探测一次端点的探针请求，`404` 视为未安装 → 该行置灰、不可选；`placeholder` 没有探针，所以恒不可选。
+- **只列出可用的后端**：插件页挂载时各探测一次端点的探针请求，`404` 视为未安装 → 该行置灰、不可选；`in-place` 还要额外通过宿主补丁自检，未打补丁时显示「需要宿主补丁（一键安装就是打补丁）」。
 - **单选且可取消**：点选中的那一行即取消选择；换选另一个会自动取消原来的。
 - **默认为"不选"**（配置里为空串）。
 - **未选后端 ⇒ 「启用思考压缩」自动关闭并锁定**（面板显示为关闭且不可点；引擎侧同样拒绝发起蒸馏——这是两道一致的闸门）。选择后端后总开关解锁，是否打开由你决定。

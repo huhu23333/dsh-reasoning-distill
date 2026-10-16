@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { branchBackendBlocksSubagents } from '../backends.ts'
+import { backendSelectable, branchBackendBlocksSubagents } from '../backends.ts'
 import type { CatalogModel, CatalogReport } from '../shared.ts'
 import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  REWRITE_BACKENDS, backendById, backendInstalled, backendReachable, backendOptionsVisible, forcesMasterOff, masterSwitchState, nextBackend, normalizeSettings, planSave, ruleFieldsIdle, subagentKindControls, withoutSubagentKinds,
+  REWRITE_BACKENDS, backendById, backendReachable, backendOptionsVisible, forcesMasterOff, masterSwitchState, nextBackend, normalizeSettings, planSave, ruleFieldsIdle, subagentKindControls, withoutSubagentKinds,
   type ProbeAnswer,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
@@ -100,7 +100,9 @@ function BackendChooser({ value, onSelect, t }: {
       void probe(route.path, route.body)
         .then(async answer => {
           const absent = await probe(`${route.path}-absent`, route.body)
-          if (alive) setAvailable(current => ({ ...current, [backend.id]: backendInstalled(answer, absent) }))
+          // For a host-patch backend the answer is this plugin's own route, so answering proves
+          // only that the plugin is loaded; backendSelectable reads the patch verdict out of it.
+          if (alive) setAvailable(current => ({ ...current, [backend.id]: backendSelectable(backend, answer, absent) }))
         })
         .catch(() => {
           if (alive) setAvailable(current => ({ ...current, [backend.id]: false }))
@@ -123,7 +125,9 @@ function BackendChooser({ value, onSelect, t }: {
           ? <span>{backend.id} · {t('settings.backendPlaceholder')}</span>
           : <>
             <span>{backend.id} · {backend.kind === 'branch' ? t('settings.backendBranch') : t('settings.backendInPlace')}</span>
-            <span className={css.muted}>{installed ? t('settings.backendInstalled') : t('settings.backendMissing')}</span>
+            <span className={css.muted}>{installed
+              ? t('settings.backendInstalled')
+              : backend.hostPatch === true ? t('settings.backendNeedsPatch') : t('settings.backendMissing')}</span>
           </>}
       </label>
     })}

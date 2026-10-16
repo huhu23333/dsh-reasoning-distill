@@ -22,12 +22,13 @@ import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-subagent'
 
 import { backendById, backendUnusable, branchBackendBlocksSubagents, missingBackendFixup, rewriteRequest, type BackendFixup } from './backends.ts'
+import { detectHostPatch, rewriteEntryPoint } from './host-patch.ts'
 import { resolveRule, type Config, type ModelRule } from './config.ts'
 import { subagentKindsOffPatch } from './rule.ts'
 import { priceAt } from './peak.ts'
 import { DEFAULT_PROMPT, encloseDistillationData, looksLikeFinalReply } from './prompt.ts'
 import type { SessionRecord, SidecarStore, StoredEntry } from './store.ts'
-import type { ActiveCompression, BlockingReason, DistillRun } from './shared.ts'
+import type { ActiveCompression, BlockingReason, DistillRun, HostPatchStatus } from './shared.ts'
 import { entryInForceHere } from './shared.ts'
 
 /**
@@ -222,6 +223,9 @@ export class ReasoningDistillEngine {
    */
   private backendChecked = false
 
+  /** This host's in-place patch verdict, computed at most once per process. */
+  private hostPatch: HostPatchStatus | undefined
+
   /**
    * Commits {@link BackendFixup} to the settings document. Absent when the host has no settings
    * service, and then a missing backend can only be reported, never acted on.
@@ -391,6 +395,43 @@ export class ReasoningDistillEngine {
   }
 
   /**
+   * Whether this host carries the in-place patch, checked once per process.
+   *
+   * The answer is a real self-check (see {@link detectHostPatch}), not a version comparison: the
+   * patch is optional, so the only truthful question is whether the entry point exists and works.
+   * Memoized because the route answers it on every panel probe and the startup check asks it too.
+   * @returns the patch verdict.
+   */
+  hostPatchStatus(): HostPatchStatus {
+    this.hostPatch ??= detectHostPatch()
+    return this.hostPatch
+  }
+
+  /**
+   * Clear a selected backend this host can no longer drive, the moment that becomes known.
+   *
+   * Same outcome as the startup check (see {@link checkBackend}), reached from the apply path when
+   * the patch turns out to be gone: a stored selection that cannot hand a rewrite over must not
+   * outlive what made it valid, and the master switch that needs it goes with it.
+   */
+  private async clearUnusableBackend(reason: string): Promise<void> {
+    const backend = this.config.rewriteBackend.get() ?? ''
+    if (backend === '') return
+    if (this.writeFixup === undefined) {
+      this.ctx.logger.warn('reasoning-distill: %s, and the host exposes no settings service to clear %s', reason, backend)
+      return
+    }
+    try {
+      const fixup = missingBackendFixup(backend, this.config.enabled.get() === true)
+      if (fixup === undefined) return
+      await this.writeFixup(fixup)
+      this.ctx.logger.warn('reasoning-distill: %s; cleared the rewrite backend selection', reason)
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: %s; clearing the selection failed: %o', reason, error)
+    }
+  }
+
+  /**
    * Run the backend check once per process, at the first pre-step.
    *
    * Nothing else in this plugin may fail because of it: the check reports, and a host that cannot
@@ -419,10 +460,16 @@ export class ReasoningDistillEngine {
   private async checkBackend(): Promise<void> {
     const backend = this.config.rewriteBackend.get() ?? ''
     const active = this.activePlugins === undefined ? undefined : await this.activePlugins()
+    // The patch self-check answers for the backends this plugin serves itself; a companion
+    // backend is judged by the profile's plugin list, exactly as before.
+    const patch = this.hostPatchStatus()
+    const hostPatch = patch.patched && patch.functional
     let fixup: BackendFixup | undefined
-    if (backendUnusable(backend, active)) {
+    if (backendUnusable(backend, active, hostPatch)) {
       const plugin = backendById(backend)?.plugin
-      if (plugin === undefined) {
+      if (backendById(backend)?.hostPatch === true) {
+        this.ctx.logger.warn('reasoning-distill: rewrite backend %s needs the host patch (patched=%s functional=%s%s); clearing the selection', backend, patch.patched, patch.functional, patch.detail === undefined ? '' : ', ' + patch.detail)
+      } else if (plugin === undefined) {
         this.ctx.logger.warn('reasoning-distill: rewrite backend %s is not one this build can drive; clearing the selection', backend)
       } else {
         this.ctx.logger.warn('reasoning-distill: rewrite backend %s needs plugin %s, which the profile no longer lists; clearing the selection', backend, plugin)
@@ -1314,6 +1361,59 @@ export class ReasoningDistillEngine {
       this.ctx.logger.warn('reasoning-distill: could not record the hand-off: %o', error)
       return false
     }
+  }
+
+  /**
+   * Apply one in-place rewrite to a live session, for this plugin's own rewrite route.
+   *
+   * The panel asks for this the way it asks any in-place backend: a POST carrying the session, the
+   * target event and block, and the text. Unlike a companion backend, this one is ours, so the
+   * message identity is taken from the sidecar record rather than from the request — a caller that
+   * guessed a seq could otherwise aim the rewrite at a message the ledger never named — and the
+   * patch is re-confirmed here, because a selection can outlive a reverted host.
+   * @param request - session id, target event seq and block index, and the distilled text.
+   * @returns the new text's seq, or why the rewrite was refused.
+   */
+  async applyInPlace(request: {
+    sessionId: string
+    eventSeq: number
+    blockIndex: number
+    text: string
+  }): Promise<{ ok: true; seq: number } | { ok: false; error: string }> {
+    const { sessionId, eventSeq, blockIndex, text } = request
+    if (sessionId === '' || text === '') return { ok: false, error: 'sessionId and text are required' }
+    if (!Number.isSafeInteger(eventSeq) || eventSeq < 0 || !Number.isSafeInteger(blockIndex) || blockIndex < 0) {
+      return { ok: false, error: 'eventSeq and blockIndex must be non-negative integers' }
+    }
+    const session = this.ctx.sessions.get(sessionId as SessionId)
+    if (session === undefined) return { ok: false, error: 'unknown session' }
+    const rewrite = rewriteEntryPoint(session)
+    if (rewrite === undefined) {
+      await this.clearUnusableBackend('the host patch is not applied on this host')
+      return { ok: false, error: 'the host patch is not applied on this host' }
+    }
+    const record = this.store.peek(sessionId)
+    const entry = record?.entries.find(item => item.targetSeq === eventSeq && item.targetBlockIndex === blockIndex)
+    if (entry === undefined) return { ok: false, error: 'no recorded rewrite for that event and block' }
+    if (entry.targetMessageId === '') return { ok: false, error: 'the recorded rewrite carries no message id' }
+    try {
+      rewrite({
+        seq: eventSeq as SessionSeq,
+        messageId: entry.targetMessageId,
+        blockIndex,
+        text,
+      })
+    } catch (error: unknown) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) }
+    }
+    // The rewritten record reaches storage through the session's own sink; this barrier is what
+    // lets the route answer "written" truthfully instead of promising a write that is still queued.
+    try {
+      await this.ctx.sessions.flush(session)
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: in-place rewrite for %s could not be flushed: %o', sessionId, error)
+    }
+    return { ok: true, seq: eventSeq }
   }
 
   /**

@@ -10,8 +10,9 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { profilePluginDir } from './lib/dsh-paths.mjs';
 
-const bundle = process.argv[2] ?? path.join(os.homedir(), '.dsh/profiles/web/node_modules/dsh-message-edit/index.mjs');
+const bundle = process.argv[2] ?? path.join(profilePluginDir('dsh-message-edit'), 'index.mjs');
 const source = fs.readFileSync(bundle, 'utf8');
 const start = source.indexOf('function boundedInteger(name, fallback, maximum) {');
 const end = source.indexOf('function objectValue(value) {', start);
