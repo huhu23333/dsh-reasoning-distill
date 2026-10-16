@@ -149,9 +149,9 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
 
   /** The prompt the agent route would seed, or an empty string while the host is unknown. */
   const agentPrompt = status === null ? '' : installPromptFor(backendId, status.repo)
-  // The agent route needs a shell that can open a Session in a Workspace. A packaged desktop
-  // build may publish neither, and a disabled button explains nothing — so the prompt stays
-  // copyable instead of the page dead-ending.
+  // Whether the shell offered what the agent route needs to try opening a Session. A packaged
+  // desktop build may publish neither, so this only decides whether that button is offered —
+  // never whether the prompt itself is shown.
   const canOpenSession = bridge !== undefined && workspaces.length > 0 && status !== null
 
   /** Seed a new Session in the chosen Workspace with the agent prompt. */
@@ -241,16 +241,18 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
           {canOpenSession && <div className={css.actions}>
             <button type="button" className={css.primary} disabled={workspaceId === ''} onClick={useAgent}>{t('install.agentGo')}</button>
           </div>}
-          {!canOpenSession && <div className={css.actions}>
-            <button type="button" className={css.secondary} disabled={agentPrompt === ''}
-              onClick={() => { void copyPrompt() }}>{copied ? t('install.copied') : t('install.copyPrompt')}</button>
-          </div>}
-          {canOpenSession
-            ? <p className={css.note}>{t('install.agentHint')}</p>
-            : agentPrompt !== '' && <>
-              <p className={css.note}>{t('install.agentCopyHint')}</p>
-              <textarea className={css.prompt} readOnly value={agentPrompt} onFocus={event => event.currentTarget.select()} />
-            </>}
+          {canOpenSession && <p className={css.note}>{t('install.agentHint')}</p>}
+          {/* The prompt is ALWAYS on screen and copyable. Opening a Session is a shell capability
+              this panel cannot verify: a shell may accept the call without opening anything, and
+              then a success notice would be the only thing the user gets. */}
+          {agentPrompt !== '' && <>
+            <p className={css.note}>{t('install.agentCopyHint')}</p>
+            <textarea className={css.prompt} readOnly value={agentPrompt} onFocus={event => event.currentTarget.select()} />
+            <div className={css.actions}>
+              <button type="button" className={css.secondary}
+                onClick={() => { void copyPrompt() }}>{copied ? t('install.copied') : t('install.copyPrompt')}</button>
+            </div>
+          </>}
         </div>}
 
         {error !== '' && <p role="alert" className={css.error}>{error}</p>}
