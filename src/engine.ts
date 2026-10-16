@@ -568,7 +568,7 @@ export class ReasoningDistillEngine {
    * @param generation - generation the compression started under.
    * @returns whether the history now carries the distilled text.
    */
-  private async settleInPlaceEntry(session: Session, entry: StoredEntry, generation: number): Promise<boolean> {
+  private async settleInPlaceEntry(session: Session, entry: StoredEntry): Promise<boolean> {
     if (entry.targetMessageId === '') return false
     const request = {
       seq: entry.targetSeq as SessionSeq,
@@ -592,65 +592,13 @@ export class ReasoningDistillEngine {
         this.ctx.logger.debug('reasoning-distill: in-place write for %s on its live session failed: %o', session.id, error)
       }
     }
-    if ((this.generation.get(session.id) ?? 0) !== generation) return false
-    return await this.rewriteStored(session.id, request, entry.id)
-  }
-
-  /**
-   * Replace one reasoning block in a stored artifact, for a conversation that is not live.
-   *
-   * Persistence hands out a write handle for a stored session and the host patch gives that handle
-   * `rewrite`; taking ownership is deliberately brief, because an active owner rejects the open, so
-   * a conversation that is running is never touched and the handle is released before anything else
-   * can want it.
-   * @param sessionId - stored conversation to edit.
-   * @param request - the replacement to write.
-   * @param entryId - entry to mark once the artifact carries it.
-   * @returns whether the artifact now carries the distilled text.
-   */
-  private async rewriteStored(
-    sessionId: string,
-    request: { seq: SessionSeq; messageId: string; blockIndex: number; text: string },
-    entryId: string,
-  ): Promise<boolean> {
-    const persistence = optionalService<{ open?(id: string, access: 'write'): Promise<{
-      read(offset?: number, length?: number): Promise<{ events: readonly SessionEvent[] }>
-      rewrite?(events: readonly SessionEvent[]): Promise<void>
-      flush?(): Promise<void>
-      close(): Promise<void>
-    }> }>(this.ctx, 'sessionPersistence')
-    if (persistence?.open === undefined) return false
-    let handle: {
-      read(offset?: number, length?: number): Promise<{ events: readonly SessionEvent[] }>
-      rewrite?(events: readonly SessionEvent[]): Promise<void>
-      flush?(): Promise<void>
-      close(): Promise<void>
-    } | undefined
-    try {
-      handle = await persistence.open(sessionId, 'write')
-      if (handle.rewrite === undefined) return false
-      const { events } = await handle.read(request.seq, 1)
-      const current = events[0]
-      const message = (current?.data as { message?: { id?: string; content?: ContentBlock[] } } | undefined)?.message
-      if (current === undefined || current.type !== 'assistant/message' || message?.id !== request.messageId) return false
-      if (!Array.isArray(message.content) || message.content[request.blockIndex]?.type !== 'reasoning') return false
-      const content = message.content.map((block, index) =>
-        index === request.blockIndex ? { type: 'reasoning' as const, text: request.text } : block)
-      const replacement = {
-        ...current,
-        data: { ...(current.data as object), message: { ...message, content } },
-      } as unknown as SessionEvent
-      await handle.rewrite([replacement])
-      await handle.flush?.()
-      await this.markInPlaceApplied(sessionId, entryId)
-      this.ctx.logger.info('reasoning-distill: wrote a rewrite into the stored history of %s', sessionId)
-      return true
-    } catch (error: unknown) {
-      this.ctx.logger.debug('reasoning-distill: stored in-place write for %s could not be made: %o', sessionId, error)
-      return false
-    } finally {
-      if (handle !== undefined) await handle.close().catch(() => undefined)
-    }
+    // Deliberately live-only. Persistence can open a stored session for writing, but that takes
+    // write ownership behind the session store's back: the host's own handle keeps its revision and
+    // its cross-process lock, and an artifact rewritten underneath it is exactly how a live
+    // conversation gets torn down -- a delegated session whose agent then vanishes from the roster
+    // the main agent addresses it by. An owed rewrite of a conversation that is not live waits for
+    // the pre-step that makes it live again (`settleOwedInPlace`), which is safe and already works.
+    return false
   }
 
   /** Mark one entry as written into the history by this engine, clearing a stale failure note. */
@@ -696,7 +644,7 @@ export class ReasoningDistillEngine {
     for (const entry of owed) {
       if (entry.targetMessageId === '' || !seqs.has(entry.targetSeq)) continue
       const generation = this.generation.get(session.id) ?? 0
-      if (await this.settleInPlaceEntry(session, entry, generation)) wrote += 1
+      if (await this.settleInPlaceEntry(session, entry)) wrote += 1
     }
     if (wrote === 0) return
     this.ctx.logger.info('reasoning-distill: wrote back %d owed in-place rewrite(s) for %s', wrote, session.id)
@@ -2552,7 +2500,7 @@ export class ReasoningDistillEngine {
         // Write it at *this* step boundary rather than at the next pre-step. The step that ends a
         // turn has no next pre-step, and a delegated conversation is disposed as soon as its turn
         // ends, so the last reasoning before a reply had no writer until the conversation ran again.
-        if (await this.settleInPlaceEntry(session, entry, generation)) this.pendingBranch.delete(session.id)
+        if (await this.settleInPlaceEntry(session, entry)) this.pendingBranch.delete(session.id)
       } else if (abandonedNow()) {
         // The committed entry remains visible and any real savings remain payable;
         // only the branch hand-off is skipped after the original turn was released.

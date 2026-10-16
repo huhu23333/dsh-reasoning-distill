@@ -2652,14 +2652,17 @@ await store77.update(storedId, record => {
 })
 const session77 = new FakeSession(storedId, { cwd: '/tmp', origin: 'subagent', delegationDepth: 1, createdAt: 7 })
 const written77 = await (engine77 as unknown as {
-  settleInPlaceEntry(session: unknown, entry: unknown, generation: number): Promise<boolean>
-}).settleInPlaceEntry(session77, (await store77.load(storedId)).entries[0], 0)
-const replaced77 = reasoningIn((probe77.rewritten[0] as { data?: { message?: unknown } } | undefined)?.data?.message)
-check('a rewrite whose session is gone is written into the stored artifact',
-  written77 === true && probe77.opened === 1 && probe77.rewritten.length === 1 && replaced77 === 'short-stored',
-  JSON.stringify({ written77, opened: probe77.opened, rewritten: replaced77 }))
-check('and the entry says the engine wrote it, so nothing writes it twice',
-  (await store77.load(storedId)).entries[0]?.inPlaceApplied !== undefined)
+  settleInPlaceEntry(session: unknown, entry: unknown): Promise<boolean>
+}).settleInPlaceEntry(session77, (await store77.load(storedId)).entries[0])
+// The plugin must NOT write an artifact the session store may own. Taking write ownership behind
+// its back is how a live conversation gets torn down -- a delegated session whose agent then
+// disappears from the roster the main agent addresses it by, which is far worse than a rewrite that
+// waits for the next turn. Nothing is opened, nothing is written, and the entry stays owed.
+check('a rewrite for a session that is not live is not forced into its artifact',
+  written77 === false && probe77.opened === 0 && probe77.rewritten.length === 0,
+  JSON.stringify({ written77, opened: probe77.opened, rewritten: probe77.rewritten.length }))
+check('and the entry stays owed, so the next live pre-step settles it',
+  (await store77.load(storedId)).entries[0]?.inPlaceApplied === undefined)
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)
