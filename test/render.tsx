@@ -13,7 +13,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, stockOfEntry } from '../src/client/View.tsx'
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import { REWRITE_ROUTE, type SessionReport } from '../src/shared.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendReachable, backendSelectable, backendUnusable, claimRewriteAttempt, hostPatchReady, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
+import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendReachable, backendSelectable, backendUnusable, claimRewriteAttempt, hostPatchReady, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, withBusySkipOn, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
 import { branchBackendBlocksSubagents } from '../src/backends.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { mergeRule, sparseOverride } from '../src/rule.ts'
@@ -156,6 +156,19 @@ check('positive ledger net is red and negative ledger net is green',
   && /\.positive\{color:#15816d\}/.test(stylesheet)
   && ledgerClass(positiveLedger).endsWith('_negative') && ledgerClass(negativeLedger).endsWith('_positive')
   && !/\.entry>summary>\.metric:last-child\{[^}]*color:#15816d/.test(stylesheet))
+// The stylesheets once named tokens the host does not define (--dsw-text-primary and friends),
+// which silently fell back to hardcoded light-theme colours and made dark mode unreadable. Pin the
+// exact set the panel may use, so a typo fails here instead of in someone's dark theme.
+const settingsStylesheet = readFileSync('src/client/Settings.module.css', 'utf8')
+const knownTokens = new Set([
+  '--dsw-alias-label-primary', '--dsw-alias-label-secondary', '--dsw-alias-label-tertiary',
+  '--dsw-alias-bg-layer-1', '--dsw-alias-bg-layer-2',
+  '--dsw-alias-border-l1', '--dsw-alias-interactive-bg-hover',
+])
+const usedTokens = [...new Set([stylesheet, settingsStylesheet].flatMap(text =>
+  [...text.matchAll(/--dsw-alias-[a-z0-9-]+/g)].map(match => match[0])))]
+check('every theme token the panel uses is a real host alias',
+  usedTokens.length > 0 && usedTokens.every(token => knownTokens.has(token)))
 
 const estimatedUsage = tryRender(<ReportBody report={{ ...modernReport(), entries: [{ ...modernReport().entries[0]!, distill: { ...modernReport().entries[0]!.distill, inputTokens: 7, cacheReadTokens: 2, outputTokens: 13, estimated: true } }] }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
 check('provider usage is shown verbatim and fallback token figures identify estimates',
@@ -546,6 +559,20 @@ check('an already-pinned document is returned as the same object, so the effect 
   withoutSubagentKinds(pinned) === pinned)
 check('and a document that needs pinning is a new one',
   pinned !== subagentsOn)
+
+// The background-work skip is not offered while a branch backend is selected; the stored value is
+// pinned on instead, so the panel and the engine cannot disagree about whether it applies.
+console.log('client: a branch backend pins the background-work skip on')
+const busyOff = settings({ skipWhileBusy: false })
+const busyOn = withBusySkipOn(busyOff)
+check('the skip is turned on', busyOn.skipWhileBusy === true && busyOff.skipWhileBusy === false)
+check('an already-skipping document is returned as the same object, so the effect cannot loop',
+  withBusySkipOn(busyOn) === busyOn)
+check('and every other stored field is left alone',
+  busyOn.rewriteBackend === busyOff.rewriteBackend
+  && busyOn.archiveSuperseded === busyOff.archiveSuperseded
+  && busyOn.branchTimeoutMs === busyOff.branchTimeoutMs
+  && busyOn.defaultRule === busyOff.defaultRule)
 
 // Both rows the panel draws — the default rule and each model's own entry — go through
 // `subagentKindControls`, so a model row cannot be treated differently from the default one.

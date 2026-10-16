@@ -7,7 +7,7 @@ import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  REWRITE_BACKENDS, backendById, backendReachable, backendOptionsVisible, forcesMasterOff, masterSwitchState, nextBackend, normalizeSettings, planSave, ruleFieldsIdle, subagentKindControls, withoutSubagentKinds,
+  REWRITE_BACKENDS, backendById, backendReachable, backendOptionsVisible, forcesMasterOff, masterSwitchState, nextBackend, normalizeSettings, planSave, ruleFieldsIdle, subagentKindControls, withBusySkipOn, withoutSubagentKinds,
   type ProbeAnswer,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
@@ -358,12 +358,13 @@ export function ReasoningDistillSettings({ form, t }: Props) {
     if (!forcesMasterOff(draft.rewriteBackend, draft.enabled, selectedReachable)) return
     setDraft(current => current == null ? current : { ...current, enabled: false })
   }, [draft, selectedReachable])
-  // The same rule for the two subagent switches: a switch this backend cannot honour must not
-  // stay on in storage, or the panel would show off while the engine kept attempting the hand-off.
-  // `withoutSubagentKinds` returns its input unchanged once every layer is pinned, so this settles.
+  // The same rule for the two subagent switches and for the background-work skip: a value this
+  // backend cannot honour must not stay the other way in storage, or the panel would show one thing
+  // while the engine enforced another. Both helpers return their input unchanged once the value is
+  // already what they pin, so this effect settles instead of looping on its own new object.
   useEffect(() => {
     if (draft == null || !branchBackendBlocksSubagents(draft.rewriteBackend)) return
-    setDraft(current => current == null ? current : withoutSubagentKinds(current))
+    setDraft(current => current == null ? current : withBusySkipOn(withoutSubagentKinds(current)))
   }, [draft])
 
   if (snapshot.status === 'loading' || !draft) return <div className={css.page}>{t('settings.loading')}</div>
@@ -415,9 +416,6 @@ export function ReasoningDistillSettings({ form, t }: Props) {
         <Toggle label={t('settings.archiveSuperseded')} checked={draft.archiveSuperseded}
           onChange={archiveSuperseded => update(current => ({ ...current, archiveSuperseded }))} />
         <p className={css.note}>{t('settings.archiveSupersededHint')}</p>
-        <Toggle label={t('settings.skipWhileBusy')} checked={draft.skipWhileBusy}
-          onChange={skipWhileBusy => update(current => ({ ...current, skipWhileBusy }))} />
-        <p className={css.note}>{t('settings.skipWhileBusyHint')}</p>
         <Count label={t('settings.branchTimeout')} value={draft.branchTimeoutMs}
           onChange={branchTimeoutMs => update(current => ({ ...current, branchTimeoutMs }))} />
         <p className={css.note}>{t('settings.branchTimeoutHint')}</p>

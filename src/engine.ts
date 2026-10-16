@@ -1174,7 +1174,11 @@ export class ReasoningDistillEngine {
    * @returns whether work is running under it.
    */
   private busyWithWork(session: Session): boolean {
-    if (!this.config.skipWhileBusy.get()) return false
+    // A branch backend applies a rewrite by forking the conversation, and the fork cannot take the
+    // background work the conversation it replaces started with it. The option is therefore not
+    // offered while one is selected, and the engine honours it as always on: a profile edited
+    // outside the panel cannot leave such a branch mid-work either.
+    if (!branchBackendBlocksSubagents(this.config.rewriteBackend.get() ?? '') && !this.config.skipWhileBusy.get()) return false
     const jobs = (this.ctx as unknown as { get(key: string): unknown }).get('jobs') as
       { list?(caller?: unknown): readonly { status?: string; owner?: string }[] } | undefined
     if (jobs?.list === undefined) return false

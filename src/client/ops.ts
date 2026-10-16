@@ -193,6 +193,24 @@ export function withoutSubagentKinds(value: SettingsValue): SettingsValue {
 }
 
 /**
+ * Pin the background-work skip on in one draft.
+ *
+ * Used while a branch backend is selected: applying a rewrite forks the conversation, and that
+ * fork cannot carry the background work — a job or subagent run — the conversation it replaces
+ * started. The option is therefore not offered with that backend, and the document the panel saves
+ * states it on, so storage cannot disagree with what the engine enforces.
+ *
+ * Identity matters here: this returns the value it was given when the flag is already on, so the
+ * effect that applies it cannot loop on its own new object.
+ * @param value - the draft being edited.
+ * @returns the draft with the skip pinned on, or the same object when it already is.
+ */
+export function withBusySkipOn(value: SettingsValue): SettingsValue {
+  if (value.skipWhileBusy === true) return value
+  return { ...value, skipWhileBusy: true }
+}
+
+/**
  * Ask one backend whether it is installed, the way the chooser's table does.
  *
  * The same rule the panel's checklist uses, in one place so the master switch can ask about the
