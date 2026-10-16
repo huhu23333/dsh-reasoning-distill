@@ -76,3 +76,71 @@ grep -n '^## ' docs/review-2026-10-15-unfixed.md
 ```
 
 每条未修项的完整证据（含 `文件:行`、探针/复现方式、候选方案的取舍）都在 `docs/review-2026-10-15.md` §5 的对应行里。
+
+---
+
+## 9. 2026-10-16 四方独立复核新增项（flash / v4-pro / gpt-6-sol / gpt-6-astra）
+
+四个模型用**完全相同的提示词**、**无任何前置信息**、各自独立复核本插件；下面按「交叉确认程度」排列。标注「Lead 已核对代码」的条目由 Lead 逐行读过实现，其余为复核者的代码级推证。
+
+### 9.1 这次复核新增的**真缺陷**
+
+**N1【P1】写回成功与否被谎报（交叉确认 3 人：sol / astra / flash，Lead 已核对代码）**
+- 现状：`applyInPlace` 捕获 `sessions.flush` 失败后**只打日志**，仍然写 `inPlaceApplied` 并返回 `{ok:true}`（`src/engine.ts:1588-1603`）——与它上方「这个屏障让路由能如实回答已写入」的注释相反。
+- 叠加：宿主补丁的 rewrite sink 是**发射后不管**（`session.setRewriteSink(event => { this.rewrite([event]).catch(reportFailure) })`，`scripts/dsh-inplace-patch.mjs:197-202`），所以 `flush()` 未必等到这次改写落盘。
+- 后果：会话内文本变了、存储里可能没变（重启后回退），而账本已标「已写入」，欠账重试条件随之消失。
+- 建议：`flush` 失败即返回失败、不写标记（或写 `failed` 注记）；补丁侧让 sink 的写 promise 可被等待。
+
+**N2【P1】欠账写回绕过 `originalHash` 守卫（astra 首报，Lead 已核对代码）**
+- 现状：请求期替换有守卫——原文哈希与记录不符就拒绝（`src/engine.ts:992-1000`）；但**欠账路径**只按 seq/messageId 选条目并直接写 `entry.distilledText`（`settleOwedInPlace` `src/engine.ts:626-651`、`settleInPlaceEntry` `src/engine.ts:571-591`），宿主侧也只校验 seq / message id / 块类型（宿主 `packages/core/session/src/index.ts:721-740`）。
+- 触发：写回曾失败或被延后，期间用户把**同一条消息**就地改过 → 下一次 pre-step 用旧摘要覆盖新内容。
+- 建议：欠账写回前把该消息当前 reasoning 与 `entry.originalHash` 比对，不符就标 `failed` 而不是覆盖。
+
+### 9.2 信任边界与资源
+
+**N3【P2】`/rewrite` 接受调用方任意文本（sol / flash，Lead 已核对代码）**
+- 现状：路由把请求体里的 `text` 原样写进日志（`src/route.ts`、`src/engine.ts:1578-1584`），**不校验**它等于账本记录的 `distilledText`。任何同源调用方（例如另一个已安装插件的客户端代码）可把任意文本写进某会话的思考块 ⇒ 对之后所有请求构成持久化提示注入。可利用性取决于宿主 `/api/*` 的凭据栅栏（未核实）。
+- 建议：路由只收 `{sessionId, eventSeq, blockIndex}`，文本由宿主从账本取；或至少要求与账本一致。
+
+**N4【P2】判据器输入无总量上限（sol / flash）**
+- 现状：`maxInputChars` 默认 0（`src/config.ts:179-194`），即便设了也只是**逐条**截断工具结果，Join 时没有总量上限（`src/engine.ts:2533-2554`）。一步里几十个大文件/命令输出会被整段发给判据器模型（默认 deepseek-official）⇒ 费用与超时不可控，且这些内容扩散到另一个 provider。
+- 建议：给判据器输入加**总量上限**，并在文档里明示「工具输出会发给判据器」。
+
+**N5【P2】报告路由无属主校验 + 空记录被缓存（flash / pro；后半由 `f38613e` 引入）**
+- 现状：`POST /report` 对任何非空 id 都 `store.load`（`src/route.ts:84-104`），而 `load` 会把空白记录**缓存**在内存里且永不驱逐（`src/store.ts:189-195`）⇒ 用不同 id 反复 POST 可让内存无界增长；同一入口也会把该会话**完整思考原文与工具输出**回给知道 id 的调用方（既有 B10 已记，此处补「现在陌生 id 也会走到 load」）。
+- 建议：不缓存陌生 id 的空白记录（或给该缓存设上限）；要恢复属主语义需宿主提供「请求来自哪个会话」。
+
+### 9.3 缓存口径（四人一致的部分）
+
+**N6【P2】`cacheBreakTokens` / `cacheBreakCost` 恒 0 覆盖不了回退路径（四人；pro 认为正常路径下如实）**
+- 现状：两个字段在所有写入点被钉成字面量 0（`src/engine.ts:2353-2354, 2403-2404, 2431-2432`），并被折进 `net`（`src/report.ts:151`）。
+- 正常路径：改写发生在该块**首次作为输入被重放之前**（`settle()` 在 pre-step 等它落地），所以「这一块本来就是未命中」成立——**pro 用 809 对真实请求日志交叉验证**（93.7% 的 `cacheRead(next) ≈ input + cacheRead(prev)`）后认为 0 如实。
+- 例外（会让**改写点之后的整段后缀**重新按未命中计费）：① sidecar 读失败后恢复（C2）；② 步末写回失败、留给面板/轮询补写；③ 卸载/停用后宿主派生缓存仍持蒸馏版。此时报告**高估净收益**；且 `account()` 只对该条目「首次被计数的请求」收未命中价（`src/engine.ts:2213-2216`），若破坏前缀的请求发生在计数之后，它反而按命中价结账。
+- 建议：至少在报告里把这三条例外语义化（「可能未计入的前缀失效」），或恢复后缀归属计价。
+
+**N7【P3】一条不可能失败的自测（flash / sol）**：`test/smoke.ts:1086-1087` 先断言 `cacheBreakTokens === 0` 再断言 `< 1000`，在恒 0 实现下是空断言。
+
+### 9.4 元数据与生命周期
+
+**N8【P2】就地改写留下「旧签名配新文本」（astra / pro，Lead 已核对代码）**
+- 现状：补丁只重建 `message.content[i]`，保留 `message.source`（含 `source.replayState`，宿主 `packages/core/session/src/index.ts:738-740`）；DeepSeek 序列化器把**当前文本**与 replay 里的**签名**配对发送（`packages/llm/llm-deepseek/src/serialize.ts:26-33`）。插件运行时会把派生消息的载荷洗掉，但**卸载/停用、或未装插件的重启**之后就没人洗 ⇒ 新文本 + 旧签名。
+- 影响：取决于 provider 是否强校验签名（未实证）；轻则 replay 降级，重则被拒。这是 C4（分支路径同型问题）在 `in-place` 上的对应项。
+
+**N9【P3】记账 map 只增不减（flash / pro，Lead 已核对代码）**：`conversationOf`、`disposedAt`、`lastDecision`、`generation` 在 dispose 时都不清理（`src/engine.ts:124-148`、`releaseSession` / `forgetSession`），长跑宿主里按「见过的每个会话 id」无界增长。
+
+**N10【P3】in-place 的 `handoff` 永远回 `ok:false`（flash，Lead 已核对代码）**：in-place 成功时不再设 `pendingBranch`（`src/engine.ts:2499-2503`），而 `handoff` 在无 pending 时取 `ok = (error !== undefined)` ⇒ 成功的写回也被面板当成「被拒绝的结算」。
+
+**N11【P3】常驻芯片的失败没有进账本（flash）**：`ActivityChip.tsx:172-177` 只在 sessionStorage 记失败，不调 `settleHandoff(..., error)`（对比 `View.tsx:346-355`），与 `docs/acceptance.md` 的「失败会记录在条目上」不符。
+
+### 9.5 与 dsh-ops 的兼容性
+
+- **既有 O1 复核成立**（四人一致，Lead 已核对两侧代码）：FastCtx 后台作业按 **Session 对象**记账（`dsh-ops/lib/tools.js:693-719`），不进宿主 jobs 表 ⇒ `busyWithWork`（`src/engine.ts:1176-1189`）看不到它，选 `message-edit` 时可能在作业运行中交接/归档，分支丢掉 `job_output` / `job_kill` 的控制权。`in-place` 保持会话身份，不踩这个坑。
+- **新增（sol / pro / flash）**：dsh-ops 的 PTC `ops_batch` 反而登记了宿主 job（`dsh-ops/lib/ptc/index.js:117-141`）⇒ 这类批处理会让 `skipWhileBusy` 暂停压缩（短命，基本无害）。
+- **新增（flash / sol）**：dsh-ops 动态增删工具（`dsh-ops/lib/index.js:74-102`）会让宿主补 `request/header` 变化（`core/agent-loop` `agent.ts:626-648`）⇒ **独立于本插件**造成前缀未命中；这不是本插件缺陷，但排查「缓存为什么掉了」时必须先排除它。
+- **静态结论（pro / flash / astra）**：无共享服务、无 `/api` 路由冲突、settings 命名空间分别是 `reasoning-distill` 与 `dsh-ops*`、客户端 slot 不冲突、dsh-ops 只打 bundle 补丁不改宿主源码 ⇒ 与 `dsh-inplace-patch.mjs` 不冲突。**未验证**：两者同时写同一个 profile patch 是否可能丢行。
+
+### 9.6 复核自身的方法与局限
+
+- 四人**都没能**做真实 provider 的缓存/计费实验：缓存结论来自宿主上报的 `cacheReadTokens` / `inputTokens`（flash 额外统计了 809 对真实请求）与代码可达性，不是 provider 文档或实测。
+- 未验证：这台机器上 `/api/*` 的凭据强度（决定 N3 / N5 的实际可利用性）；DeepSeek 对「旧签名配新文本」的处理（决定 N8）；FastCtx 是否是唯一的私有作业来源；C5（跨进程）真实并发下的表现。
+- 明确**撤回**的候选：多 reasoning 块消息的破坏（被 `stageTarget` 的 `reasoningBlocks !== 1` 守卫挡住，有测试）；「后续请求变热就会失效」的过度概括（其余三人纠正为「需上述例外路径」）。
