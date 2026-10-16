@@ -4,12 +4,14 @@
  * @module dsh-reasoning-distill/route
  */
 
+import { existsSync } from 'node:fs'
+
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { Config } from './config.ts'
 import { buildCatalog, buildReport } from './report.ts'
 import type { ActiveCompression, BlockingReason, HostPatchStatus } from './shared.ts'
-import type { SidecarStore } from './store.ts'
+import { legacySidecarPath, sidecarPath, type SidecarStore } from './store.ts'
 import { CATALOG_ROUTE, HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE } from './shared.ts'
 import { INSTALLABLE_BACKENDS, INSTALL_STEPS, installableBackend } from './install-shared.ts'
 import { pluginRoot, type InstallRunner } from './install.ts'
@@ -95,13 +97,20 @@ export function registerRoutes(
         // not observed yet.
         const sessions = child.get('sessions') as { get(id: string): unknown } | undefined
         const known = engine.sessionFor?.(sessionId)
-        if ((known ?? sessions?.get(sessionId)) === undefined) {
+        const live = known ?? sessions?.get(sessionId)
+        // A conversation that is no longer live still has its record, and the panel asking about it
+        // is the user reading something they just watched: refusing would hide the accounting
+        // rather than protect anything. What stays refused is an id this plugin has no relationship
+        // with at all — no live session and no stored record.
+        const recorded = existsSync(sidecarPath(sessionId)) || existsSync(legacySidecarPath(sessionId))
+        if (live === undefined && !recorded) {
           // The body is diagnostic on purpose: the panel shows the status, and a live probe can
-          // then say *which* lookup failed and whether the plugin can see sessions at all.
+          // then say *which* lookup failed and whether the plugin knows the id at all.
           return json({
             error: 'unknown session',
             engineKnown: known !== undefined,
             knownSessions: engine.sessionCount?.() ?? null,
+            recorded,
           }, 404)
         }
         try {

@@ -19,7 +19,7 @@ process.env['DSH_HOME'] = home
 
 const { ReasoningDistillEngine, estimateTextTokens } = await import('../src/engine.ts')
 const { apply: applyPlugin, inject: requiredServices } = await import('../src/index.ts')
-const { SidecarStore, dshHome, legacySidecarPath, sidecarPath } = await import('../src/store.ts')
+const { SidecarStore, dshHome, emptyRecord, legacySidecarPath, sidecarPath } = await import('../src/store.ts')
 const { buildReport } = await import('../src/report.ts')
 const { registerRoutes } = await import('../src/route.ts')
 const { HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE } = await import('../src/shared.ts')
@@ -2293,6 +2293,15 @@ const neverSeen71 = await reportHandler71?.(new Request('http://localhost/api/re
 }))
 check('and still refuses a session nothing has ever observed',
   neverSeen71?.status === 404, String(neverSeen71?.status))
+// A conversation the user already watched keeps its record after it stops being live -- a finished
+// subagent, an older conversation -- and reading that ledger must not 404. The file is written the
+// way the store writes one; merely loading an absent record creates no file.
+writeFileSync(sidecarPath('recorded-1'), JSON.stringify(emptyRecord('recorded-1')), { mode: 0o600 })
+const recorded71 = await reportHandler71?.(new Request('http://localhost/api/report', {
+  method: 'POST', body: JSON.stringify({ sessionId: 'recorded-1' }),
+}))
+check('the report route answers for a session that is recorded but no longer live',
+  recorded71?.status === 200, String(recorded71?.status))
 const verdict71 = await rewriteHandler?.(new Request('http://localhost/api/rewrite'))
 const verdictBody71 = verdict71 === undefined ? undefined : await verdict71.json() as { patched: boolean; functional: boolean }
 check('the rewrite route reports the host patch verdict on GET',
