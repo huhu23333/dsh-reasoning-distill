@@ -4,6 +4,7 @@
   "type": "module",
   "description": "Distill over-long model reasoning into its useful core and replay the distilled version on every later request, with a per-session cost report.",
   "license": "MIT",
+  "author": "huhu233 <925393268@qq.com>",
   "main": "lib/index.js",
   "exports": {
     ".": {
@@ -20,6 +21,7 @@
     "lib",
     "cordis.patch.yml",
     "README.md",
+    "CHANGELOG.md",
     "docs",
     "scripts/install-backend.sh",
     "scripts/lib",
@@ -31,6 +33,8 @@
   "scripts": {
     "build": "tsdown",
     "watch": "tsdown --watch",
+    "prepare": "tsdown",
+    "prepublishOnly": "npm run build",
     "test:smoke": "tsdown --config tsdown.smoke.config.ts && node test/dist/smoke.js",
     "test:render": "tsdown --config tsdown.render.config.ts && node test/dist/render.js",
     "test": "npm run test:smoke && npm run test:render",
@@ -75,6 +79,14 @@
   ],
   "engines": {
     "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/huhu23333/dsh-reasoning-distill.git"
+  },
+  "homepage": "https://github.com/huhu23333/dsh-reasoning-distill#readme",
+  "bugs": {
+    "url": "https://github.com/huhu23333/dsh-reasoning-distill/issues"
   },
   "peerDependencies": {
     "@deepseek-ai/cordis": "*",
