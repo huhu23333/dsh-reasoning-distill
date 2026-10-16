@@ -9,7 +9,7 @@
  * @module dsh-reasoning-distill/test/smoke
  */
 
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -2276,9 +2276,6 @@ const rewriteEngine = {
   stock: () => undefined,
   handoff: async () => ({ ok: true, recorded: true }),
   hostPatchStatus: () => ({ ...patchState }),
-  // Only the engine can resolve a delegated session: it lives in its agent's scope, and the root
-  // store coldContext hands the route does not carry it.
-  sessionFor: (id: string) => id === 'delegated-1' ? { id } : undefined,
   applyInPlace: async (request: Record<string, unknown>) => { claimedRewrites.push(request); return applyResult },
 }
 registerRoutes(rewriteContext as never, makeConfig(), new SidecarStore(), rewriteEngine as never, coldRunner)
@@ -2288,11 +2285,21 @@ const delegated71 = await reportHandler71?.(new Request('http://localhost/api/re
 }))
 check('the report route resolves a delegated session the root store cannot see',
   delegated71?.status === 200, String(delegated71?.status))
+// A session this plugin has no record of is not an error: the panel is showing a ledger, and an empty
+// one is the honest answer for a one-shot subagent whose switch is off, or a session from before the
+// plugin was installed. Nothing is disclosed, because a session with no record has nothing to show.
 const neverSeen71 = await reportHandler71?.(new Request('http://localhost/api/report', {
   method: 'POST', body: JSON.stringify({ sessionId: 'never-observed' }),
 }))
-check('and still refuses a session nothing has ever observed',
-  neverSeen71?.status === 404, String(neverSeen71?.status))
+const neverSeenBody71 = neverSeen71 === undefined ? undefined : await neverSeen71.json() as { entries?: unknown[]; config?: { rewriteBackend?: string } }
+check('a session with no record answers an empty ledger, not an error',
+  neverSeen71?.status === 200 && Array.isArray(neverSeenBody71?.entries) && neverSeenBody71.entries.length === 0,
+  JSON.stringify({ status: neverSeen71?.status, entries: neverSeenBody71?.entries?.length }))
+check('and still carries the configuration the panel renders with',
+  neverSeenBody71?.config?.rewriteBackend === 'message-edit', JSON.stringify(neverSeenBody71?.config))
+// Answering must not litter: a blank record stays in memory, so probing an unknown id creates nothing.
+check('answering an unknown session writes no sidecar for it',
+  !existsSync(sidecarPath('never-observed')) && !existsSync(legacySidecarPath('never-observed')))
 // A conversation the user already watched keeps its record after it stops being live -- a finished
 // subagent, an older conversation -- and reading that ledger must not 404. The file is written the
 // way the store writes one; merely loading an absent record creates no file.

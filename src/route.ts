@@ -4,14 +4,12 @@
  * @module dsh-reasoning-distill/route
  */
 
-import { existsSync } from 'node:fs'
-
 import type { Context } from '@deepseek-ai/cordis'
 
 import type { Config } from './config.ts'
 import { buildCatalog, buildReport } from './report.ts'
 import type { ActiveCompression, BlockingReason, HostPatchStatus } from './shared.ts'
-import { legacySidecarPath, sidecarPath, type SidecarStore } from './store.ts'
+import type { SidecarStore } from './store.ts'
 import { CATALOG_ROUTE, HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE } from './shared.ts'
 import { INSTALLABLE_BACKENDS, INSTALL_STEPS, installableBackend } from './install-shared.ts'
 import { pluginRoot, type InstallRunner } from './install.ts'
@@ -58,9 +56,6 @@ export function registerRoutes(
      *
      * Optional on the type so the route can be driven by a stub that models only one half.
      */
-    sessionFor?(sessionId: string): unknown
-    /** How many sessions the engine has attached; diagnostics only. */
-    sessionCount?(): number
     handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }>
     hostPatchStatus(): HostPatchStatus
     applyInPlace(request: { sessionId: string; eventSeq: number; blockIndex: number; text: string }): Promise<{ ok: true; seq: number } | { ok: false; error: string }>
@@ -87,32 +82,13 @@ export function registerRoutes(
           return json({ error: 'invalid body' }, 400)
         }
         if (sessionId === '') return json({ error: 'sessionId is required' }, 400)
-        // The panel only ever asks about its own session; refusing unknown ids
-        // keeps this route from serving another session's private reasoning to a
-        // caller that guesses or enumerates ids.
-        //
-        // The engine answers first: a delegated (subagent) session lives in its agent's scope, so
-        // the root store this route can reach does not carry it, while the engine attached it the
-        // moment the host created it. The store stays the fallback for a session this plugin has
-        // not observed yet.
+        // A conversation this plugin has no relationship with is not an error. The panel is showing
+        // a ledger, and an empty ledger is the honest answer for one: a one-shot subagent whose
+        // switch is off, a session from before this plugin was installed, a conversation that was
+        // never compressed. Nothing about any other conversation is disclosed, because a session
+        // with no record has nothing to disclose. The record itself comes from the store, which
+        // answers a blank record for an id it has never seen.
         const sessions = child.get('sessions') as { get(id: string): unknown } | undefined
-        const known = engine.sessionFor?.(sessionId)
-        const live = known ?? sessions?.get(sessionId)
-        // A conversation that is no longer live still has its record, and the panel asking about it
-        // is the user reading something they just watched: refusing would hide the accounting
-        // rather than protect anything. What stays refused is an id this plugin has no relationship
-        // with at all — no live session and no stored record.
-        const recorded = existsSync(sidecarPath(sessionId)) || existsSync(legacySidecarPath(sessionId))
-        if (live === undefined && !recorded) {
-          // The body is diagnostic on purpose: the panel shows the status, and a live probe can
-          // then say *which* lookup failed and whether the plugin knows the id at all.
-          return json({
-            error: 'unknown session',
-            engineKnown: known !== undefined,
-            knownSessions: engine.sessionCount?.() ?? null,
-            recorded,
-          }, 404)
-        }
         try {
           const record = await store.load(sessionId)
           const persistence = child.get('sessionPersistence') as { stat(id: string): Promise<unknown> }
