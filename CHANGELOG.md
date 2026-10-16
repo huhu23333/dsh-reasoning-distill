@@ -2,6 +2,13 @@
 
 本插件的版本变更记录。
 
+## 0.1.4
+
+- **in-place 宿主补丁现在自动适配 `0.2.1-alpha.1` ～ `0.2.1-alpha.5`**：同一个编辑点可以带多组完整锚点，脚本按宿主实际形态挑**恰好匹配的一组**；一组都不匹配、或有多组命中，仍然整体拒绝、不做部分写入。
+- 第 10 处 `tracker-rewrite-sink` 增加「新形态」锚点：宿主自 `0.2.1-alpha.3` 起把该 hook 改成 generator effect + 解构闭包变量，替换文本因此改用闭包 `writers`（generator 内部 `this` 已不是那个实例）——只补缩进能编译，但第一个会话事件就会崩。
+- 逐版本实测（独立 clone）：`alpha.1`～`alpha.5` 全部 `--apply`/`--check`/`--revert` 通过，回退后工作树逐字节干净；`alpha.1`/`alpha.2`/`alpha.3`/`alpha.5` 打过补丁的树 `tsc -b` 通过（`alpha.4`/`alpha.5` 的补丁目标文件与 `alpha.3` 逐字节相同）。
+- README 增加「经过测试的 DSH 版本」：只有 `0.2.1-alpha.1` 是实机运行验证过的，其余为补丁覆盖。
+
 ## 0.1.3
 
 - **暗色模式可读性**：样式表原先引用的是宿主并不存在的 `--dsw-text-primary` / `--dsw-surface` 等变量，全部落到硬编码的浅色回退值，暗色下就成了深底深字、白底白字。现已改用宿主的真实主题 token（`--dsw-alias-label-*`、`--dsw-alias-bg-layer-*`、`--dsw-alias-border-l1`、`--dsw-alias-interactive-bg-hover`），颜色随应用主题自动切换；红/绿/橙保持原来的色调不变。

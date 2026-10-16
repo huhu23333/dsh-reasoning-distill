@@ -27,6 +27,17 @@
  * Every edit is a literal (before, after) pair. An edit counts as applied when the file carries
  * its 'after' text; it is missing when it carries the 'before' text; anything else is an anchor
  * that no longer matches, and the whole patch refuses rather than writing a partial edit.
+ *
+ * An edit may carry alternates (`variants`) because the host rewrites its own functions: one patch
+ * point can exist in more than one literal shape across releases, and both have to be carried for
+ * one script to cover them. The tracker's live-routing hook is the example that forced this — the
+ * host turned it into a generator effect in 0.2.1-alpha.3, where the state it needs is a
+ * destructured closure variable instead of a field on `this`, so the replacement differs in more
+ * than whitespace. Exactly one variant may match a file; a checkout where none or several do is
+ * refused, never guessed at.
+ *
+ * Covered host versions (patch applied, checked, reverted, and type-checked on an isolated clone):
+ * 0.2.1-alpha.1 through 0.2.1-alpha.5. Only 0.2.1-alpha.1 has also been run against real sessions.
  * @module dsh-reasoning-distill/scripts/dsh-inplace-patch
  */
 
@@ -249,6 +260,39 @@ const TRACKER_INSTALL_AFTER = [
   '    })',
   '',
 ].join('\n')
+/**
+ * The same hook in the generator-effect form the host adopted on 2026-10-09
+ * (`fix(session): retain JSONL resources through provider-triggered teardown`, first released in
+ * `dsh-v0.2.1-alpha.3`), where `install` destructures its state and returns a disposer.
+ *
+ * Inside that generator body the `this` receiver is gone, so the sink has to read the
+ * destructured `writers` map. Matching this form with the legacy replacement would compile and
+ * then throw on the first session event, which is why the two forms are separate variants
+ * rather than one padded anchor.
+ */
+const TRACKER_INSTALL_BEFORE_EFFECT = [
+  "      yield ctx.on('session/event', (session: Session, event) => {",
+  '        writers.get(session.id)?.enqueueLive(event, (error) => {',
+  '          ctx.logger.warn(`session-persistence: background write for session "${session.id}" failed (buffered events retained): ${String(error)}`)',
+  '        })',
+  '      })',
+  '',
+].join('\n')
+const TRACKER_INSTALL_AFTER_EFFECT = [
+  "      yield ctx.on('session/event', (session: Session, event) => {",
+  '        const writer = writers.get(session.id)',
+  '        if (writer === undefined || writer === null) return',
+  '        // The write handle exists before the session publishes its first event, which is the',
+  '        // earliest point at which an in-place rewrite could be kept in step with the artifact.',
+  '        writer.watchRewrites(session, (error) => {',
+  '          ctx.logger.warn(`session-persistence: in-place rewrite for session "${session.id}" failed (artifact left unchanged): ${String(error)}`)',
+  '        })',
+  '        writer.enqueueLive(event, (error) => {',
+  '          ctx.logger.warn(`session-persistence: background write for session "${session.id}" failed (buffered events retained): ${String(error)}`)',
+  '        })',
+  '      })',
+  '',
+].join('\n')
 
 /** The whole-artifact rewrite published by the jsonl service. */
 const JSONL_REWRITE_BATCH = [
@@ -302,6 +346,8 @@ const JSONL_REWRITE_BATCH = [
  *
  * `before` and `after` are literal and must occur exactly once in the file's unpatched/patched
  * state; the same pair drives --apply and --revert, so a revert cannot drift from an apply.
+ * `variants` adds alternates for host releases that rewrote the surrounding function; each is a
+ * complete pair of its own, and exactly one of them may match a given file (see `match`).
  */
 const EDITS = [
   {
@@ -421,6 +467,10 @@ const EDITS = [
     file: 'packages/session/session-persistence-jsonl/src/storage.ts',
     before: TRACKER_INSTALL_BEFORE,
     after: TRACKER_INSTALL_AFTER,
+    // The host rewrote this hook on 2026-10-09 (first released in alpha.3): the same patch point
+    // exists in the generator-effect form with a destructured writers map. Both are carried so
+    // one script covers the releases on either side of that change.
+    variants: [{ before: TRACKER_INSTALL_BEFORE_EFFECT, after: TRACKER_INSTALL_AFTER_EFFECT }],
   },
   {
     id: 'session-handle-rewrite',
@@ -505,13 +555,39 @@ function count(haystack, needle) {
   return haystack.split(needle).length - 1
 }
 
+/** Every literal form one edit can take: the primary pair, then any version alternates. */
+function variantsOf(edit) {
+  return [{ before: edit.before, after: edit.after }, ...(edit.variants ?? [])]
+}
+
+/**
+ * Match one edit against one file.
+ *
+ * An edit may carry alternates because the host rewrites its own functions: the same patch point
+ * can exist in more than one literal shape across releases. Exactly one variant must match —
+ * its before text present once with its after text absent means the edit is still to be made,
+ * the other way round means it is already in place. Anything else is reported instead of guessed
+ * at, which is what keeps a partially matching checkout from being written to.
+ * @param text - the target file content.
+ * @param edit - one entry of EDITS.
+ * @returns the verdict and, when one variant matched, that variant.
+ */
+function match(text, edit) {
+  const variants = variantsOf(edit)
+  // An append-style edit keeps its anchor inside its replacement, so an applied variant may still
+  // carry its before text once; more than once means another copy of the anchor exists, which is
+  // not something this patch may treat as its own work.
+  const applied = variants.filter(variant => count(text, variant.after) === 1 && count(text, variant.before) <= 1)
+  if (applied.length === 1) return { state: 'applied', variant: applied[0] }
+  const absent = variants.filter(variant => count(text, variant.before) === 1 && count(text, variant.after) === 0)
+  if (absent.length === 1) return { state: 'absent', variant: absent[0] }
+  const seen = variants.some(variant => count(text, variant.before) > 0 || count(text, variant.after) > 0)
+  return { state: seen ? 'ambiguous' : 'anchor-missing', variant: undefined }
+}
+
 /** Classify one edit against one file. */
 function classify(text, edit) {
-  const after = count(text, edit.after)
-  const before = count(text, edit.before)
-  if (after === 1 && before <= 1) return 'applied'
-  if (after === 0 && before === 1) return 'absent'
-  return after === 0 && before === 0 ? 'anchor-missing' : 'ambiguous'
+  return match(text, edit).state
 }
 
 /**
@@ -545,7 +621,7 @@ function assertClean(root, states, force) {
 
 /** Classify every edit against the current files without writing anything. */
 function inspect(root) {
-  return EDITS.map(edit => ({ ...edit, state: classify(readTarget(root, edit.file), edit) }))
+  return EDITS.map(edit => ({ ...edit, ...match(readTarget(root, edit.file), edit) }))
 }
 
 /** Apply or revert the edit table, returning the per-edit verdicts. */
@@ -565,8 +641,8 @@ function run(root, mode) {
     for (const file of FILES) {
       let text = originals.get(file)
       for (const edit of todo.filter(item => item.file === file)) {
-        const from = mode === '--apply' ? edit.before : edit.after
-        const to = mode === '--apply' ? edit.after : edit.before
+        const from = mode === '--apply' ? edit.variant.before : edit.variant.after
+        const to = mode === '--apply' ? edit.variant.after : edit.variant.before
         const next = text.replace(from, () => to)
         if (next === text) throw new Error(edit.id + ': replacement found no anchor')
         text = next
