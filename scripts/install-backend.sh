@@ -35,6 +35,14 @@ if [ "$backend" = "in-place" ]; then
   fi
   located=""
   if ! located="$(node "$patch" --locate ${checkoutArgs[@]+"${checkoutArgs[@]}"} 2>&1)"; then
+    # A packaged install (dsh-desktop and similar) is a read-only dependency closure with no
+    # source tree: no --checkout can turn it into one, so name that instead of a path list.
+    for cand in "${DSH_HOST_CHECKOUT:-}" "${DSH_CHECKOUT:-}" "$PWD"; do
+      [ -n "$cand" ] || continue
+      if [ -f "$cand/package.json" ] && [ -d "$cand/node_modules/@deepseek-ai/dsh" ] && [ ! -f "$cand/packages/core/session/src/surface.ts" ]; then
+        fail resolve "这是打包版 DSH（$cand：只有 node_modules、没有源码，且通常只读）。in-place 后端需要可写的 DSH 源码树，无法在这种安装里使用；请改用 message-edit 后端"
+      fi
+    done
     fail resolve "定位 DSH checkout 失败（可用 DSH_CHECKOUT 指定 DSH 源码目录）：$located"
   fi
   printf 'checkout=%s\npatch=%s\n' "$located" "$patch"
@@ -85,9 +93,28 @@ printf 'checkout=%s\nprofile=%s\nhome=%s\n' "$checkout" "$profile" "$DSH_HOME"
 finish resolve
 
 step install
-if ! ( cd "$checkout" && pnpm dsh plugin --profile "$profile" add "$tgz" ); then
-  fail install "官方 CLI 安装失败（见上面的输出）"
+# Prefer the installation's own CLI entry when it ships one. A packaged install
+# (dsh-desktop and similar) is READ-ONLY: `pnpm dsh` first runs pnpm's dependency-status check
+# inside that directory and dies with EACCES before the CLI ever runs. Invoking bin.js directly
+# skips the pnpm script-runner and lets the CLI drive pnpm in the writable profile directory.
+cli=""
+for cand in \
+  "${DSH_CHECKOUT:+$DSH_CHECKOUT/node_modules/@deepseek-ai/dsh/lib/bin.js}" \
+  "${DSH_HOST_CHECKOUT:+$DSH_HOST_CHECKOUT/node_modules/@deepseek-ai/dsh/lib/bin.js}" \
+  "$PWD/node_modules/@deepseek-ai/dsh/lib/bin.js" \
+  "$checkout/node_modules/@deepseek-ai/dsh/lib/bin.js"; do
+  [ -n "$cand" ] || continue
+  if [ -f "$cand" ]; then cli="$cand"; break; fi
+done
+installed=0
+if [ -n "$cli" ]; then
+  printf 'dsh CLI：%s\n' "$cli"
+  ( cd "${DSH_HOME:-$HOME}" && node "$cli" plugin --profile "$profile" add "$tgz" ) || installed=1
+else
+  printf '未找到打包的 dsh CLI；回退到 pnpm dsh（源码 checkout）\n'
+  ( cd "$checkout" && pnpm dsh plugin --profile "$profile" add "$tgz" ) || installed=1
 fi
+[ "$installed" = 0 ] || fail install "官方 CLI 安装失败（见上面的输出）"
 finish install
 
 step patch

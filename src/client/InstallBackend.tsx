@@ -76,6 +76,7 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
   const [error, setError] = useState('')
   const [notice, setNotice] = useState('')
   const [workspaceId, setWorkspaceId] = useState('')
+  const [copied, setCopied] = useState(false)
   const bridge = currentInstallBridge()
   const workspaces = bridge?.workspaces() ?? []
 
@@ -146,11 +147,30 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
     }
   }
 
+  /** The prompt the agent route would seed, or an empty string while the host is unknown. */
+  const agentPrompt = status === null ? '' : installPromptFor(backendId, status.repo)
+  // The agent route needs a shell that can open a Session in a Workspace. A packaged desktop
+  // build may publish neither, and a disabled button explains nothing — so the prompt stays
+  // copyable instead of the page dead-ending.
+  const canOpenSession = bridge !== undefined && workspaces.length > 0 && status !== null
+
   /** Seed a new Session in the chosen Workspace with the agent prompt. */
   const useAgent = (): void => {
-    if (bridge === undefined || status === null || workspaceId === '') return
-    bridge.startSession(workspaceId, installPromptFor(backendId, status.repo))
+    if (!canOpenSession || bridge === undefined || workspaceId === '') return
+    bridge.startSession(workspaceId, agentPrompt)
     setNotice(t('install.agentStarted'))
+  }
+
+  /** Copy the prompt so it can be pasted into any session by hand. */
+  const copyPrompt = async (): Promise<void> => {
+    setNotice('')
+    try {
+      await navigator.clipboard.writeText(agentPrompt)
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setError(t('install.copyFailed'))
+    }
   }
 
   return <div className={css.modalBackdrop} role="dialog" aria-modal="true">
@@ -211,19 +231,26 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
           <h4>{t('install.agentWorkspace')}</h4>
           {bridge === undefined && <p className={css.note}>{t('install.agentNoShell')}</p>}
           {bridge !== undefined && workspaces.length === 0 && <p className={css.note}>{t('install.agentNoWorkspace')}</p>}
-          {workspaces.length > 0 && <label className={css.field}>
+          {canOpenSession && <label className={css.field}>
             <span>{t('install.agentWorkspace')}</span>
             <select value={workspaceId} onChange={event => { setWorkspaceId(event.target.value); setNotice('') }}>
               <option value="">{t('install.agentPick')}</option>
               {workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.label}</option>)}
             </select>
           </label>}
-          <div className={css.actions}>
-            <button type="button" className={css.primary}
-              disabled={bridge === undefined || workspaceId === '' || status === null}
-              onClick={useAgent}>{t('install.agentGo')}</button>
-          </div>
-          <p className={css.note}>{t('install.agentHint')}</p>
+          {canOpenSession && <div className={css.actions}>
+            <button type="button" className={css.primary} disabled={workspaceId === ''} onClick={useAgent}>{t('install.agentGo')}</button>
+          </div>}
+          {!canOpenSession && <div className={css.actions}>
+            <button type="button" className={css.secondary} disabled={agentPrompt === ''}
+              onClick={() => { void copyPrompt() }}>{copied ? t('install.copied') : t('install.copyPrompt')}</button>
+          </div>}
+          {canOpenSession
+            ? <p className={css.note}>{t('install.agentHint')}</p>
+            : agentPrompt !== '' && <>
+              <p className={css.note}>{t('install.agentCopyHint')}</p>
+              <textarea className={css.prompt} readOnly value={agentPrompt} onFocus={event => event.currentTarget.select()} />
+            </>}
         </div>}
 
         {error !== '' && <p role="alert" className={css.error}>{error}</p>}

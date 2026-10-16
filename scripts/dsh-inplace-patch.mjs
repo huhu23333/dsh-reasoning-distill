@@ -35,7 +35,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // The one place that knows how to find a DSH checkout on whatever machine this runs on.
-import { locateCheckout } from './lib/dsh-paths.mjs'
+import { locateCheckout, packagedInstallNote } from './lib/dsh-paths.mjs'
 
 /** Join lines into one literal block (a trailing empty line keeps the newline). */
 const nl = (...lines) => lines.join('\n')
@@ -588,13 +588,20 @@ function build(root) {
   }
 }
 
+/** Explain a failed lookup, naming a packaged install when one of the candidates was one. */
+function reportMissingCheckout(located, options) {
+  console.error('dsh-inplace-patch: no DSH source checkout found; pass --checkout <dir>')
+  const note = packagedInstallNote([options.checkout, process.env.DSH_HOST_CHECKOUT, process.env.DSH_CHECKOUT, process.cwd()])
+  if (note !== '') console.error('  ' + note)
+  for (const line of located.tried) console.error('  tried ' + line)
+}
+
 function main() {
   const options = parseArgs(process.argv.slice(2))
   const located = locateCheckout({ explicit: options.checkout })
   if (options.mode === '--locate') {
     if (located.root === undefined) {
-      console.error('dsh-inplace-patch: no DSH source checkout found; pass --checkout <dir>')
-      for (const line of located.tried) console.error('  tried ' + line)
+      reportMissingCheckout(located, options)
       process.exit(1)
     }
     console.log(located.root)
@@ -605,8 +612,7 @@ function main() {
     process.exit(2)
   }
   if (located.root === undefined) {
-    console.error('dsh-inplace-patch: no DSH source checkout found; pass --checkout <dir>')
-    for (const line of located.tried) console.error('  tried ' + line)
+    reportMissingCheckout(located, options)
     process.exit(1)
   }
   const root = located.root

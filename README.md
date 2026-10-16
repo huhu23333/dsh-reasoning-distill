@@ -32,6 +32,7 @@
 - 好处：不新建分支、不产生额外会话，对话列表和归档列表保持干净。
 - 风险：这是修改 DSH 本体源码的补丁。**DSH 跨版本升级很容易出问题**——补丁按字面锚点匹配，任何一处对不上就整体拒绝，不会写一半。升级 DSH 前建议先回退，升级后再用 `--check` 复查、必要时重打；打不上就用 `--checkout <DSH 源码目录>` 指路，不要手工改宿主源码。
 - 打完补丁需要重启 `dsh web` 才生效。回退：`node scripts/dsh-inplace-patch.mjs --revert --build`。
+- **打包版 DSH 用不了这个后端**：像 dsh-desktop 这类把 harness 装成只读、只有 `node_modules` 而没有源码的安装，没有可写的源码树可以打补丁；这类安装请用 message-edit。
 
 ### 旧后端 `message-edit`（保留兼容，不推荐）
 
@@ -42,6 +43,7 @@
   - 它是分支型后端，**不能承接委派**：选中它时两条子代理开关会被强制关闭并锁定；再加上默认「有后台工作/子代理时不压缩」，因此**在有后台任务或子代理的会话里无法使用**。
   - 当前**测试不充分**，行为不保证。
 - 本仓库通过 `vendor/dsh-message-edit-0.2.3-patched4.tgz` 加 `scripts/patch-message-edit.py` 来安装与修补它；装完同样要重启 `dsh web`。
+- 它是**打包版 DSH（例如 dsh-desktop）唯一可用的后端**：只装进 profile，不需要给宿主打补丁。
 
 #### （旧）`message-edit` 后端安装流程
 
