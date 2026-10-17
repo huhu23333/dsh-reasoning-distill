@@ -2,6 +2,12 @@
 
 本插件的版本变更记录。
 
+## 0.1.5
+
+- **适配 DSH `0.2.0-rc.1` ～ `0.2.1-rc.1`**：in-place 补丁在每个版本上 `--apply` → `--check` → `--revert` 全部通过（回退后工作树逐字节干净），打过补丁的包 `tsc -b` 通过，持久化探针（none / zstd）通过；兼容范围写进 `dsh.compatibility.dshReleases`。
+- `scripts/probe-inplace-durability.mjs` 同时适配 jsonl 后端的两种导出形态：`0.2.1-alpha.2` 及以前是 default export 的提供者类，`0.2.1-alpha.3` 起是 `name` + `apply` 的 Cordis 插件。
+- README 开头补充「版本与安装方式」：可能适配的版本范围、已知可运行 in-place 的版本（`0.2.1-alpha.1`、`0.2.1-alpha.5`），以及「想要全部功能与最佳体验请用从源码构建的 DSH」。
+
 ## 0.1.4
 
 - **in-place 宿主补丁现在自动适配 `0.2.1-alpha.1` ～ `0.2.1-alpha.5`**：同一个编辑点可以带多组完整锚点，脚本按宿主实际形态挑**恰好匹配的一组**；一组都不匹配、或有多组命中，仍然整体拒绝、不做部分写入。

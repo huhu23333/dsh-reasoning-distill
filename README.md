@@ -4,6 +4,12 @@
 
 > 插件**默认关闭**，装好后需要在「设置 → 思考压缩」里选中一个改写后端并手动打开总开关。
 
+> **版本与安装方式（先看这里）**
+>
+> - **可能适配的 DSH 版本**：`0.2.0-rc.1` ～ `0.2.1-rc.1`。这一范围内的补丁、类型与语义都逐版本验证过，明细见下文「经过测试的 DSH 版本」。
+> - **已知可以正常运行 in-place 后端**的版本：`0.2.1-alpha.1`、`0.2.1-alpha.5`。
+> - **想要全部功能与最佳体验，请使用从源码构建的 DSH**（clone 官方仓库后从源码运行或构建）。**从 npm 直接下载的版本**和**第三方打包版**（例如 dsh-desktop）无法给宿主源码打补丁，in-place 后端用不了，只能退而使用 message-edit。
+
 ---
 
 ## 一、它做什么
@@ -36,11 +42,17 @@
 
 #### 经过测试的 DSH 版本
 
-- **实机运行验证过的只有 `0.2.1-alpha.1`**：就是本插件开发机正在运行的版本，in-place 补丁已在真实会话里长期使用。
-- **补丁本身经过验证的版本**：`0.2.1-alpha.1` ～ `0.2.1-alpha.5`。做法是把官方仓库单独 clone 出来，逐个 tag 跑 `--apply` → `--check` → `--revert` → `--check`（全部通过，回退后工作树逐字节干净），并让打过补丁的树跑 `tsc -b`（`alpha.3` 与 `alpha.5` 实测通过）。
-  - `alpha.4` / `alpha.5` 的 6 个补丁目标文件与 `alpha.3` 逐字节相同，所以这三个版本是同一组结论。
-- 上面的"覆盖"只证明：补丁能干净地打上、能逐字节回退、打过补丁的包能通过类型检查。**运行期行为只有 `alpha.1` 是实测的**；更"新"的宿主版本请先在一个可回退的环境里验证再长期使用。
-- 版本差异最大的一处：`packages/session/session-persistence-jsonl/src/storage.ts` 的 `install()` 从 `0.2.1-alpha.3` 起改成了 generator effect + 闭包变量（`writers` 取代 `this.writers`，在 generator 内部 `this` 已不是那个实例）。补丁脚本为此处带**两份锚点**，会按宿主实际形态自动选择匹配的那份，不会用"只改缩进"的方式硬套。
+分三档看，别把"补丁能打上"当成"整套在真实会话里跑过"：
+
+| 档位 | 覆盖的版本 | 做到了什么 |
+| --- | --- | --- |
+| 已知可运行 in-place | `0.2.1-alpha.1`、`0.2.1-alpha.5` | alpha.1 是本插件开发机（补丁已长期在真实会话中使用）；alpha.5 是反馈该问题的用户所在版本，补丁与插件均确认可用 |
+| 完整启动 | `0.2.1-rc.1` | 独立 clone 全量构建后装入插件并启动 `web`，插件的安装页与报告页路由都能正常应答 |
+| 补丁 + 类型 + 语义 | `0.2.0-rc.1`、`0.2.0-rc.2`、`0.2.1-alpha.1`～`0.2.1-alpha.5`、`0.2.1-rc.1` | 独立 clone 上逐版本 `--apply` → `--check` → `--revert`（回退后工作树逐字节干净）、打过补丁的包 `tsc -b` 通过、持久化探针 `scripts/probe-inplace-durability.mjs` 通过（none 与 zstd）、插件依赖的宿主 API 兼容探针通过 |
+
+- 也就是说：**在 0.2.x 范围内，in-place 补丁与插件的宿主 API 都有逐版本实测依据**；其中 `0.2.1-alpha.1` 与 `0.2.1-alpha.5` 已知可正常运行 in-place，完整启动验证过的是 `0.2.1-rc.1`。其余版本请先在可回退的环境里试。
+- 版本差异最大的一处：`packages/session/session-persistence-jsonl/src/storage.ts` 的 `install()` 从 `0.2.1-alpha.3` 起改成了 generator effect + 闭包变量（`writers` 取代 `this.writers`，在 generator 内部 `this` 已不是那个实例）。补丁脚本为此处带**两份锚点**，会按宿主实际形态自动选择匹配的那份。
+- `scripts/probe-inplace-durability.mjs` 同时适配了 jsonl 后端的两种导出形态：`0.2.1-alpha.2` 及以前 default export 提供者类，`0.2.1-alpha.3` 起是 `name` + `apply` 的 Cordis 插件。
 
 ### 旧后端 `message-edit`（保留兼容，不推荐）
 

@@ -24,7 +24,7 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
-import JsonlSessionPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
+import * as jsonlPersistence from '@deepseek-ai/dsh-session-persistence-jsonl'
 import { createMessage } from '@deepseek-ai/dsh-llm'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -44,11 +44,28 @@ function check(label, ok, detail) {
 
 const root = await mkdtemp(join(tmpdir(), 'dsh-inplace-probe-'))
 
+/**
+ * The jsonl backend as something this host can mount, in either shape it has shipped.
+ *
+ * Up to 0.2.1-alpha.2 the package default-exported the provider class; from 0.2.1-alpha.3 it is a
+ * plain Cordis plugin (a module-level name + apply, with its Config no longer a static member).
+ * The probe adapts instead of pinning one tag, so a checkout at any covered 0.2.x release can be
+ * verified with this one file.
+ * @returns the plugin value ctx.plugin accepts.
+ */
+function jsonlPlugin() {
+  if (typeof jsonlPersistence.default === 'function') return jsonlPersistence.default
+  if (typeof jsonlPersistence.apply === 'function') {
+    return { name: jsonlPersistence.name, apply: jsonlPersistence.apply }
+  }
+  throw new Error('dsh-session-persistence-jsonl exports neither a default plugin nor apply()')
+}
+
 /** Mount one SessionStore + jsonl backend over the shared root. */
 async function boot() {
   const ctx = new Context()
   await ctx.plugin(SessionStore)
-  await ctx.plugin(JsonlSessionPersistence, { root, compression: COMPRESSION })
+  await ctx.plugin(jsonlPlugin(), { root, compression: COMPRESSION })
   return ctx
 }
 
@@ -146,7 +163,7 @@ try {
 
     // A fresh context over the same root: what a restarted process would see.
     fresh = new Context()
-    await fresh.plugin(JsonlSessionPersistence, { root, compression: COMPRESSION })
+    await fresh.plugin(jsonlPlugin(), { root, compression: COMPRESSION })
     const onDisk = storedReasoning(await storedEvents(fresh, session.id))
     check('a restarted reader sees the rewrite on disk', onDisk === REWRITTEN, String(onDisk))
     if (COMPRESSION === 'none') {

@@ -1,6 +1,6 @@
 {
   "name": "dsh-reasoning-distill",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "type": "module",
   "description": "Distill over-long model reasoning into its useful core and replay the distilled version on every later request, with a per-session cost report.",
   "license": "MIT",
@@ -62,7 +62,14 @@
     },
     "compatibility": {
       "dshReleases": {
-        "0.2.1-alpha.1": "compatible"
+        "0.2.0-rc.1": "compatible",
+        "0.2.0-rc.2": "compatible",
+        "0.2.1-alpha.1": "compatible",
+        "0.2.1-alpha.2": "compatible",
+        "0.2.1-alpha.3": "compatible",
+        "0.2.1-alpha.4": "compatible",
+        "0.2.1-alpha.5": "compatible",
+        "0.2.1-rc.1": "compatible"
       },
       "node": ">=20"
     }
