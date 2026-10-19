@@ -22,7 +22,7 @@ const { apply: applyPlugin, inject: requiredServices } = await import('../src/in
 const { SidecarStore, dshHome, emptyRecord, legacySidecarPath, sidecarPath } = await import('../src/store.ts')
 const { buildReport } = await import('../src/report.ts')
 const { registerRoutes } = await import('../src/route.ts')
-const { HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE } = await import('../src/shared.ts')
+const { HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE, exceedsContextCap } = await import('../src/shared.ts')
 const { InstallRunner } = await import('../src/install.ts')
 const { INSTALLABLE_BACKENDS, INSTALL_STEPS } = await import('../src/install-shared.ts')
 const { DEFAULT_RULE, resolveRule } = await import('../src/config.ts')
@@ -93,6 +93,20 @@ const legacyOnly = resolveRule('any-model', ruleConfig({ maxInputChars: 1000, ma
 check('a legacy-only top-level ceiling still applies where no rule states one',
   legacyOnly.maxInputChars === 1000 && legacyOnly.maxOutputChars === 1500,
   JSON.stringify({ maxInputChars: legacyOnly.maxInputChars, maxOutputChars: legacyOnly.maxOutputChars }))
+
+// Occupancy is strictly-above, measured against the routed model's window. A host
+// that cannot answer (no window, no meter) must never block a compression.
+check('the context cap ships on at 60% and compares strict occupancy',
+  DEFAULT_RULE.contextCap === true && DEFAULT_RULE.maxContextPercent === 60
+  && !exceedsContextCap(599, 1000, 60) && !exceedsContextCap(600, 1000, 60)
+  && exceedsContextCap(601, 1000, 60)
+  && !exceedsContextCap(1000, 1000, 100) && exceedsContextCap(1001, 1000, 100)
+  && !exceedsContextCap(900, 0, 60) && !exceedsContextCap(Number.NaN, 1000, 60),
+  JSON.stringify({ cap: DEFAULT_RULE.contextCap, percent: DEFAULT_RULE.maxContextPercent }))
+const capRule = resolveRule('any-model', ruleConfig({ models: { 'any-model': { contextCap: false, maxContextPercent: 75 } } }))
+check('a model rule overrides the cap fields like any other',
+  capRule.contextCap === false && capRule.maxContextPercent === 75,
+  JSON.stringify({ contextCap: capRule.contextCap, maxContextPercent: capRule.maxContextPercent }))
 
 /** Minimal in-memory session. */
 class FakeSession {
@@ -330,19 +344,17 @@ for (const fn of auditHandlers.get('session/event') ?? []) await fn(audited, aud
 for (const fn of auditHandlers.get('session/event') ?? []) await fn(audited, audited.eventAt(audited.log.length - 1))
 for (const fn of auditHandlers.get('agent/pre-step') ?? []) await fn({ agent: { session: audited } }, async () => undefined)
 const auditedEntry = (await new SidecarStore().load(audited.id)).entries[0]
-await settleFor(async () => persisted.get(auditedEntry?.distill.sessionId ?? '')?.some(event => event.type === 'assistant/message') === true)
-const persistedAudit = persisted.get(auditedEntry?.distill.sessionId ?? '')
-const reopenedAudit = persistedAudit === undefined ? undefined : new FakeSession(auditedEntry!.distill.sessionId, { id: auditedEntry!.distill.sessionId, cwd: '/tmp' })
-for (const event of persistedAudit ?? []) reopenedAudit!.append(event.type, event.data)
-// A compression session is written once and then settled, so its durable writer
-// must be released at that settle — one handle per compression held until unload
-// is a leak that grows with every distillation — and released exactly once, since
-// a host also sweeps at unload.
 const auditedWriterId = auditedEntry?.distill.sessionId ?? ''
-await settleFor(async () => (auditCloses.get(auditedWriterId) ?? 0) > 0)
-check('a settled compression session releases its durable writer, exactly once',
-  auditCloses.get(auditedWriterId) === 1,
-  JSON.stringify({ sessionId: auditedWriterId, closes: auditCloses.get(auditedWriterId) ?? 0 }))
+await settleFor(async () => auditSessions.get(auditedWriterId)?.log.some(event => event.type === 'assistant/message') === true)
+// A compression session is an inspection window, not a conversation the user
+// keeps: it must never claim a persistence writer, so a restart is the only thing
+// that expires it. A writer would leave an artifact the report then keeps offering
+// forever, contradicting what the panel says.
+const inMemoryAudit = auditSessions.get(auditedWriterId)
+check('a compression session stays memory-only: no writer is claimed and nothing persists',
+  persisted.size === 0 && auditWriters.size === 0 && auditCloses.size === 0
+  && inMemoryAudit?.log.some(event => event.type === 'assistant/message') === true,
+  JSON.stringify({ sessionId: auditedWriterId, persisted: [...persisted.keys()], writers: [...auditWriters.keys()], events: inMemoryAudit?.log.map(event => event.type) }))
 let reportHandler: ((request: Request) => Promise<Response>) | undefined
 let installHandler: ((request: Request) => Promise<Response>) | undefined
 const coldSessions = new Map([[audited.id, audited]])
@@ -375,11 +387,11 @@ const coldRunner = new InstallRunner(() => ({ onLine: () => undefined, onExit: (
 registerRoutes(coldContext as never, makeConfig(), new SidecarStore(), { snapshot: () => ({ active: [], blockingSince: null, blockingReason: null, pendingBranch: null, generation: 0 }), stock: () => undefined, handoff: async () => ({ ok: true, recorded: true }) }, coldRunner)
 const coldReportResponse = await reportHandler?.(new Request('http://localhost/api/report', { method: 'POST', body: JSON.stringify({ sessionId: audited.id }) }))
 const coldReport = coldReportResponse === undefined ? undefined : await coldReportResponse.json() as { entries: Array<{ sessionLive?: boolean }> }
-check('audit startup requires persistence and compressed session loads durably without missing marker',
+check('audit startup requires persistence, the session opens while live, and a restart expires it',
   requiredServices.includes('sessionPersistence') && missingServiceError.includes('sessionPersistence')
-  && auditedEntry?.sessionMissing !== true && reopenedAudit?.log.some(event => event.type === 'assistant/message') === true
-  && coldReport?.entries[0]?.sessionLive === true,
-  JSON.stringify({ requiredServices, missingServiceError, id: auditedEntry?.distill.sessionId, missing: auditedEntry?.sessionMissing, eventTypes: persistedAudit?.map(event => event.type), reportStatus: coldReportResponse?.status, coldLive: coldReport?.entries[0]?.sessionLive, report: coldReportResponse?.status === 200 ? undefined : coldReport, auditSessions: [...auditSessions.keys()], persisted: [...persisted.keys()] }))
+  && auditedEntry?.sessionMissing !== true && inMemoryAudit !== undefined
+  && coldReport?.entries[0]?.sessionLive === false,
+  JSON.stringify({ requiredServices, missingServiceError, id: auditedEntry?.distill.sessionId, missing: auditedEntry?.sessionMissing, reportStatus: coldReportResponse?.status, coldLive: coldReport?.entries[0]?.sessionLive, auditSessions: [...auditSessions.keys()], persisted: [...persisted.keys()] }))
 const config = makeConfig()
 const store = new SidecarStore()
 const engine = new ReasoningDistillEngine(ctx as never, config as never, store)
@@ -2670,6 +2682,85 @@ check('a rewrite for a session that is not live is not forced into its artifact'
   JSON.stringify({ written77, opened: probe77.opened, rewritten: probe77.rewritten.length }))
 check('and the entry stays owed, so the next live pre-step settles it',
   (await store77.load(storedId)).entries[0]?.inPlaceApplied === undefined)
+console.log('\n--- context occupancy cap ---')
+// The shared handler map belongs to whichever later scenario cleared and
+// re-registered it, so this scenario brings its own context and services.
+const capHandlers = new Map<string, Function[]>()
+const capSessions = new Map<string, FakeSession>()
+const capCreated: FakeSession[] = []
+const capMeter = { totalTokens: 0 }
+const capLlm = {
+  ...fakeLlm,
+  /** 1000-token capacity for every route, so the 60% default cap is 600 tokens. */
+  async resolveModelInfo(provider: string, model: string) {
+    return { provider, id: model, name: model, context: { contextWindow: 1000 } }
+  },
+}
+const capCtx = {
+  logger: ctx.logger,
+  sessions: {
+    list: () => [...capSessions.values()],
+    get: (id: string) => capSessions.get(id),
+    flush: async () => true,
+    create: () => {
+      const session = new FakeSession('session-cap-compress-' + (capCreated.length + 1))
+      capCreated.push(session)
+      capSessions.set(session.id, session)
+      return session
+    },
+  },
+  llm: capLlm,
+  tokenMeter: { measure: () => ({ totalTokens: capMeter.totalTokens }) },
+  on(name: string, fn: Function) {
+    const list = capHandlers.get(name) ?? []
+    list.push(fn)
+    capHandlers.set(name, list)
+    return () => undefined
+  },
+  get(name: string): unknown { return name === 'tokenMeter' ? Reflect.get(this, name) : undefined },
+  effect: () => undefined,
+  fiber: {},
+}
+const capEngine = new ReasoningDistillEngine(capCtx as never, makeConfig() as never, new SidecarStore())
+capEngine.start()
+const fireCap = async (name: string, ...args: unknown[]): Promise<void> => {
+  for (const fn of capHandlers.get(name) ?? []) await fn(...args)
+}
+const capSession = new FakeSession('session-cap', { cwd: '/tmp', createdAt: 1 })
+capSessions.set(capSession.id, capSession)
+await fireCap('session/created', capSession)
+capSession.append('system/message', { turn: 1, step: 1, message: { id: 'cap-sys', role: 'system', content: [{ type: 'text', text: 'system' }], source: { kind: 'system-prompt' } } })
+capSession.append('user/message', { id: 'cap-u', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const capSeq = capSession.append('assistant/message', {
+  turn: 1, step: 1,
+  message: {
+    id: 'cap-a', role: 'assistant',
+    content: [{ type: 'reasoning', text: 'cap reasoning '.repeat(200) }, { type: 'tool-call', id: 'cap-t', name: 'tool', arguments: '{}' }],
+    source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+  },
+  stream: [],
+}).seq
+capSession.append('step/end', { turn: 1, step: 1 })
+const capEnd = capSession.eventAt(capSession.log.length - 1)
+// 900 of a 1000-token window is above the default 60% cap, although the reasoning
+// is far over the token threshold: this step must not be distilled.
+capMeter.totalTokens = 900
+await fireCap('session/event', capSession, capSession.eventAt(capSeq))
+await fireCap('session/event', capSession, capEnd)
+await fireCap('agent/pre-step', { agent: { session: capSession } }, async () => undefined)
+await settleFor(async () => capEngine.snapshot(capSession.id).lastDecision?.reason === 'context-cap')
+check('occupancy above the cap leaves an otherwise eligible step alone',
+  capEngine.snapshot(capSession.id).lastDecision?.reason === 'context-cap' && capCreated.length === 0,
+  JSON.stringify({ reason: capEngine.snapshot(capSession.id).lastDecision?.reason, created: capCreated.length }))
+// And below it the same step is compressed as before: the cap is a ceiling, not a switch.
+capMeter.totalTokens = 599
+await fireCap('session/event', capSession, capSession.eventAt(capSeq))
+await fireCap('session/event', capSession, capEnd)
+await fireCap('agent/pre-step', { agent: { session: capSession } }, async () => undefined)
+await settleFor(async () => (await new SidecarStore().load(capSession.id)).entries[0] !== undefined)
+const capEntry = (await new SidecarStore().load(capSession.id)).entries[0]
+check('occupancy below the cap compresses the same step', capEntry !== undefined && capCreated.length === 1,
+  JSON.stringify({ entry: capEntry?.id, created: capCreated.length }))
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

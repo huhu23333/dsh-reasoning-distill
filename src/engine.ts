@@ -29,7 +29,7 @@ import { priceAt } from './peak.ts'
 import { DEFAULT_PROMPT, encloseDistillationData, looksLikeFinalReply } from './prompt.ts'
 import type { SessionRecord, SidecarStore, StoredEntry } from './store.ts'
 import type { ActiveCompression, BlockingReason, DistillRun, HostPatchStatus } from './shared.ts'
-import { entryInForceHere } from './shared.ts'
+import { entryInForceHere, exceedsContextCap } from './shared.ts'
 
 /**
  * One request's view of the surface: which node seqs exist, and where each lands
@@ -93,15 +93,6 @@ interface DistillOutcome {
   run: DistillRun
   failed: boolean
 }
-
-/**
- * Releases the durable writer a compression session claimed.
- *
- * Idempotent by contract: the engine releases a settled session's writer, and
- * the plugin's unload sweep releases whatever is left, so the same writer can be
- * released twice.
- */
-export type CompressionWriterRelease = () => Promise<void>
 
 /**
  * Owns every session-scoped effect of this plugin.
@@ -185,8 +176,6 @@ export class ReasoningDistillEngine {
   private readonly handoffOrder = new Map<string, number>()
   /** Latest successfully committed attempt per entry in this process. */
   private readonly committedHandoffOrder = new Map<string, number>()
-  /** Audit links known to be non-durable, keyed `sessionId:entryId`. */
-  private readonly auditBroken = new Set<string>()
   /** Bumped whenever a session id is attached again; stale work checks it. */
   private readonly generation = new Map<string, number>()
   /** The session object currently attached for an id; late events are ignored. */
@@ -214,23 +203,6 @@ export class ReasoningDistillEngine {
    * this plugin produced from it.
    */
   private readonly rawDeriveEventMessage = new WeakMap<object, (event: SessionEvent) => Message | null>()
-
-  /**
-   * Claims a durable log writer for a freshly created compression session, once
-   * a persistence backend is present. @see ReasoningDistillEngine.usePersistence
-   */
-  private attachWriter: ((session: Session) => Promise<CompressionWriterRelease | void>) | undefined
-
-  /**
-   * The release of each settled compression session's durable writer, keyed by
-   * that session's id.
-   *
-   * A compression session is written once and then finished or failed; after
-   * that nothing appends to it, so its writer must not stay claimed for the life
-   * of the process. The entry is dropped by the release itself, which makes a
-   * settle that arrives twice a no-op. @see releaseCompressionWriter
-   */
-  private readonly compressionWriters = new Map<string, CompressionWriterRelease>()
 
   /**
    * Whether this engine still rewrites prompts. Unloading flips it off instead
@@ -394,22 +366,6 @@ export class ReasoningDistillEngine {
       if (this.active && !this.replaced(session)) this.expectRequest.add(session.id)
       return proposed
     })
-  }
-
-  /**
-   * Register the durable-writer hook for compression sessions.
-   *
-   * The hook may return the release for the writer it just claimed. A
-   * compression session is written once and then settled, so returning the
-   * release is what lets the engine hand the handle back at that point instead
-   * of holding one open per compression for the whole life of the process. A
-   * host (or test double) that returns nothing keeps the unload-time sweep as
-   * the only release, which is what every writer used to get.
-   * @param attach - claims a write handle for one freshly created session and
-   *   returns its release, when the backend exposes one.
-   */
-  usePersistence(attach: (session: Session) => Promise<CompressionWriterRelease | void>): void {
-    this.attachWriter = attach
   }
 
   /**
@@ -766,9 +722,6 @@ export class ReasoningDistillEngine {
         clearTimeout(timer)
         this.abandonTimers.delete(key)
       }
-    }
-    for (const key of [...this.auditBroken]) {
-      if (key.startsWith(prefix)) this.auditBroken.delete(key)
     }
     this.storageBroken.delete(sessionId)
     // The record itself is the worst of it: it holds the original reasoning text and
@@ -1193,6 +1146,44 @@ export class ReasoningDistillEngine {
   }
 
   /**
+   * Why the staged step must not be distilled because the conversation is already
+   * too full, or undefined when it may proceed.
+   *
+   * Occupancy is the host token meter's own measurement over the routed model's
+   * declared context window — the same numbers its compaction trigger reads — so
+   * the cap cannot drift from what the host considers full, and a compaction
+   * lowers the percentage immediately. A host without the meter, without a
+   * declared window, or with an unreadable route cannot answer; an unanswerable
+   * cap never blocks a compression, because guessing is worse than the feature
+   * being inert.
+   * @param session - conversation the reasoning came from.
+   * @param target - the staged step about to be distilled.
+   * @returns the report reason code, or undefined when compression may run.
+   */
+  private async contextCapRefusal(session: Session, target: PendingTarget): Promise<string | undefined> {
+    if (!target.rule.contextCap) return undefined
+    const meter = optionalService<{ measure(session: Session): { totalTokens: number } }>(this.ctx, 'tokenMeter')
+    if (meter === undefined) return undefined
+    let contextWindow: number | undefined
+    try {
+      const info = await this.ctx.llm.resolveModelInfo(target.provider, target.model)
+      contextWindow = info.context?.contextWindow
+    } catch (error: unknown) {
+      this.ctx.logger.debug('reasoning-distill: no context capacity for %s/%s: %o', target.provider, target.model, error)
+      return undefined
+    }
+    if (contextWindow === undefined || contextWindow <= 0) return undefined
+    let totalTokens: number
+    try {
+      totalTokens = meter.measure(session).totalTokens
+    } catch (error: unknown) {
+      this.ctx.logger.warn('reasoning-distill: could not measure context pressure for %s: %o', session.id, error)
+      return undefined
+    }
+    return exceedsContextCap(totalTokens, contextWindow, target.rule.maxContextPercent) ? 'context-cap' : undefined
+  }
+
+  /**
    * The backend's source-agent maintenance requires true idle. A pre-step always
    * runs inside a turn, so rejecting it before the POST would strand its claimed
    * input; instead complete that turn and create the branch at the first idle
@@ -1395,49 +1386,6 @@ export class ReasoningDistillEngine {
       if ((this.generation.get(session.id) ?? 0) === generation) this.pendingBranch.delete(session.id)
       this.ctx.logger.warn('reasoning-distill: branch failed for %s (%s); carrying on in place', session.id, reason)
       return false
-    }
-  }
-
-  /**
-   * Mark one entry's audit session as not durably stored.
-   *
-   * The writer can attach successfully and still fail on flush (the host reports
-   * the first durability listener failure), leaving an audit link that dies with
-   * the process. The entry must not keep promising a record it does not have.
-   * @param sessionId - session that owns the entry.
-   * @param entryId - entry whose audit link is broken.
-   */
-  /**
-   * Take the audited-broken marker for a to-be-built entry, consuming it.
-   *
-   * The marker is one-shot: it exists so an entry is born marked, and the
-   * store-level write in {@link markAuditUndurable} covers entries that already
-   * exist, so nothing is lost by clearing it here.
-   * @param sessionId - session that owns the entry.
-   * @param entryId - the id the entry will be recorded under.
-   * @returns whether that entry's audit link is known broken.
-   */
-  private takeAuditBroken(sessionId: string, entryId: string): boolean {
-    return this.auditBroken.delete(`${sessionId}:${entryId}`)
-  }
-
-  private async markAuditUndurable(sessionId: string, entryId: string, origin?: number): Promise<void> {
-    // Remembered as well as written: a flush can reject before the entry is even
-    // inserted, and then the entry must be born marked rather than marked later.
-    // The generation that started the compression, not the one current when this
-    // late failure arrives: a reused id must not mark its successor's entry.
-    if (origin !== undefined && (this.generation.get(sessionId) ?? 0) !== origin) return
-    const key = `${sessionId}:${entryId}`
-    this.auditBroken.add(key)
-    if (this.auditBroken.size > 512) this.auditBroken.clear()
-    try {
-      await this.store.update(sessionId, (record) => {
-        if (origin !== undefined && (this.generation.get(sessionId) ?? 0) !== origin) return
-        const entry = record.entries.find(item => item.id === entryId)
-        if (entry !== undefined) entry.sessionMissing = true
-      })
-    } catch (error: unknown) {
-      this.ctx.logger.warn('reasoning-distill: could not mark the audit link undurable: %o', error)
     }
   }
 
@@ -1776,6 +1724,21 @@ export class ReasoningDistillEngine {
             this.pending.delete(key)
             if (this.inFlight.get(key) === gate) this.inFlight.delete(key)
             this.noteDecision(session.id, event, 'abandoned-or-record-unreadable')
+            return
+          }
+          // Occupancy is checked on the live measurement, before anything is paid:
+          // once the conversation is close to the host's own compaction there is
+          // too little runway left for a rewrite to earn back its distillation.
+          const staged = this.pending.get(key)
+          const cap = staged === undefined ? undefined : await this.contextCapRefusal(session, staged)
+          if (cap !== undefined) {
+            this.pending.delete(key)
+            if (this.inFlight.get(key) === gate) this.inFlight.delete(key)
+            this.ctx.logger.info(
+              'reasoning-distill: %s keeps its reasoning: context occupancy is above %d%%',
+              session.id, staged?.rule.maxContextPercent ?? 0,
+            )
+            this.noteDecision(session.id, event, cap)
             return
           }
           // A conversation whose own background work is still running is left alone when
@@ -2299,18 +2262,15 @@ export class ReasoningDistillEngine {
     const prompt = this.config.prompt.get() || DEFAULT_PROMPT
     const startedAt = Date.now()
     const opened = await this.createCompressionSession(session, prompt, userText)
-    // Attaching the audit writer is awaited: if that (or anything before it) took
-    // longer than the wait bound, the request has already gone out with raw
-    // reasoning and this result can never be adopted. Paying for it anyway would
-    // buy nothing.
+    // The attempt opening the session is also the last chance to notice an
+    // expired wait bound: the request has already gone out with raw reasoning, so
+    // paying for a distillation now would buy nothing.
     if (abandonedNow()) {
       this.ctx.logger.warn('reasoning-distill: not starting a distillation for %s: the wait bound already expired', target.model)
-      // Nothing will settle this session, so its writer has to come back here.
-      this.releaseCompressionWriter(opened.id)
       return
     }
-    // The three shapes an attempt can be recorded in; the audit-link marker needs
-    // the same ids, and it can arrive before the entry exists.
+    // The three shapes an attempt can be recorded in; the entry ids share the
+    // attempt's identity so a late failure can find the row it belongs to.
     const failedId = `${target.seq}-${startedAt}-failed`
     const skippedId = `${target.seq}-${startedAt}-skipped`
     const adoptedId = `${target.seq}-${startedAt}`
@@ -2329,7 +2289,7 @@ export class ReasoningDistillEngine {
       // reasoning stays raw and nothing is substituted, so the session keeps
       // working; the failed compression session stays for inspection, and the
       // attempt is still recorded so its spending is not invisible.
-      this.failCompressionSession(sessionId, outcome.run.error ?? 'distiller returned no text', session.id, failedId, generation)
+      this.failCompressionSession(sessionId, outcome.run.error ?? 'distiller returned no text')
       this.ctx.logger.warn(
         'reasoning-distill: gave up on %s after %dms: %s',
         target.model, outcome.run.durationMs, outcome.run.error ?? 'empty answer',
@@ -2363,7 +2323,7 @@ export class ReasoningDistillEngine {
           frozenSaved: 0,
           originalHash,
           failed: true,
-          ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, failedId) ? { sessionMissing: true as const } : {},
+          ...sessionId === '' ? { sessionMissing: true as const } : {},
         })
       })
       return
@@ -2378,9 +2338,9 @@ export class ReasoningDistillEngine {
         'reasoning-distill: skipped rewrite for %s (saved %d < %d tokens)',
         target.model, saved, target.rule.minSavedTokens,
       )
-      // Settle the audit session under the id this attempt will actually be
-      // recorded as: a late failure must mark that entry, not the adopted one.
-      this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, skippedId, generation)
+      // Settle the audit session before recording the attempt, so the row can be
+      // linked the moment it exists.
+      this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model)
       // The distiller was paid for, so the attempt is recorded even though the
       // rewrite was not adopted: otherwise the report understates the spend and
       // hides the audit session entirely.
@@ -2413,12 +2373,12 @@ export class ReasoningDistillEngine {
           frozenSaved: 0,
           originalHash,
           skipped: true,
-          ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, skippedId) ? { sessionMissing: true as const } : {},
+          ...sessionId === '' ? { sessionMissing: true as const } : {},
         })
       })
       return
     }
-    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model, session.id, adoptedId, generation)
+    this.finishCompressionSession(sessionId, distilled, outcome.run.provider, outcome.run.model)
     // A substitution moves everything from the rewritten message to the end of
     // the next request out of the cache-hit prefix and into miss pricing.
     const { bucket: prices } = priceAt(target.model, this.config.prices.get(), startedAt, this.config)
@@ -2458,7 +2418,7 @@ export class ReasoningDistillEngine {
       liveRequests: 0,
       frozenSaved: 0,
       originalHash,
-      ...sessionId === '' || !opened.durable || this.takeAuditBroken(session.id, adoptedId) ? { sessionMissing: true as const } : {},
+      ...sessionId === '' ? { sessionMissing: true as const } : {},
     }
     // One mutation decides the outcome *at the moment it runs*: the write can sit
     // behind other work for that session, and by the time it executes the wait
@@ -2470,8 +2430,8 @@ export class ReasoningDistillEngine {
       if (abandonedNow()) {
         // The wait bound expired while this attempt was still finishing. It must
         // not adopt its rewrite, but the spend is real: record it as an abandoned
-        // attempt (same id as the adopted entry, so the audit settlement and its
-        // auditBroken marker still find this row) and say why.
+        // attempt (same id as the adopted entry, so a late audit settle still
+        // finds this row) and say why.
         record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq || (item.failed !== true && item.skipped !== true))
         record.entries.push({ ...entry, failed: true, distill: { ...entry.distill, error: 'abandoned before the wait bound expired' } })
         return
@@ -2690,14 +2650,21 @@ export class ReasoningDistillEngine {
     return { text: run.responseText, run, failed: false }
   }
 
-  /** Open the visible one-shot session that holds the compression conversation. */
+  /**
+   * Open the visible one-shot session that holds the compression conversation.
+   *
+   * The session is MEMORY-ONLY on purpose: it is an inspection window for the
+   * distillation that just ran, not a conversation the user keeps. It is never
+   * attached to a persistence writer, so it leaves no artifact behind: it stays
+   * openable from the report until this process ends, and a restart expires it —
+   * exactly what the report says when it stops offering the link.
+   */
   private async createCompressionSession(
     parent: Session,
     prompt: string,
     userText: string,
-  ): Promise<{ id: string; ok: boolean; durable: boolean }> {
+  ): Promise<{ id: string; ok: boolean }> {
     let id = ''
-    let durable = false
     try {
       // No parentSession: this is a sidecar conversation, not a fork of the source.
       // Claiming the source as parent put it into the session lineage, where the
@@ -2712,35 +2679,16 @@ export class ReasoningDistillEngine {
       // exists and the entry must be able to name and open it.
       id = created.id
       this.ownSessions.add(id)
-      // Claim the durable log writer BEFORE the first append: the backend routes
-      // a published session's events to its writer by id, so events appended
-      // earlier would never reach disk.
-      // A backend write failure remains visible as `sessionMissing`, rather than
-      // claiming that an unpersisted session will survive a restart.
-      if (this.attachWriter !== undefined) {
-        try {
-          const release = await this.attachWriter(created)
-          // Remembered per session id: the session is settled exactly once, and
-          // that settle is where the claimed handle is handed back.
-          if (typeof release === 'function') this.compressionWriters.set(id, release)
-          durable = true
-        } catch (error: unknown) {
-          this.ctx.logger.warn('reasoning-distill: audit session %s stays in-memory only: %o', id, error)
-          durable = false
-        }
-      } else {
-        durable = false
-      }
       created.append('turn/start', { turn: 1 })
       created.append('step/start', { turn: 1, step: 1 })
       created.append('user/message', createUserMessage({
         content: [{ type: 'text', text: `${prompt}\n\n---\n\n${userText}` }],
         source: { kind: 'user' },
       }), { surfaceOp: 'append' })
-      return { id, ok: true, durable }
+      return { id, ok: true }
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not open a compression session: %o', error)
-      return { id, ok: false, durable: false }
+      return { id, ok: false }
     }
   }
 
@@ -2750,41 +2698,26 @@ export class ReasoningDistillEngine {
    * @param sessionId - compression session, or an empty string when none opened.
    * @param reason - operator-facing failure text.
    */
-  private failCompressionSession(sessionId: string, reason: string, ownerId: string, entryId: string, origin: number): void {
+  private failCompressionSession(sessionId: string, reason: string): void {
     if (sessionId === '') return
     const session = this.ctx.sessions.get(sessionId as SessionId)
-    if (session === undefined) {
-      // Nothing can append to it any more either, so the writer is still due back.
-      this.releaseCompressionWriter(sessionId)
-      return
-    }
+    if (session === undefined) return
     try {
       session.append('step/end', { turn: 1, step: 1 })
       session.append('turn/end', {
         turn: 1,
         reason: { kind: 'error', error: { message: reason, code: 'REASONING_DISTILL_FAILED' } },
       })
-      void this.ctx.sessions.flush(session).catch((error: unknown) => {
-        this.ctx.logger.warn('reasoning-distill: failed-compression session %s did not persist: %o', session.id, error)
-        void this.markAuditUndurable(ownerId, entryId, origin)
-      }).finally(() => { this.releaseCompressionWriter(sessionId) })
     } catch (error: unknown) {
-      // The append itself can fail (a writer that rejects mid-stream): the audit
-      // link is then no more durable than a failed flush, so say so too.
       this.ctx.logger.warn('reasoning-distill: could not settle a failed compression session: %o', error)
-      void this.markAuditUndurable(ownerId, entryId, origin)
-      this.releaseCompressionWriter(sessionId)
     }
   }
 
   /** Close the compression session with the distiller's answer. */
-  private finishCompressionSession(sessionId: string, text: string, provider: string, model: string, ownerId: string, entryId: string, origin: number): void {
+  private finishCompressionSession(sessionId: string, text: string, provider: string, model: string): void {
     if (sessionId === '') return
     const session = this.ctx.sessions.get(sessionId as SessionId)
-    if (session === undefined) {
-      this.releaseCompressionWriter(sessionId)
-      return
-    }
+    if (session === undefined) return
     try {
       session.append('assistant/message', {
         turn: 1,
@@ -2797,36 +2730,11 @@ export class ReasoningDistillEngine {
       }, { surfaceOp: 'append' })
       session.append('step/end', { turn: 1, step: 1 })
       session.append('turn/end', { turn: 1, reason: { kind: 'completed' } })
-      // Released only once the flush has settled: a writer handed back before its
-      // last events drained is exactly how an audit record goes missing.
-      void this.ctx.sessions.flush(session).catch((error: unknown) => {
-        this.ctx.logger.warn('reasoning-distill: audit session %s did not persist: %o', session.id, error)
-        void this.markAuditUndurable(ownerId, entryId, origin)
-      }).finally(() => { this.releaseCompressionWriter(sessionId) })
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: could not settle a compression session: %o', error)
-      void this.markAuditUndurable(ownerId, entryId, origin)
-      this.releaseCompressionWriter(sessionId)
     }
   }
 
-  /**
-   * Hand back the durable writer a settled compression session claimed.
-   *
-   * One handle per compression held until unload is a leak that grows with every
-   * distillation, and nothing appends to a compression session after it is
-   * finished or failed. The map entry is removed before the release runs, so a
-   * second settle (or the unload sweep) cannot release the same writer twice.
-   * @param sessionId - the settled compression session.
-   */
-  private releaseCompressionWriter(sessionId: string): void {
-    const release = this.compressionWriters.get(sessionId)
-    if (release === undefined) return
-    this.compressionWriters.delete(sessionId)
-    void release().catch((error: unknown) => {
-      this.ctx.logger.warn('reasoning-distill: could not release the writer of audit session %s: %o', sessionId, error)
-    })
-  }
 }
 
 /** Collect this step's tool results as plain text. */

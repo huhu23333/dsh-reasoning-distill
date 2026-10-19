@@ -65,6 +65,19 @@ export interface ModelRule {
   oneShotMaxDepth: number
   /** Trigger above this many estimated reasoning tokens. */
   thresholdTokens: number
+  /**
+   * Whether the context-occupancy cap applies. On by default: a rewrite that only
+   * survives a few turns before the host's own compaction folds the conversation
+   * away is a net loss, so a step is also skipped once the conversation is this full.
+   */
+  contextCap: boolean
+  /**
+   * Highest context occupancy, as a percentage of the routed model's context
+   * window, at which a compression may still trigger. Occupancy is the host token
+   * meter's measurement — the same one its compaction trigger reads — so a
+   * compaction lowers it immediately. Only consulted while {@link contextCap} is on.
+   */
+  maxContextPercent: number
   /** Replace only when the distilled text saves at least this many estimated tokens. */
   minSavedTokens: number
   /**
@@ -156,6 +169,8 @@ const ModelRuleFields = {
   oneShotSubagents: z.boolean(),
   oneShotMaxDepth: z.number(),
   thresholdTokens: z.number(),
+  contextCap: z.boolean(),
+  maxContextPercent: z.number(),
   minSavedTokens: z.number(),
   includeToolResults: z.boolean(),
   includeFinalTurns: z.boolean(),
@@ -184,6 +199,8 @@ export const DEFAULT_RULE: ModelRule = {
   oneShotSubagents: false,
   oneShotMaxDepth: 0,
   thresholdTokens: 4000,
+  contextCap: true,
+  maxContextPercent: 60,
   minSavedTokens: 600,
   includeToolResults: true,
   includeFinalTurns: true,

@@ -127,6 +127,26 @@ export function entryInForceHere(entry: CompressionPlacement, sessionId: string)
   return handoff?.state !== 'created' || handoff.branchId === undefined || handoff.branchId === sessionId
 }
 
+/**
+ * Whether an otherwise eligible compression must wait because the conversation is
+ * already too full.
+ *
+ * Occupancy uses the host's own numbers: `totalTokens` is what its token meter
+ * measures for this session — the same measurement its compaction trigger reads —
+ * and `contextWindow` is the routed model's combined capacity. A compaction
+ * therefore lowers the percentage immediately, which is what makes the cap track
+ * the window a rewrite would actually get.
+ * @param totalTokens - measured request-and-response pressure.
+ * @param contextWindow - routed model's combined context capacity.
+ * @param maxPercent - highest occupancy, in percent, at which a compression may run.
+ * @returns true only when occupancy is strictly above the cap.
+ */
+export function exceedsContextCap(totalTokens: number, contextWindow: number, maxPercent: number): boolean {
+  if (!Number.isFinite(totalTokens) || !Number.isFinite(contextWindow) || !Number.isFinite(maxPercent)) return false
+  if (contextWindow <= 0) return false
+  return (totalTokens / contextWindow) * 100 > maxPercent
+}
+
 /** Aggregate report for one session. */
 export interface SessionReport {
   sessionId: string

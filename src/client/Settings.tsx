@@ -143,10 +143,10 @@ function Toggle({ label, checked, onChange, disabled = false }: {
   return <label className={css.toggle}><input type="checkbox" checked={checked} disabled={disabled} onChange={event => onChange(event.target.checked)} /><span>{label}</span></label>
 }
 
-function Count({ label, value, onChange, disabled = false }: {
-  label: string; value: number; onChange: (value: number) => void; disabled?: boolean
+function Count({ label, value, onChange, disabled = false, min = 0, max }: {
+  label: string; value: number; onChange: (value: number) => void; disabled?: boolean; min?: number; max?: number
 }) {
-  return <label className={css.field}><span>{label}</span><input type="number" min="0" step="1" value={value} disabled={disabled} onChange={event => onChange(numberValue(event.target.value))} /></label>
+  return <label className={css.field}><span>{label}</span><input type="number" min={min} max={max} step="1" value={value} disabled={disabled} onChange={event => onChange(numberValue(event.target.value))} /></label>
 }
 
 function RouteFields({ rule, catalog, onChange, t, disabled = false }: {
@@ -201,6 +201,11 @@ function RuleFields({ rule, catalog, onChange, t, isModel = false, subagentsLock
       <Toggle label={t('settings.tools')} checked={rule.includeToolResults} disabled={idle} onChange={includeToolResults => change({ includeToolResults })} />
       <span className={css.note}>{t('settings.toolsHint')}</span>
       <Toggle label={t('settings.final')} checked={rule.includeFinalTurns} disabled={idle} onChange={includeFinalTurns => change({ includeFinalTurns })} />
+    </div>
+    <div className={css.capBox}>
+      <Toggle label={t('settings.contextCap')} checked={rule.contextCap} disabled={idle} onChange={contextCap => change({ contextCap })} />
+      <Count label={t('settings.maxContextPercent')} value={rule.maxContextPercent} min={1} max={100} disabled={idle || !rule.contextCap} onChange={maxContextPercent => change({ maxContextPercent })} />
+      <p className={css.note}>{t('settings.contextCapHint')}</p>
     </div>
     <p className={css.note}>{t('settings.ruleIdle')}</p>
     <div className={css.route}>

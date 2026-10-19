@@ -416,7 +416,7 @@ function settings(overrides: Partial<SettingsValue> = {}): SettingsValue {
     defaultRule: {
       enabled: true, continuableSubagents: true, continuableMaxDepth: 0,
       oneShotSubagents: false, oneShotMaxDepth: 0,
-      thresholdTokens: 4000, minSavedTokens: 600,
+      thresholdTokens: 4000, contextCap: true, maxContextPercent: 60, minSavedTokens: 600,
       includeToolResults: true, includeFinalTurns: true, timeoutMs: 60000,
       distiller: { provider: 'p', model: 'm', effort: 'off' },
     },
@@ -440,6 +440,19 @@ check('and nothing else is dragged along', saveOperations(untouched, edited).len
 check('the archive switch is written when this user flips it',
   saveOperations(settings(), settings({ archiveSuperseded: false })).some(op => op.path[0] === 'archiveSuperseded' && op.op === 'set'))
 check('an unset archive switch defaults to on', normalizeSettings({} as never).archiveSuperseded === true)
+// The context cap is a per-rule field like the threshold: on by default at 60%,
+// and an edit to either half writes only that half.
+check('the context cap defaults on at 60%',
+  normalizeSettings({} as never).defaultRule.contextCap === true
+  && normalizeSettings({} as never).defaultRule.maxContextPercent === 60)
+const capOff = settings({ defaultRule: { ...settings().defaultRule, contextCap: false } })
+check('turning the context cap off writes exactly that field',
+  saveOperations(untouched, capOff).length === 1
+  && saveOperations(untouched, capOff)[0]?.path.join('.') === 'defaultRule.contextCap')
+const capRaised = settings({ defaultRule: { ...settings().defaultRule, maxContextPercent: 75 } })
+check('raising the context cap percent writes exactly that field',
+  saveOperations(untouched, capRaised).length === 1
+  && saveOperations(untouched, capRaised)[0]?.path.join('.') === 'defaultRule.maxContextPercent')
 
 console.log('client: the panel resolves the retired top-level limits exactly as the engine does')
 // `normalizeSettings` feeds both the display fold (`ruleOf` in `Settings.tsx`) and

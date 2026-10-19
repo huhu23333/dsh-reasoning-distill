@@ -63,8 +63,6 @@ function SessionRow({ entry, t, openSession }: { entry: CompressionEntry; t: Tra
       <button type="button" className={css.iconButton} title={t('view.copy')} aria-label={t('view.copy')} onClick={() => { void navigator.clipboard.writeText(id).then(() => setCopied(true)).catch(() => setCopied(false)) }}><IconCopyOutlineRegular /></button>
       {copied && <span className={css.muted} role="status">{t('view.copied')}</span>}
       {id !== '' && !expired && <button type="button" className={css.secondary} onClick={() => openSession(id)}>{t('view.open')}</button>}
-      {entry.sessionMissing === true && !expired
-        && <span className={css.note}>{t('view.auditUndurable')}</span>}
     </div>}
   </div>
 }

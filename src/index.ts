@@ -16,7 +16,7 @@ import type {} from '@deepseek-ai/dsh-session-persistence'
 
 import { Config, resolveRule } from './config.ts'
 import type { Config as PluginConfig } from './config.ts'
-import { ReasoningDistillEngine, type CompressionWriterRelease } from './engine.ts'
+import { ReasoningDistillEngine } from './engine.ts'
 import { InstallRunner, installerScript, scriptedSpawner } from './install.ts'
 import { registerRoutes } from './route.ts'
 import { SETTINGS_NS } from './shared.ts'
@@ -67,9 +67,8 @@ async function activePlugins(ctx: Context): Promise<readonly string[] | undefine
  */
 export function apply(ctx: Context, config: PluginConfig): void {
   // Static injection orders startup; this guard also gives direct callers an
-  // actionable error instead of silently leaving new audit sessions in RAM.
-  const persistence = ctx.get('sessionPersistence')
-  if (persistence === undefined) throw new Error('reasoning-distill requires the sessionPersistence service; install and enable a session-persistence backend before loading this plugin')
+  // actionable error instead of starting without the store the report reads.
+  if (ctx.get('sessionPersistence') === undefined) throw new Error('reasoning-distill requires the sessionPersistence service; install and enable a session-persistence backend before loading this plugin')
   const store = new SidecarStore()
   // The host owns archiving, so a hand-off hides the conversation it replaced whether or
   // not a panel happens to be looking at it. Resolved lazily: a host without the
@@ -87,26 +86,6 @@ export function apply(ctx: Context, config: PluginConfig): void {
   const runner = new InstallRunner(scriptedSpawner(installerScript()))
   registerRoutes(ctx, config, store, engine, runner)
   ctx.effect(() => () => { runner.cancel() })
-  // The handle owns this session's writer until it is released. Registering this
-  // callback synchronously prevents the first compression racing the writer; the
-  // engine releases the writer when its compression session settles, and this
-  // sweep releases whatever is left at unload. A release removes itself from the
-  // set, so a settled writer is neither closed twice nor kept reachable through
-  // its own closure.
-  const releases = new Set<CompressionWriterRelease>()
-  ctx.effect(() => async () => { for (const release of [...releases]) await release() })
-  engine.usePersistence(async (session) => {
-    const handle = await persistence.create(session.header)
-    const release = async (): Promise<void> => {
-      // Dropping the registration IS the idempotence check: a second release
-      // finds nothing left to do, whether it comes from the engine or from the
-      // unload sweep above.
-      if (!releases.delete(release)) return
-      await handle.close?.()
-    }
-    releases.add(release)
-    return release
-  })
   // This plugin ships its own Settings page, so the generic schema form is off.
   // The settings service is part of the host shell and ships no standalone types
   // in this checkout, so the dependency and the shape it exposes are stated here.
