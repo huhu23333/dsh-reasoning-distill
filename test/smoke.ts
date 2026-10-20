@@ -46,6 +46,15 @@ check('the shipping defaults impose neither a distillation timeout nor an input 
 // The schema itself cannot be resolved under the smoke stubs, so the shipping default is
 // asserted where the schema takes it from.
 const { DEFAULT_ENABLED } = await import('../src/config.ts')
+check('a fresh rule ships with subagents, tool results and final turns off',
+  DEFAULT_RULE.continuableSubagents === false
+  && DEFAULT_RULE.includeToolResults === false
+  && DEFAULT_RULE.includeFinalTurns === false,
+  JSON.stringify({
+    continuableSubagents: DEFAULT_RULE.continuableSubagents,
+    includeToolResults: DEFAULT_RULE.includeToolResults,
+    includeFinalTurns: DEFAULT_RULE.includeFinalTurns,
+  }))
 check('a fresh install distils nothing until the master switch is turned on',
   DEFAULT_ENABLED === false, JSON.stringify({ DEFAULT_ENABLED }))
 

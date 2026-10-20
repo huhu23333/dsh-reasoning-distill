@@ -21,6 +21,23 @@ import { entryInForceHere, type CompressionEntry, type SessionReport } from '../
 export type StoredRule = RuleOverride
 
 /**
+ * Initial stored layer for a model the user just added.
+ *
+ * The entry starts inert: no session kind is enabled, and the optional extras —
+ * subagent distillation, attaching tool-call results, and compressing final
+ * answers — are stated off rather than inherited, so adding a model can never
+ * start paying for work the user did not ask for. Every field stays editable and
+ * the remaining fields still inherit from the default rule.
+ */
+export const NEW_MODEL_RULE: StoredRule = {
+  enabled: false,
+  continuableSubagents: false,
+  oneShotSubagents: false,
+  includeToolResults: false,
+  includeFinalTurns: false,
+}
+
+/**
  * Whether a rule decides nothing because all three session kinds are off, in
  * which case the rest of its fields are locked in the panel.
  * @param rule - the rule being edited.

@@ -194,7 +194,7 @@ const PriceBucketSchema = z.object({
 /** Built-in rule used when neither the default rule nor an override sets a field. */
 export const DEFAULT_RULE: ModelRule = {
   enabled: true,
-  continuableSubagents: true,
+  continuableSubagents: false,
   continuableMaxDepth: 0,
   oneShotSubagents: false,
   oneShotMaxDepth: 0,
@@ -202,8 +202,8 @@ export const DEFAULT_RULE: ModelRule = {
   contextCap: true,
   maxContextPercent: 60,
   minSavedTokens: 600,
-  includeToolResults: true,
-  includeFinalTurns: true,
+  includeToolResults: false,
+  includeFinalTurns: false,
   timeoutMs: 0,
   maxInputChars: 0,
   maxOutputChars: 0,

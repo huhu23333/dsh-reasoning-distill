@@ -13,7 +13,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, stockOfEntry } from '../src/client/View.tsx'
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import { REWRITE_ROUTE, type SessionReport } from '../src/shared.ts'
-import { REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendReachable, backendSelectable, backendUnusable, claimRewriteAttempt, hostPatchReady, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, withBusySkipOn, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
+import { NEW_MODEL_RULE, REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendReachable, backendSelectable, backendUnusable, claimRewriteAttempt, hostPatchReady, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, withBusySkipOn, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
 import { branchBackendBlocksSubagents } from '../src/backends.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { mergeRule, sparseOverride } from '../src/rule.ts'
@@ -453,6 +453,16 @@ const capRaised = settings({ defaultRule: { ...settings().defaultRule, maxContex
 check('raising the context cap percent writes exactly that field',
   saveOperations(untouched, capRaised).length === 1
   && saveOperations(untouched, capRaised)[0]?.path.join('.') === 'defaultRule.maxContextPercent')
+// The shipped default rule and the layer a newly added model starts with both
+// leave subagent distillation, tool-call results and final-answer turns off.
+check('the shipped default rule leaves the three optional extras off',
+  normalizeSettings({} as never).defaultRule.continuableSubagents === false
+  && normalizeSettings({} as never).defaultRule.includeToolResults === false
+  && normalizeSettings({} as never).defaultRule.includeFinalTurns === false)
+check('a newly added model rule starts with the three optional extras off',
+  NEW_MODEL_RULE.continuableSubagents === false
+  && NEW_MODEL_RULE.includeToolResults === false
+  && NEW_MODEL_RULE.includeFinalTurns === false)
 
 console.log('client: the panel resolves the retired top-level limits exactly as the engine does')
 // `normalizeSettings` feeds both the display fold (`ruleOf` in `Settings.tsx`) and

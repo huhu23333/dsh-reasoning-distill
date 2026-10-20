@@ -155,10 +155,10 @@ export function sparseOverride(inherited: ModelRule, next: ModelRule): RuleOverr
  * defaults than the engine applies is how a setting silently flips.
  */
 export const FALLBACK_RULE: ModelRule = {
-  enabled: true, continuableSubagents: true, continuableMaxDepth: 0,
+  enabled: true, continuableSubagents: false, continuableMaxDepth: 0,
   oneShotSubagents: false, oneShotMaxDepth: 0,
   thresholdTokens: 4000, contextCap: true, maxContextPercent: 60, minSavedTokens: 600,
-  includeToolResults: true, includeFinalTurns: true, timeoutMs: 0,
+  includeToolResults: false, includeFinalTurns: false, timeoutMs: 0,
   maxInputChars: 0, maxOutputChars: 0,
   distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
 }

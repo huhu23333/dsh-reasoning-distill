@@ -7,7 +7,7 @@ import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  REWRITE_BACKENDS, backendById, backendReachable, backendOptionsVisible, forcesMasterOff, masterSwitchState, nextBackend, normalizeSettings, planSave, ruleFieldsIdle, subagentKindControls, withBusySkipOn, withoutSubagentKinds,
+  NEW_MODEL_RULE, REWRITE_BACKENDS, backendById, backendReachable, backendOptionsVisible, forcesMasterOff, masterSwitchState, nextBackend, normalizeSettings, planSave, ruleFieldsIdle, subagentKindControls, withBusySkipOn, withoutSubagentKinds,
   type ProbeAnswer,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
@@ -439,9 +439,9 @@ export function ReasoningDistillSettings({ form, t }: Props) {
       <ModelPicker catalog={catalog} taken={ruleIds} label={t('settings.addModel')} t={t}
         onPick={model => update(current => ({
           ...current,
-          // A fresh entry starts with all three kinds off and everything else
-          // inherited from the default rule.
-          models: { ...current.models, [model.id]: { enabled: false, continuableSubagents: false, oneShotSubagents: false } },
+          // A fresh entry starts with all three kinds off and the optional extras
+          // off too; the remaining fields inherit from the default rule.
+          models: { ...current.models, [model.id]: { ...NEW_MODEL_RULE } },
         }))} />
       {ruleIds.length === 0 && <p className={css.note}>{t('settings.noOverrides')}</p>}
       {ruleModels.map(model => <details key={model.id} className={css.item}>
