@@ -28,7 +28,7 @@ export interface RewriteBackend {
    */
   probe?: { method: 'POST'; path: string; body: Record<string, unknown> }
   /** Where the rewrite lands. */
-  kind: 'branch' | 'in-place'
+  kind: 'branch' | 'in-place' | 'derive'
   /**
    * Whether this entry only reserves the slot for a backend that is not implemented yet.
    *
@@ -61,10 +61,13 @@ export interface RewriteBackend {
 /** Backends this plugin knows how to drive, in panel order. */
 export const REWRITE_BACKENDS: readonly RewriteBackend[] = [
   {
-    id: 'message-edit',
-    kind: 'branch',
-    plugin: 'dsh-message-edit',
-    probe: { method: 'POST', path: '/message-edit', body: { action: 'edit', sessionId: '', eventSeq: 0, blockIndex: 0, text: 'probe' } },
+    // No write at all: the engine's derived-message wrapper is the only writer, so every request
+    // sees the distilled reasoning while the session log keeps the original. Nothing is written,
+    // no companion is needed, and no host patch is involved, so there is no route to probe and no
+    // hand-off to settle. It is the only mode that also works on a packaged host whose source
+    // cannot be patched, which is why it is listed first.
+    id: 'derive',
+    kind: 'derive',
   },
   {
     // The built-in in-place backend: this plugin's own host half does the rewriting, and the host
@@ -74,6 +77,14 @@ export const REWRITE_BACKENDS: readonly RewriteBackend[] = [
     kind: 'in-place',
     hostPatch: true,
     probe: { method: 'POST', path: REWRITE_ROUTE, body: { probe: true } },
+  },
+  {
+    // Experimental branch backend: every compression forks a conversation, which narrows the
+    // usable scenarios (no subagent hand-off, a branch per compression). Kept last on purpose.
+    id: 'message-edit',
+    kind: 'branch',
+    plugin: 'dsh-message-edit',
+    probe: { method: 'POST', path: '/message-edit', body: { action: 'edit', sessionId: '', eventSeq: 0, blockIndex: 0, text: 'probe' } },
   },
 ]
 
@@ -335,6 +346,11 @@ export function rewriteRequest(
       path: REWRITE_ROUTE,
       body: { sessionId, eventSeq: entry.targetSeq, blockIndex: entry.targetBlockIndex, text },
     }
+  }
+  if (backend.kind === 'derive') {
+    // The derived-message wrapper already applies the rewrite on every request; asking a backend
+    // for a write here would be the one thing this mode exists to avoid.
+    return undefined
   }
   if (backend.id === 'message-edit') {
     if (entry.targetBlockIndex < 0) return undefined

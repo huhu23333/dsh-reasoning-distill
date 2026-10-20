@@ -46,6 +46,9 @@ check('the shipping defaults impose neither a distillation timeout nor an input 
 // The schema itself cannot be resolved under the smoke stubs, so the shipping default is
 // asserted where the schema takes it from.
 const { DEFAULT_ENABLED } = await import('../src/config.ts')
+const { DEFAULT_PROMPT } = await import('../src/prompt.ts')
+check('the built-in prompt keeps rejected directions and their reasons',
+  DEFAULT_PROMPT.includes('REJECTED DIRECTIONS') && DEFAULT_PROMPT.includes('was rejected because'))
 check('a fresh rule ships with subagents, tool results and final turns off',
   DEFAULT_RULE.continuableSubagents === false
   && DEFAULT_RULE.includeToolResults === false
@@ -2810,6 +2813,124 @@ await settleFor(async () => (await new SidecarStore().load(capSession.id)).entri
 const capEntry = (await new SidecarStore().load(capSession.id)).entries[0]
 check('occupancy below the cap compresses the same step', capEntry !== undefined && capCreated.length === 1,
   JSON.stringify({ entry: capEntry?.id, created: capCreated.length }))
+console.log('\n--- no-write (derive) backend ---')
+const deriveHandlers = new Map<string, Function[]>()
+const deriveSessions = new Map<string, FakeSession>()
+const deriveCreated: FakeSession[] = []
+const deriveLlm = { ...fakeLlm, calls: 0 }
+const deriveCtx = {
+  logger: ctx.logger,
+  sessions: {
+    list: () => [...deriveSessions.values()],
+    get: (id: string) => deriveSessions.get(id),
+    flush: async () => true,
+    create: () => {
+      const session = new FakeSession('session-derive-compress-' + (deriveCreated.length + 1))
+      deriveCreated.push(session)
+      deriveSessions.set(session.id, session)
+      return session
+    },
+  },
+  llm: deriveLlm,
+  on(name: string, fn: Function) {
+    const list = deriveHandlers.get(name) ?? []
+    list.push(fn)
+    deriveHandlers.set(name, list)
+    return () => undefined
+  },
+  get(): unknown { return undefined },
+  effect: () => undefined,
+  fiber: {},
+}
+const deriveEngine = new ReasoningDistillEngine(deriveCtx as never, makeConfig({ rewriteBackend: { get: () => 'derive' } }) as never, new SidecarStore())
+deriveEngine.start()
+const fireDerive = async (name: string, ...args: unknown[]): Promise<void> => {
+  for (const fn of deriveHandlers.get(name) ?? []) await fn(...args)
+}
+const deriveSession = new FakeSession('session-derive', { cwd: '/tmp', createdAt: 1 })
+deriveSessions.set(deriveSession.id, deriveSession)
+await fireDerive('session/created', deriveSession)
+deriveSession.append('system/message', { turn: 1, step: 1, message: { id: 'd-sys', role: 'system', content: [{ type: 'text', text: 'system' }], source: { kind: 'system-prompt' } } })
+deriveSession.append('user/message', { id: 'd-u', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const deriveReasoning = 'derive reasoning '.repeat(200)
+const deriveSeq = deriveSession.append('assistant/message', {
+  turn: 1, step: 1,
+  message: {
+    id: 'd-a', role: 'assistant',
+    content: [{ type: 'reasoning', text: deriveReasoning }, { type: 'tool-call', id: 'd-t', name: 'tool', arguments: '{}' }],
+    source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+  },
+  stream: [],
+}).seq
+deriveSession.append('tool/result', {
+  turn: 1, step: 1,
+  message: { id: 'd-r', role: 'tool', toolCallId: 'd-t', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool' } },
+}, { surfaceOp: 'append' })
+deriveSession.append('step/end', { turn: 1, step: 1 })
+const deriveEnd = deriveSession.eventAt(deriveSession.log.length - 1)
+await fireDerive('session/event', deriveSession, deriveSession.eventAt(deriveSeq))
+await fireDerive('session/event', deriveSession, deriveEnd)
+await fireDerive('agent/pre-step', { agent: { session: deriveSession } }, async () => undefined)
+await settleFor(async () => (await new SidecarStore().load(deriveSession.id)).entries[0] !== undefined)
+const deriveEntry = (await new SidecarStore().load(deriveSession.id)).entries[0]!
+const deriveAssistant = (deriveSession.deriveMessages() as Array<{ role: string; content: Array<{ type: string; text?: string }> }>).find(message => message.role === 'assistant')
+const deriveReasoningBlock = deriveAssistant?.content.find(block => block.type === 'reasoning')
+const deriveRaw = (deriveSession.log[deriveSeq]!.data as { message: { content: Array<{ text?: string }> } }).message.content[0]!.text
+check('the no-write backend stages no hand-off',
+  deriveEntry.handoff === undefined && deriveEntry.inPlaceApplied === undefined
+  && deriveEngine.snapshot(deriveSession.id).pendingBranch === null,
+  JSON.stringify({ handoff: deriveEntry.handoff, applied: deriveEntry.inPlaceApplied, pending: deriveEngine.snapshot(deriveSession.id).pendingBranch }))
+check('and the wrapper still gives the model the distilled reasoning while the log keeps the original',
+  deriveReasoningBlock?.text === 'Distilled: ask for Paris weather and call the tool.' && deriveRaw === deriveReasoning,
+  JSON.stringify({ derived: deriveReasoningBlock?.text, rawKept: deriveRaw === deriveReasoning }))
+// The agent loop builds every request from deriveMessages(), and compaction reads
+// one event at a time through deriveEventMessage(); both have to carry the rewrite
+// or the raw reasoning escapes the wrapper.
+const derivePerEvent = deriveSession.deriveEventMessage(deriveSession.eventAt(deriveSeq) as never) as { content: Array<{ type: string; text?: string }> } | null
+check('the per-event accessor (compaction) carries the same rewrite',
+  derivePerEvent?.content.find(block => block.type === 'reasoning')?.text === 'Distilled: ask for Paris weather and call the tool.',
+  JSON.stringify({ perEvent: derivePerEvent?.content.find(block => block.type === 'reasoning')?.text }))
+check('no branch session is created in the no-write mode', deriveCreated.length === 1,
+  JSON.stringify({ created: deriveCreated.length }))
+// A restart must not lose the compression: the record is the only source of the
+// replacement, so a fresh engine has to re-apply it from the saved sidecar.
+console.log('\n--- no-write (derive) backend: the saved record survives a restart ---')
+const restartHandlers = new Map<string, Function[]>()
+const restartSessions = new Map<string, FakeSession>()
+const restartCtx = {
+  logger: ctx.logger,
+  sessions: {
+    list: () => [...restartSessions.values()],
+    get: (id: string) => restartSessions.get(id),
+    flush: async () => true,
+    create: () => {
+      const session = new FakeSession('session-restart-compress-1')
+      restartSessions.set(session.id, session)
+      return session
+    },
+  },
+  llm: { ...fakeLlm, calls: 0 },
+  on(name: string, fn: Function) {
+    const list = restartHandlers.get(name) ?? []
+    list.push(fn)
+    restartHandlers.set(name, list)
+    return () => undefined
+  },
+  get(): unknown { return undefined },
+  effect: () => undefined,
+  fiber: {},
+}
+const restartEngine = new ReasoningDistillEngine(restartCtx as never, makeConfig({ rewriteBackend: { get: () => 'derive' } }) as never, new SidecarStore())
+restartEngine.start()
+const resumed = new FakeSession('session-derive', { cwd: '/tmp', createdAt: 1 })
+for (const event of deriveSession.log) resumed.append(event.type, event.data)
+restartSessions.set(resumed.id, resumed)
+for (const fn of restartHandlers.get('session/created') ?? []) await fn(resumed)
+for (const fn of restartHandlers.get('agent/pre-step') ?? []) await fn({ agent: { session: resumed } }, async () => ({ kind: 'enter' }))
+const resumedAssistant = (resumed.deriveMessages() as Array<{ role: string; content: Array<{ type: string; text?: string }> }>).find(message => message.role === 'assistant')
+check('the saved record is re-applied after a restart',
+  resumedAssistant?.content.find(block => block.type === 'reasoning')?.text === 'Distilled: ask for Paris weather and call the tool.',
+  JSON.stringify({ derived: resumedAssistant?.content.find(block => block.type === 'reasoning')?.text }))
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

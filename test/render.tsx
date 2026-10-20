@@ -354,6 +354,26 @@ check('a request the in-place backend cannot honour is not sent',
   && rewriteRequest('in-place', 'session-1', target, '') === undefined)
 check('no backend means no request at all', rewriteRequest('', 'session-1', target, 'short') === undefined)
 check('empty text is never sent', rewriteRequest('message-edit', 'session-1', target, '') === undefined)
+// The no-write backend is always available: it needs no companion and no host patch.
+check('the backend rows are ordered derive, in-place, message-edit',
+  REWRITE_BACKENDS.map(backend => backend.id).join(',') === 'derive,in-place,message-edit')
+check('the no-write backend is listed and never asks for a write',
+  backendById('derive')?.kind === 'derive'
+  && rewriteRequest('derive', 'session-1', target, 'short') === undefined
+  && !backendOptionsVisible('derive')
+  && !branchBackendBlocksSubagents('derive')
+  && !backendUnusable('derive', ['dsh-base'], undefined))
+check('and the master switch stays openable for it',
+  !masterSwitchState('derive', true, true).locked && masterSwitchState('derive', true, true).checked === true)
+// With no backend selected the master switch must stay locked off, exactly as before.
+check('no backend selected still locks the master switch off',
+  masterSwitchState('', true).locked && masterSwitchState('', true).checked === false
+  && forcesMasterOff('', true) && !forcesMasterOff('derive', true, true))
+check('no in-place write is owed in the no-write mode',
+  owedInPlaceEntries({
+    ...modernReport(),
+    config: { ...modernReport().config, rewriteBackend: 'derive' },
+  }).length === 0)
 
 console.log('client: activating the chosen backend again clears it')
 check('clicking another backend switches to it', nextBackend('message-edit', 'in-place') === 'in-place')

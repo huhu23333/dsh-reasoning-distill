@@ -324,8 +324,13 @@ export class ReasoningDistillEngine {
             })
           }
           const backstop = this.ruleBackstopMs()
-          const loaded = await this.waitUntil(load.work, signal,
-            backstop > 0 ? load.at + backstop : undefined)
+          // The no-write mode keeps the rewrite only in its sidecar record: that record has to be
+          // in memory before the request is assembled, so the distillation wait bound must not
+          // become a load deadline that silently falls back to the original reasoning.
+          const loadDeadline = backstop > 0 && backendById(this.config.rewriteBackend.get() ?? '')?.kind !== 'derive'
+            ? load.at + backstop
+            : undefined
+          const loaded = await this.waitUntil(load.work, signal, loadDeadline)
           if (!loaded) {
             if (signal?.aborted || this.replaced(session)) return true
             // A stalled step/end gate must not launch after the raw request escapes.
@@ -640,6 +645,15 @@ export class ReasoningDistillEngine {
       if (stale()) return
       if (!this.storageBroken.has(session.id)) {
         this.ctx.logger.warn('reasoning-distill: leaving %s undistilled while its record is unreadable: %o', session.id, error)
+        // The no-write mode has no history copy to fall back on: until the record is readable
+        // again, its requests carry the original reasoning, so say so once instead of silently
+        // dropping the compression.
+        if (backendById(this.config.rewriteBackend.get() ?? '')?.kind === 'derive') {
+          this.ctx.logger.warn(
+            'reasoning-distill: the no-write mode cannot re-apply %s while its record is unreadable; requests carry the original reasoning until it is readable again',
+            session.id,
+          )
+        }
       }
       this.storageBroken.add(session.id)
     }
@@ -2495,12 +2509,17 @@ export class ReasoningDistillEngine {
     // Follow the decision the mutation actually made: the wait bound can expire
     // while the queued write is in flight, and re-checking it here would adopt the
     // rewrite yet refuse to hand it over.
-    if (adopted && !stale() && this.config.enabled.get() && backendById(this.config.rewriteBackend.get()) !== undefined) {
-      if (backendById(this.config.rewriteBackend.get())?.kind === 'in-place') {
+    const backend = backendById(this.config.rewriteBackend.get())
+    if (adopted && !stale() && this.config.enabled.get() && backend !== undefined) {
+      if (backend.kind === 'in-place') {
         // Write it at *this* step boundary rather than at the next pre-step. The step that ends a
         // turn has no next pre-step, and a delegated conversation is disposed as soon as its turn
         // ends, so the last reasoning before a reply had no writer until the conversation ran again.
         if (await this.settleInPlaceEntry(session, entry)) this.pendingBranch.delete(session.id)
+      } else if (backend.kind === 'derive') {
+        // Nothing is written: the derived-message wrapper already carries this rewrite on every
+        // request. There is no hand-off to stage and no pending marker to clear, so the log (and
+        // the native transcript) keeps the original reasoning.
       } else if (abandonedNow()) {
         // The committed entry remains visible and any real savings remain payable;
         // only the branch hand-off is skipped after the original turn was released.

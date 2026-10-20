@@ -92,8 +92,14 @@ function BackendChooser({ value, onSelect, t }: {
     for (const backend of REWRITE_BACKENDS) {
       // A placeholder has no route, so there is nothing to ask and no answer that could make it
       // selectable: it stays out of the probe and out of the availability map.
+      if (backend.placeholder === true) continue
       const route = backend.probe
-      if (route === undefined) continue
+      if (route === undefined) {
+        // A backend with no external dependency needs nothing but this plugin being loaded, so it
+        // is available without asking anyone.
+        if (alive) setAvailable(current => ({ ...current, [backend.id]: true }))
+        continue
+      }
       // A sibling path in the same namespace cannot exist: its answer is what the web
       // server says for "no such route here", which is the yardstick this backend's own
       // answer has to differ from. Both are probed with the same body and method.
@@ -126,7 +132,7 @@ function BackendChooser({ value, onSelect, t }: {
         {backend.placeholder === true
           ? <span>{backend.id} · {t('settings.backendPlaceholder')}</span>
           : <>
-            <span>{backend.id} · {backend.kind === 'branch' ? t('settings.backendBranch') : t('settings.backendInPlace')}</span>
+            <span>{backend.id} · {backend.kind === 'branch' ? t('settings.backendBranch') : backend.kind === 'derive' ? t('settings.backendDerive') : t('settings.backendInPlace')}</span>
             <span className={css.muted}>{installed
               ? t('settings.backendInstalled')
               : backend.hostPatch === true ? t('settings.backendNeedsPatch') : t('settings.backendMissing')}</span>
