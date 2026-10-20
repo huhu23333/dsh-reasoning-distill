@@ -192,6 +192,15 @@ export class ReasoningDistillEngine {
    * message no longer carries reasoning, say) can never be counted as saving.
    */
   private readonly applied = new Map<string, Array<{ afterSeq: number; ids: Map<string, number> }>>()
+
+  /**
+   * Seq of the newest non-empty user message on each attached session.
+   *
+   * This is the billing scope: the API does not carry reasoning from an earlier
+   * conversation round into a later one, so only rewrites whose target lies after
+   * this marker (the round that is still running) may be credited. @see account
+   */
+  private readonly lastUserSeq = new Map<string, number>()
   private readonly rawDerive = new Map<string, () => Message[]>()
   /**
    * The unwrapped per-event derivation, per attached session object.
@@ -710,6 +719,7 @@ export class ReasoningDistillEngine {
     this.loadStarted.delete(sessionId)
     this.blocked.delete(sessionId)
     this.applied.delete(sessionId)
+    this.lastUserSeq.delete(sessionId)
     this.rawDerive.delete(sessionId)
     for (const key of [...this.missCharged]) {
       if (key.startsWith(prefix)) this.missCharged.delete(key)
@@ -837,6 +847,20 @@ export class ReasoningDistillEngine {
     this.disposedAt.delete(session.id)
     if (identity !== undefined) this.conversationOf.set(session.id, identity)
     this.current.set(session.id, session)
+    // Restore the round marker from the log. A resumed or forked session already
+    // carries its newest user message, and rewrites from before it belong to an
+    // earlier round that the API does not replay into this one.
+    const events = (session as unknown as { snapshotEvents?(): readonly SessionEvent[] }).snapshotEvents?.()
+    if (events !== undefined) {
+      for (let index = events.length - 1; index >= 0; index -= 1) {
+        const event = events[index]!
+        if (event.type !== 'user/message') continue
+        const content = (event.data as { content?: unknown }).content
+        if (!Array.isArray(content) || content.length === 0) continue
+        this.lastUserSeq.set(session.id, event.seq)
+        break
+      }
+    }
     const original = session.deriveMessages.bind(session)
     const engine = this
     this.rawDerive.set(session.id, original)
@@ -1098,6 +1122,9 @@ export class ReasoningDistillEngine {
     if (raw === undefined || session === undefined) return undefined
     const record = this.store.peek(sessionId)
     if (record === undefined) return undefined
+    // A rewrite from an earlier conversation round is not replayed into this one
+    // by the API, so it removes nothing from the round's next request.
+    const roundStart = this.lastUserSeq.get(sessionId) ?? -1
     const { applied } = this.applyRewrites(session, raw())
     const byId = new Map(record.entries.map(entry => [entry.id, entry]))
     const prices = this.config.prices.get() ?? {}
@@ -1106,7 +1133,7 @@ export class ReasoningDistillEngine {
     let saved = 0
     for (const id of applied.keys()) {
       const entry = byId.get(id)
-      if (entry === undefined) continue
+      if (entry === undefined || entry.targetSeq <= roundStart) continue
       tokens += entry.savedTokensPerRequest
       saved += entry.savedTokensPerRequest * (priceAt(entry.model, prices, now, this.config).bucket.hit / 1_000_000)
     }
@@ -1678,7 +1705,7 @@ export class ReasoningDistillEngine {
     // edit), so the position index is only valid until the next event.
     switch (event.type) {
       case 'assistant/message': {
-          const model = this.stageTarget(session, event)
+        const model = this.stageTarget(session, event)
         if (model !== '') {
           // Snapshot the surface now, not after the async load inside account(): a
           // compaction in between would otherwise decide what this request saved.
@@ -1768,6 +1795,11 @@ export class ReasoningDistillEngine {
           this.ctx.logger.warn('reasoning-distill: epoch close failed: %o', error)
         })
         return
+      case 'user/message': {
+        const content = (event.data as { content?: unknown }).content
+        if (Array.isArray(content) && content.length > 0) this.lastUserSeq.set(session.id, event.seq)
+        return
+      }
       default:
         return
     }
@@ -2137,12 +2169,14 @@ export class ReasoningDistillEngine {
     // place keeps the rewrite in force, so it must keep being credited.
     // Credit exactly what the answered request carried: the applied map is
     // recorded by the same call that built its prompt, so a rewrite the request
-    // did not actually use — because its message no longer carries reasoning,
-    // say — is never paid for.
-    // Credit exactly what the answered request carried: the applied map is
-    // recorded by the same call that built its prompt. Without one (no request
-    // was derived here yet, e.g. right after a reload) fall back to the surface
-    // view, which is the weaker but still bounded answer.
+    // did not actually use because its message no longer carries reasoning is
+    // never paid for. Without a map (no request derived here yet, e.g. right
+    // after a reload) fall back to the surface view, the weaker but still
+    // bounded answer.
+    // Only inside the round that produced it: the API does not carry an earlier
+    // round's reasoning into a later one, so a replay after the next user message
+    // is not a billed saving and must not be credited. The round marker is the
+    // newest non-empty user message, so a fork's empty trigger does not close it.
     // Bind the credit to the request that carried these rewrites: pick the newest
     // derivation that happened at or before this response's seq.
     // The answered request's own record: the newest one taken before this response.
@@ -2155,8 +2189,10 @@ export class ReasoningDistillEngine {
     // the request) may not credit anything: the request demonstrably predates that
     // move, so this answer is not evidence that the rewrite shipped. Only a
     // session with no recorded request at all falls back to the surface itself.
+    const roundStart = this.lastUserSeq.get(sessionId) ?? -1
     const counting = record.entries.filter(entry =>
       (carried === undefined ? (history.length === 0 ? this.survives(session, entry, surface) : false) : carried.has(entry.id))
+      && entry.targetSeq > roundStart
       && entry.targetSeq < seq
       && entry.appliedAt <= time
       && entry.savedTokensPerRequest > 0)

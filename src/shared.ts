@@ -75,7 +75,7 @@ export interface CompressionEntry {
   originalTokens: number
   distilledChars: number
   distilledTokens: number
-  /** Estimated tokens removed from every later request in this epoch. */
+  /** Estimated tokens removed from each request that replays it in the round that produced it. */
   savedTokensPerRequest: number
   distill: DistillRun
   /**
@@ -96,7 +96,7 @@ export interface CompressionEntry {
   liveSaved: number
   /** Savings frozen when a compaction ended an epoch. Never resets. */
   frozenSaved: number
-  /** Answered requests counted in the live epoch. */
+  /** Answered requests in the producing round that were credited in the live epoch. */
   liveRequests: number
   /** Still contributing to the live epoch. */
   active: boolean
@@ -156,17 +156,25 @@ export interface SessionReport {
   cacheBreakCost: number
   /** Savings accumulated in the live epoch. Resets at each compaction. */
   savedLive: number
-  /** Lifetime savings, including every frozen epoch. Never resets. */
+  /**
+   * Lifetime savings, including every frozen epoch. Never resets.
+   *
+   * Only requests in the conversation round that produced a rewrite (after the
+   * newest user message) are credited: the API does not carry an earlier round's
+   * reasoning into a later one, so that replay is not a billed saving.
+   */
   savedTotal: number
   /**
-   * Tokens the next request would carry less than it would without the rewrites
-   * that are in force right now. A stock, not a running total: it grows once per
-   * adopted rewrite and shrinks as compaction removes their targets.
+   * Tokens the current round's next request would carry less than it would
+   * without the rewrites that are in force right now. A stock, not a running
+   * total: it grows once per adopted rewrite and shrinks as compaction removes
+   * their targets. A rewrite from an earlier round does not count, because the
+   * API does not replay that round's reasoning.
    */
   stockTokens: number
   /** {@link SessionReport.stockTokens} priced at the hit rate, an estimate. */
   stockSaved: number
-  /** Tokens every answered request saved in total, frozen rewards included. */
+  /** Tokens every credited request in its own round saved in total, frozen rewards included. */
   lifetimeTokens: number
   /** Attempts that produced an adopted rewrite (excludes failed and skipped). */
   succeeded: number

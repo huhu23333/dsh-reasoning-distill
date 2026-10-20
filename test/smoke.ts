@@ -1052,7 +1052,7 @@ check('the substitution is recorded', (await store18.load(s18.id)).entries.lengt
 rmSync(join(acctHome, 'reasoning-distill'), { recursive: true, force: true })
 writeFileSync(join(acctHome, 'reasoning-distill'), 'not a directory')
 const next18 = s18.append('assistant/message', {
-  turn: 2, step: 1,
+  turn: 1, step: 2,
   message: {
     id: 'a18b', role: 'assistant',
     content: [{ type: 'reasoning', text: 'x' }, { type: 'text', text: 'ok' }],
@@ -1110,7 +1110,7 @@ check('and the suffix never entered the break', entry20.cacheBreakTokens < 1000,
 // First counted request: the rewrite is brand-new input, priced at miss.
 const saving20 = entry20.savedTokensPerRequest
 const firstReplay = s20.append('assistant/message', {
-  turn: 2, step: 1,
+  turn: 1, step: 2,
   message: {
     id: 'a20b', role: 'assistant',
     content: [{ type: 'reasoning', text: 'x' }, { type: 'text', text: 'ok' }],
@@ -1126,7 +1126,7 @@ check('the first replay credits the saving at the miss rate',
   `${afterFirst.liveSaved} vs ${(saving20 * 2) / 1_000_000}`)
 // Second counted request: that tail is cached by now, so hit pricing applies.
 const secondReplay = s20.append('assistant/message', {
-  turn: 2, step: 2,
+  turn: 1, step: 3,
   message: {
     id: 'a20c', role: 'assistant',
     content: [{ type: 'reasoning', text: 'x' }, { type: 'text', text: 'ok' }],
@@ -1140,6 +1140,46 @@ const afterSecond = (await store20.load(s20.id)).entries[0]!
 check('the second replay credits the saving at the hit rate',
   Math.abs(afterSecond.liveSaved - ((saving20 * 2) + (saving20 * 0.04)) / 1_000_000) < 1e-12,
   `${afterSecond.liveSaved}`)
+// A fork's empty user trigger is dropped by the LLM layer, so it does not open a
+// new conversation round and must keep the credit alive.
+const emptyUser = s20.append('user/message', { id: 'u20b', role: 'user', content: [], source: { kind: 'user' } }).seq
+await fire('session/event', s20, s20.eventAt(emptyUser))
+const afterEmptyUser = s20.append('assistant/message', {
+  turn: 2, step: 1,
+  message: {
+    id: 'a20c', role: 'assistant',
+    content: [{ type: 'reasoning', text: 'x' }, { type: 'text', text: 'ok' }],
+    source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+  },
+  stream: [],
+}).seq
+await fire('session/event', s20, s20.eventAt(afterEmptyUser))
+await settleFor(async () => (await store20.load(s20.id)).entries[0]!.liveRequests === 3)
+const afterEmptyRound = (await store20.load(s20.id)).entries[0]!
+check('an empty user trigger keeps the round open', afterEmptyRound.liveRequests === 3,
+  JSON.stringify({ requests: afterEmptyRound.liveRequests, live: afterEmptyRound.liveSaved }))
+// A real user message opens the next round: the API does not replay the earlier
+// round's reasoning into it, so nothing may be credited and the stock drops to zero.
+const nextUser = s20.append('user/message', { id: 'u20c', role: 'user', content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } }).seq
+await fire('session/event', s20, s20.eventAt(nextUser))
+const afterNextUser = s20.append('assistant/message', {
+  turn: 3, step: 1,
+  message: {
+    id: 'a20d', role: 'assistant',
+    content: [{ type: 'reasoning', text: 'x' }, { type: 'text', text: 'ok' }],
+    source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+  },
+  stream: [],
+}).seq
+await fire('session/event', s20, s20.eventAt(afterNextUser))
+await new Promise(resolve => setTimeout(resolve, 30))
+const afterNewRound = (await store20.load(s20.id)).entries[0]!
+check('a new user message stops crediting the earlier round',
+  afterNewRound.liveRequests === 3 && afterNewRound.liveSaved === afterEmptyRound.liveSaved,
+  JSON.stringify({ requests: afterNewRound.liveRequests, live: afterNewRound.liveSaved, before: afterEmptyRound.liveSaved }))
+check('and the stock of a previous-round rewrite is zero',
+  (engine20.stock(s20.id)?.tokens ?? -1) === 0,
+  JSON.stringify(engine20.stock(s20.id)))
 
 console.log('scenario 29: a pre-step that joins the launch gate waits for the compression')
 handlers.clear()
@@ -1732,7 +1772,7 @@ s58.nodes.splice(0, s58.nodes.length, ...s58.nodes.filter(seq => seq !== seq58))
 for (const fn of handlers.get('agent/request') ?? []) await fn({ agent: { session: s58 } }, async () => ({ provider: 'deepseek-official', model: 'deepseek-flash' }))
 s58.deriveMessages()
 const response58 = s58.append('assistant/message', {
-  turn: 2, step: 1,
+  turn: 1, step: 2,
   message: { id: 'resp-58', role: 'assistant', content: [{ type: 'reasoning', text: 'short' }, { type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } },
   stream: [],
 }).seq
@@ -1760,7 +1800,7 @@ s59.nodes.splice(0, s59.nodes.length, ...nodes59.filter(seq => seq !== entry59.t
 s59.deriveMessages()
 s59.nodes.splice(0, s59.nodes.length, ...nodes59)
 const response59 = s59.append('assistant/message', {
-  turn: 2, step: 1,
+  turn: 1, step: 2,
   message: { id: 'response-59', role: 'assistant', content: [{ type: 'text', text: 'ok' }], source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' } }, stream: [],
 }).seq
 await fire('session/event', s59, s59.eventAt(response59))

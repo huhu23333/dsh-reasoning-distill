@@ -116,14 +116,19 @@ export function buildReport(
     savedTotal += entry.liveSaved + entry.frozenSaved
     // Lifetime tokens survive a frozen epoch: the request count is kept when the
     // live money is frozen, so a retired rewrite still reports what it saved.
+    // The count itself only covers requests in the round that produced the
+    // rewrite (see engine.account): the API does not replay an earlier round's
+    // reasoning into a later one.
     lifetimeTokens += entry.savedTokensPerRequest * entry.liveRequests
     // A compression handed off to a branch is in force there, not here: this
     // conversation keeps the pre-compression history, so it earns no success and no stock.
     const adopted = entryInForceHere(entry, sessionId)
     if (adopted) succeeded += 1
-    // The stock counts only rewrites a request would carry right now, priced at
-    // the hit rate of the model that would send them: those tokens sit in a
-    // stable prefix, so the money is an estimate and is labelled as one.
+    // The stock counts only rewrites the current round's next request would
+    // carry, priced at the hit rate of the model that would send them: those
+    // tokens sit in a stable prefix, so the money is an estimate and is labelled
+    // as one. A rewrite from an earlier round is not counted, because the API
+    // does not replay that round's reasoning.
     if (entry.active && adopted && entry.distilledTokens < entry.originalTokens) {
       stockTokens += entry.savedTokensPerRequest
       stockSaved += entry.savedTokensPerRequest * (priceAt(entry.model, prices, pricedAt, config).bucket.hit / 1_000_000)
