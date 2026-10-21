@@ -197,10 +197,11 @@ check('empty text cannot be bridged', rewriteRequest('message-edit', 's', { targ
 check('a session without an id cannot be bridged', rewriteRequest('message-edit', '', { targetSeq: 1, targetBlockIndex: 0 }, 'x') === undefined)
 
 console.log('client: the rewrite backend registry drives the panel')
-check('two backends are offered: the verified companion, and the built-in in-place one',
-  REWRITE_BACKENDS.length === 2
-  && backendById('message-edit')?.kind === 'branch' && backendById('message-edit')?.hostPatch === undefined
+check('three backends are offered: no-write, the built-in in-place one, and the experimental companion',
+  REWRITE_BACKENDS.length === 3
+  && backendById('derive')?.kind === 'derive' && backendById('derive')?.probe === undefined
   && backendById('in-place')?.kind === 'in-place' && backendById('in-place')?.hostPatch === true
+  && backendById('message-edit')?.kind === 'branch' && backendById('message-edit')?.hostPatch === undefined
   && backendById('placeholder') === undefined)
 // Detection must not confuse a backend's own 404 ("no such session") with a
 // missing route: the former answers with its JSON envelope.
@@ -252,10 +253,12 @@ check('an empty or unknown id resolves to no backend',
 // startup check reads the profile's active plugin list instead. Only a list that was read *and*
 // lacks the plugin may close the switch down; every weaker answer leaves the user's setting alone.
 const active = ['dsh-base', 'dsh-message-edit']
-check('a companion backend names its plugin; the built-in one names none but still has a route',
-  REWRITE_BACKENDS.filter(backend => backend.hostPatch !== true).every(backend => (backend.plugin ?? '') !== '')
+check('only the companion names a plugin; the built-in has a route and the no-write one needs neither',
+  REWRITE_BACKENDS.filter(backend => backend.plugin !== undefined).map(backend => backend.id).join(',') === 'message-edit'
   && REWRITE_BACKENDS.filter(backend => backend.hostPatch === true).every(backend =>
-    backend.plugin === undefined && backend.probe?.path === REWRITE_ROUTE))
+    backend.plugin === undefined && backend.probe?.path === REWRITE_ROUTE)
+  && REWRITE_BACKENDS.filter(backend => backend.kind === 'derive').every(backend =>
+    backend.plugin === undefined && backend.probe === undefined && backend.hostPatch === undefined))
 // A host-patch backend is drivable only on a patched host, and the answer has to come from the
 // host itself: true opens it, false closes it, and 'not asked yet' leaves it alone.
 check('the built-in backend needs the host patch, and only a real answer closes it',
