@@ -2,6 +2,10 @@
 
 本插件的版本变更记录。
 
+## 0.1.15
+
+- 仅版本号重发：0.1.14 在 npm 侧被 staged-publishing 的一个注册表 bug 卡住（`npm publish` 返回成功但版本未上线，`npm stage list` 也没有记录可 approve/reject；见 npm/cli#9889）。按该 issue 的通用做法 bump patch 后重新发布；代码与 0.1.14 相同。
+
 ## 0.1.14
 
 ### 报告页：压缩阶段与手动取消
