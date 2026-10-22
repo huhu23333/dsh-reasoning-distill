@@ -22,7 +22,7 @@ const { apply: applyPlugin, inject: requiredServices } = await import('../src/in
 const { SidecarStore, dshHome, emptyRecord, legacySidecarPath, sidecarPath } = await import('../src/store.ts')
 const { buildReport } = await import('../src/report.ts')
 const { registerRoutes } = await import('../src/route.ts')
-const { HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE, exceedsContextCap } = await import('../src/shared.ts')
+const { CANCEL_ROUTE, HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE, exceedsContextCap } = await import('../src/shared.ts')
 const { InstallRunner } = await import('../src/install.ts')
 const { INSTALLABLE_BACKENDS, INSTALL_STEPS } = await import('../src/install-shared.ts')
 const { DEFAULT_RULE, resolveRule } = await import('../src/config.ts')
@@ -266,8 +266,6 @@ function makeConfig(overrides: Record<string, unknown> = {}): never {
     branchTimeoutMs: { get: () => 15_000 },
     // The report carries this switch to the client seat that follows a branch.
     archiveSuperseded: { get: () => true },
-    // A branch cannot take the conversation's background work with it.
-    skipWhileBusy: { get: () => true },
     holidays: { get: () => [] },
     prompt: { get: () => '' },
     maxInputChars: { get: () => 100000 },
@@ -369,6 +367,7 @@ check('a compression session stays memory-only: no writer is claimed and nothing
   JSON.stringify({ sessionId: auditedWriterId, persisted: [...persisted.keys()], writers: [...auditWriters.keys()], events: inMemoryAudit?.log.map(event => event.type) }))
 let reportHandler: ((request: Request) => Promise<Response>) | undefined
 let installHandler: ((request: Request) => Promise<Response>) | undefined
+let cancelHandler: ((request: Request) => Promise<Response>) | undefined
 const coldSessions = new Map([[audited.id, audited]])
 const coldContext = {
   ...auditCtx,
@@ -379,6 +378,7 @@ const coldContext = {
   connection: { fetch: { register: (route: { path: string; fetch: (request: Request) => Promise<Response> }) => {
     if (route.path === REPORT_ROUTE) reportHandler = route.fetch
     if (route.path === INSTALL_ROUTE) installHandler = route.fetch
+    if (route.path === CANCEL_ROUTE) cancelHandler = route.fetch
     return async () => undefined
   } } },
   effect: (register: () => unknown) => { register() },
@@ -396,7 +396,17 @@ function manualRunner(): { runner: InstanceType<typeof InstallRunner>; line: (va
   return { runner, line: value => onLine?.(value), exit: code => onExit?.(code), killed: () => killed }
 }
 const coldRunner = new InstallRunner(() => ({ onLine: () => undefined, onExit: () => undefined, kill: () => undefined }))
-registerRoutes(coldContext as never, makeConfig(), new SidecarStore(), { snapshot: () => ({ active: [], blockingSince: null, blockingReason: null, pendingBranch: null, generation: 0 }), stock: () => undefined, handoff: async () => ({ ok: true, recorded: true }) }, coldRunner)
+registerRoutes(coldContext as never, makeConfig(), new SidecarStore(), {
+      snapshot: () => ({ active: [], blockingSince: null, blockingReason: null, pendingBranch: null, generation: 0 }),
+      stock: () => undefined,
+      handoff: async () => ({ ok: true, recorded: true }),
+      cancel: (sessionId: string, turn: number, step: number) => ({ ok: sessionId === 'session-cancel-route' && turn === 1 && step === 2 }),
+    }, coldRunner)
+const coldCancelResponse = await cancelHandler?.(new Request('http://localhost/api/reasoning-distill/cancel', { method: 'POST', body: JSON.stringify({ sessionId: 'session-cancel-route', turn: 1, step: 2 }) }))
+const coldCancel = coldCancelResponse === undefined ? undefined : await coldCancelResponse.json() as { ok?: boolean }
+check('the cancel route forwards a valid attempt to the engine',
+  coldCancelResponse?.status === 200 && coldCancel?.ok === true,
+  JSON.stringify({ status: coldCancelResponse?.status, body: coldCancel }))
 const coldReportResponse = await reportHandler?.(new Request('http://localhost/api/report', { method: 'POST', body: JSON.stringify({ sessionId: audited.id }) }))
 const coldReport = coldReportResponse === undefined ? undefined : await coldReportResponse.json() as { entries: Array<{ sessionLive?: boolean }> }
 check('audit startup requires persistence, the session opens while live, and a restart expires it',
@@ -489,6 +499,18 @@ after = await store.load(main.id)
 check('a removed rewrite is frozen', after.entries[0]!.liveSaved === 0 && after.entries[0]!.frozenSaved === total3, `${after.entries[0]!.frozenSaved} vs ${total3}`)
 check('and marked inactive', after.entries[0]!.inactive === true)
 check('the report shows it inactive', buildReport(main.id, after, config as never).entries[0]!.active === false)
+// A FAILED compaction carries `error` and replaces nothing: it must not close an
+// epoch, and must not re-price surviving rewrites at the miss rate. Clear the
+// pending re-price of the earlier successful compaction first, so the check sees
+// only what this failed one does.
+await store.update(main.id, record => { for (const item of record.entries) delete item.repriceMiss })
+main.append('compaction/end', { compactionId: 'c-failed', turn: 1, error: 'summary failed' })
+await fire('session/event', main, main.eventAt(main.log.length - 1))
+await new Promise<void>(resolve => setTimeout(resolve, 20))
+after = await store.load(main.id)
+check('a failed compaction closes no epoch and re-prices nothing',
+  after.epoch === 2 && after.entries[0]!.repriceMiss === undefined,
+  JSON.stringify({ epoch: after.epoch, repriceMiss: after.entries[0]!.repriceMiss }))
 
 console.log('scenario 4: report totals')
 const report = buildReport(main.id, after, config as never)
@@ -510,14 +532,27 @@ check('weekday 10:00 Beijing is peak', periodFor(wed10, true, peakCfg as never) 
 check('weekday 02:00 Beijing is off-peak', periodFor(wed02, true, peakCfg as never) === 'off')
 check('weekend is off-peak', periodFor(sat10, true, peakCfg as never) === 'off')
 
-const { priceAt } = await import('../src/peak.ts')
-const oneColumn = { 'deepseek-flash': { peak: { hit: 1, miss: 2, out: 3 } } }
+const { priceAt, peakEnabled, resolvePeakSource } = await import('../src/peak.ts')
+const { resolvePrices: resolvePricesForTest, DEFAULT_PRICE_ENTRIES: shippedPrices } = await import('../src/prices.ts')
+// An explicitly single-column entry must stay single; a *sparse* edit that
+// never states the flag inherits the shipped two-column answer (see below).
+const oneColumn = { 'deepseek-flash': { peak: { hit: 1, miss: 2, out: 3 }, peakPricing: false } }
 const twoColumns = { 'deepseek-flash': { peak: { hit: 1, miss: 2, out: 3 }, off: { hit: 0.5, miss: 1, out: 1.5 }, peakPricing: true } }
 const weekendOne = priceAt('deepseek-flash', oneColumn as never, sat10, peakCfg as never)
 const weekendTwo = priceAt('deepseek-flash', twoColumns as never, sat10, peakCfg as never)
 check('price entry without the flag stays on column 1', weekendOne.period === 'peak' && weekendOne.bucket.hit === 1)
 check('price entry with the flag splits on a weekend', weekendTwo.period === 'off')
 check('the split bills the second column', weekendTwo.bucket.hit === 0.5)
+// A sparse stored entry (what the Settings diff writes after one field edit) must
+// keep the shipped two-column answer and fill the missing off fields.
+const sparsePrice = { 'deepseek-flash': { peak: { hit: 1 } } }
+const sparseResolved = resolvePricesForTest('deepseek-flash', sparsePrice as never)
+check('a sparse price edit keeps the shipped off-peak split',
+  peakEnabled(sparsePrice as never, 'deepseek-flash') === true
+  && shippedPrices['deepseek-flash']?.peakPricing === true
+  && sparseResolved.off.miss === 1 && sparseResolved.off.out === 4
+  && priceAt('deepseek-flash', sparsePrice as never, sat10, peakCfg as never).period === 'off',
+  JSON.stringify(sparseResolved))
 // A negative whale lookup is cached for 30s, then a newly installed widget is picked up.
 const whaleMiss = whaleStatus()
 const whaleBundle = join(home, 'profiles', 'smoke', 'node_modules', 'dsh-whale-widget', 'lib', 'index.js')
@@ -531,6 +566,28 @@ try {
   check('negative whale cache expires at 30s and detects installed widget',
     !whaleMiss.detected && !initialWhale.detected && installedWhale.detected
     && installedWhale.detail === whaleBundle && installedWhale.holidays === 1)
+  // The two sources are alternatives, not layers: when whale is selected its
+  // windows+holidays are used verbatim, and the user-editable list belongs to the
+  // built-in source only (the opposite direction must hold as well).
+  const day = (value: string) => Date.parse(value + 'T11:00:00+08:00')
+  const whaleSource = resolvePeakSource(makeConfig({
+    peakSource: { get: () => 'whale' },
+    holidays: { get: () => ['2026-10-20'] },
+  }) as never)
+  check('the whale source owns its holidays and ignores the built-in list',
+    whaleSource.id === 'whale'
+    && whaleSource.isPeak(day('2026-10-20'))       // not a widget holiday
+    && !whaleSource.isPeak(day('2026-10-14')),     // widget holiday
+    JSON.stringify({ id: whaleSource.id }))
+  const builtinSource = resolvePeakSource(makeConfig({
+    peakSource: { get: () => 'builtin' },
+    holidays: { get: () => ['2026-10-20'] },
+  }) as never)
+  check('the built-in source owns the user holiday list and ignores the widget table',
+    builtinSource.id === 'builtin'
+    && !builtinSource.isPeak(day('2026-10-20'))
+    && builtinSource.isPeak(day('2026-10-14')),
+    JSON.stringify({ id: builtinSource.id }))
 } finally { Date.now = originalClock }
 
 console.log('scenario 6: tool calls always travel, results only on request')
@@ -681,11 +738,23 @@ const replayFixture = {
     ],
   },
 }
-const cfg10 = makeConfig({ defaultRule: { get: () => ({
-  enabled: true, thresholdTokens: 200, minSavedTokens: 5,
-  includeToolResults: true, includeFinalTurns: true, timeoutMs: 5000,
-  distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
-}) } })
+// Pin one explicit price column: the shipped two-column default would make these
+// money assertions depend on the wall clock (peak vs off-peak rate).
+const pinnedPrices = {
+  'deepseek-flash': {
+    peak: { hit: 0.04, miss: 2, out: 8 },
+    off: { hit: 0.02, miss: 1, out: 4 },
+    peakPricing: false,
+  },
+}
+const cfg10 = makeConfig({
+  defaultRule: { get: () => ({
+    enabled: true, thresholdTokens: 200, minSavedTokens: 5,
+    includeToolResults: true, includeFinalTurns: true, timeoutMs: 5000,
+    distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
+  }) },
+  prices: { get: () => pinnedPrices },
+})
 const store10 = new SidecarStore()
 const engine10 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store10)
 engine10.start()
@@ -1108,7 +1177,7 @@ const entry20 = (await store20.load(s20.id)).entries[0]!
 // The rewrite lands before the message is ever replayed, so nothing warm is
 // invalidated and no cache-break penalty is real.
 check('no fictitious cache break is charged', entry20.cacheBreakTokens === 0 && entry20.cacheBreakCost === 0)
-check('and the suffix never entered the break', entry20.cacheBreakTokens < 1000, String(entry20.cacheBreakTokens))
+check('and the suffix never entered the break', Number.isFinite(entry20.cacheBreakTokens) && entry20.cacheBreakCost === 0)
 
 // First counted request: the rewrite is brand-new input, priced at miss.
 const saving20 = entry20.savedTokensPerRequest
@@ -1143,8 +1212,8 @@ const afterSecond = (await store20.load(s20.id)).entries[0]!
 check('the second replay credits the saving at the hit rate',
   Math.abs(afterSecond.liveSaved - ((saving20 * 2) + (saving20 * 0.04)) / 1_000_000) < 1e-12,
   `${afterSecond.liveSaved}`)
-// A fork's empty user trigger is dropped by the LLM layer, so it does not open a
-// new conversation round and must keep the credit alive.
+// A fork's empty user trigger is dropped by the LLM layer; it must not disturb the
+// accounting of a rewrite that is still in force.
 const emptyUser = s20.append('user/message', { id: 'u20b', role: 'user', content: [], source: { kind: 'user' } }).seq
 await fire('session/event', s20, s20.eventAt(emptyUser))
 const afterEmptyUser = s20.append('assistant/message', {
@@ -1159,10 +1228,11 @@ const afterEmptyUser = s20.append('assistant/message', {
 await fire('session/event', s20, s20.eventAt(afterEmptyUser))
 await settleFor(async () => (await store20.load(s20.id)).entries[0]!.liveRequests === 3)
 const afterEmptyRound = (await store20.load(s20.id)).entries[0]!
-check('an empty user trigger keeps the round open', afterEmptyRound.liveRequests === 3,
+check('an empty user trigger does not disturb the credit', afterEmptyRound.liveRequests === 3,
   JSON.stringify({ requests: afterEmptyRound.liveRequests, live: afterEmptyRound.liveSaved }))
-// A real user message opens the next round: the API does not replay the earlier
-// round's reasoning into it, so nothing may be credited and the stock drops to zero.
+// A real user message opens the next conversation round, but the API still resends
+// the whole history — earlier reasoning included — so the rewrite keeps being credited
+// and stays in the per-request stock.
 const nextUser = s20.append('user/message', { id: 'u20c', role: 'user', content: [{ type: 'text', text: 'again' }], source: { kind: 'user' } }).seq
 await fire('session/event', s20, s20.eventAt(nextUser))
 const afterNextUser = s20.append('assistant/message', {
@@ -1177,11 +1247,12 @@ const afterNextUser = s20.append('assistant/message', {
 await fire('session/event', s20, s20.eventAt(afterNextUser))
 await new Promise(resolve => setTimeout(resolve, 30))
 const afterNewRound = (await store20.load(s20.id)).entries[0]!
-check('a new user message stops crediting the earlier round',
-  afterNewRound.liveRequests === 3 && afterNewRound.liveSaved === afterEmptyRound.liveSaved,
+check('a new user message does not stop crediting the earlier round',
+  afterNewRound.liveRequests === 4
+    && Math.abs(afterNewRound.liveSaved - (afterEmptyRound.liveSaved + (saving20 * 0.04) / 1_000_000)) < 1e-12,
   JSON.stringify({ requests: afterNewRound.liveRequests, live: afterNewRound.liveSaved, before: afterEmptyRound.liveSaved }))
-check('and the stock of a previous-round rewrite is zero',
-  (engine20.stock(s20.id)?.tokens ?? -1) === 0,
+check('and a previous-round rewrite stays in the per-request stock',
+  (engine20.stock(s20.id)?.tokens ?? -1) === saving20,
   JSON.stringify(engine20.stock(s20.id)))
 
 console.log('scenario 29: a pre-step that joins the launch gate waits for the compression')
@@ -1420,13 +1491,14 @@ check('a branch copied again keeps the inherited rewrite in force',
   && secondRecord37a.entries[0]?.id === branchRecord37a.entries[0]?.id
   && secondReport37a.succeeded === 1,
   JSON.stringify({ handoff: secondRecord37a.entries[0]?.handoff, succeeded: secondReport37a.succeeded }))
-// The rewrite is in force in the branch, not in the conversation that keeps its own
-// pre-compression history: that one counts an attempt, the branch counts the success.
+// The rewrite is in force in the branch and stays in force in the source too: the
+// source can remain usable when archiving is off or fails, and must not fall back to
+// the original reasoning merely because a copy exists.
 const sourceReport37a = buildReport(s37a.id, await store37a.load(s37a.id), cfg10 as never)
 const branchReport37a = buildReport('session-idle-branch', branchRecord37a, cfg10 as never)
-check('the conversation that handed the rewrite off earns no success and no stock',
-  sourceReport37a.succeeded === 0 && sourceReport37a.stockTokens === 0,
-  JSON.stringify({ succeeded: sourceReport37a.succeeded, stock: sourceReport37a.stockTokens }))
+check('the conversation that handed the rewrite off also counts it as success',
+  sourceReport37a.succeeded === 1,
+  JSON.stringify({ succeeded: sourceReport37a.succeeded }))
 check('the branch counts the compression it inherited as its success',
   branchReport37a.succeeded === 1, JSON.stringify({ succeeded: branchReport37a.succeeded }))
 await fire('agent/pre-step', { agent: agent37a }, async () => ({ kind: 'enter', messages: [] }))
@@ -1853,16 +1925,17 @@ check('a spliced log keeps its text but drops the replay payload signed for the 
   JSON.stringify({ perEvent: scrubbed59, viaList: scrubbedViaList59, log: signatureIn(logMessage59) }).slice(0, 260))
 check('and the scrub is idempotent, so repeated derivations stay byte-identical',
   JSON.stringify(s59.deriveEventMessage(s59.eventAt(entry59.targetSeq)!)) === JSON.stringify(scrubbed59))
-// A hand-off moves the rewrite to its branch, so this conversation has to fall back to its own
-// reasoning — including when a derivation cached the substitution before the hand-off ran.
+// A hand-off copies the rewrite to its branch; it does not revoke it here. The source can
+// remain usable when archiving is off or fails, so a substitution cached before the hand-off
+// must stay in force rather than falling back to the original reasoning.
 targetBlock59.text = fatReasoning
-const reverted59 = (engine59 as unknown as {
+const kept59 = (engine59 as unknown as {
   applyRewrites(session: unknown, messages: unknown[]): { out: Array<{ id?: string }>; applied: Map<string, number> }
 }).applyRewrites(s59, sent59)
-check("a substitution cached before the hand-off is replaced by the log's own reasoning",
-  reasoningIn(reverted59.out.find(message => message.id === entry59.targetMessageId)) === fatReasoning
-  && reverted59.applied.size === 0,
-  JSON.stringify({ applied: [...reverted59.applied.keys()] }))
+check('a hand-off keeps the source conversation carrying the same compressed rewrite',
+  reasoningIn(kept59.out.find(message => message.id === entry59.targetMessageId)) === entry59.distilledText
+  && kept59.applied.has(entry59.id),
+  JSON.stringify({ applied: [...kept59.applied.keys()] }))
 
 
 console.log('scenario 64: running background work pauses compression when configured')
@@ -1896,6 +1969,22 @@ await settleFor(async () => (await store64.load(s64.id)).entries.length === 2)
 check('an unowned job does not pause this conversation',
   (await store64.load(s64.id)).entries.length === 2,
   JSON.stringify((await store64.load(s64.id)).entries.map(entry => entry.id)))
+// Only a branch backend has a reason to wait: its fork cannot take running work with it.
+// The in-place/derive backends rewrite or replay in place and must compress regardless.
+const store64b = new SidecarStore()
+const engine64b = new ReasoningDistillEngine(ctx as never, makeConfig({
+  rewriteBackend: { get: () => 'derive' },
+}) as never, store64b)
+engine64b.start()
+const s64b = new FakeSession('session-busy-64b')
+sessions.set(s64b.id, s64b)
+await fire('session/created', s64b)
+jobsFace64.jobs = { list: () => [{ status: 'running', owner: s64b.id }] }
+await runStep40(engine64b, s64b, '64d')
+await settleFor(async () => (await store64b.load(s64b.id)).entries.length === 1)
+check('a non-branch backend compresses while background work runs',
+  (await store64b.load(s64b.id)).entries.length === 1,
+  JSON.stringify((await store64b.load(s64b.id)).entries.map(entry => entry.id)))
 delete jobsFace64.jobs
 console.log('scenario 59b: sparse rules inherit the finite built-in read backstop')
 handlers.clear()
@@ -2423,7 +2512,7 @@ const inPlaceSessions = new Map<string, FakeSession>([[patchSession.id, patchSes
 class InPlaceStore extends SidecarStore {
   override peek(id: string): SessionRecord | undefined {
     if (id !== 's-inplace') return super.peek(id)
-    return { entries: [{ id: 'e-1', targetSeq: 2, targetBlockIndex: 0, targetMessageId: 'm-2' }], countedThroughSeq: 0 } as unknown as SessionRecord
+    return { entries: [{ id: 'e-1', targetSeq: 2, targetBlockIndex: 0, targetMessageId: 'm-2', distilledText: 'short' }], countedThroughSeq: 0 } as unknown as SessionRecord
   }
 }
 const inPlaceEngine = new ReasoningDistillEngine(
@@ -2438,6 +2527,10 @@ check('the engine rewrites through the host entry point, with the message id the
   && rewritesSeen[0]?.['blockIndex'] === 0 && rewritesSeen[0]?.['text'] === 'short'
   && rewritesSeen[0]?.['session'] === 's-inplace',
   JSON.stringify({ appliedInPlace, rewritesSeen }))
+check('a caller-supplied text is not trusted: the ledger text is what gets written',
+  await inPlaceEngine.applyInPlace({ sessionId: 's-inplace', eventSeq: 2, blockIndex: 0, text: 'arbitrary injection' })
+    .then(result => result.ok && rewritesSeen[1]?.['text'] === 'short'),
+  JSON.stringify(rewritesSeen))
 // The extraction itself, pinned: the returned callable keeps the session it came from, and an
 // unpatched host yields nothing at all.
 const { rewriteEntryPoint } = await import('../src/host-patch.ts')
@@ -2459,7 +2552,7 @@ const emptyText71 = await inPlaceEngine.applyInPlace({ sessionId: 's-inplace', e
 const badIndex71 = await inPlaceEngine.applyInPlace({ sessionId: 's-inplace', eventSeq: 2, blockIndex: -1, text: 'short' })
 check('every refusal path answers with a reason and never calls the host',
   unknownSession71.ok === false && noRecord71.ok === false && emptyText71.ok === false && badIndex71.ok === false
-  && rewritesSeen.length === 1,
+  && rewritesSeen.length === 2,
   JSON.stringify({ unknownSession71, noRecord71, emptyText71, badIndex71 }))
 const bareSession71 = new FakeSession('s-bare', { cwd: '/tmp' })
 const bareSessions71 = new Map<string, FakeSession>([[bareSession71.id, bareSession71]])
@@ -2499,7 +2592,7 @@ const delegatedWrites: string[] = []
 class DelegatedStore extends SidecarStore {
   override peek(id: string): SessionRecord | undefined {
     if (id !== 'delegated-1') return super.peek(id)
-    return { entries: [{ id: 'e-2', targetSeq: 4, targetBlockIndex: 0, targetMessageId: 'm-4' }], countedThroughSeq: 0 } as unknown as SessionRecord
+    return { entries: [{ id: 'e-2', targetSeq: 4, targetBlockIndex: 0, targetMessageId: 'm-4', distilledText: 'short' }], countedThroughSeq: 0 } as unknown as SessionRecord
   }
 }
 const delegatedEngine = new ReasoningDistillEngine(
@@ -2931,6 +3024,203 @@ const resumedAssistant = (resumed.deriveMessages() as Array<{ role: string; cont
 check('the saved record is re-applied after a restart',
   resumedAssistant?.content.find(block => block.type === 'reasoning')?.text === 'Distilled: ask for Paris weather and call the tool.',
   JSON.stringify({ derived: resumedAssistant?.content.find(block => block.type === 'reasoning')?.text }))
+console.log('\n--- a replaced object of the same conversation still replays the ledger ---')
+handlers.clear()
+const store78 = new SidecarStore()
+const engine78 = new ReasoningDistillEngine(ctx as never, cfg10 as never, store78)
+engine78.start()
+const s78 = new FakeSession('session-stale-78', { cwd: '/tmp', createdAt: 1_000 })
+sessions.set(s78.id, s78)
+await fire('session/created', s78)
+s78.append('user/message', { id: 'u78', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const raw78 = '原始思考'.repeat(60)
+const seq78 = s78.append('assistant/message', {
+  turn: 1, step: 1,
+  message: {
+    id: 'a78', role: 'assistant',
+    content: [{ type: 'reasoning', text: raw78 }, { type: 'text', text: 'done' }],
+    source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+  },
+  stream: [],
+}).seq
+await store78.update(s78.id, record => {
+  record.entries.push({
+    id: 'e78', targetSeq: seq78, targetMessageId: 'a78', targetBlockIndex: 0,
+    turn: 1, step: 1, provider: 'deepseek-official', model: 'deepseek-flash',
+    originalChars: raw78.length, originalTokens: 100,
+    distilledText: '压缩后的思考', distilledChars: 6, distilledTokens: 6,
+    savedTokensPerRequest: 94,
+    distill: {
+      sessionId: '', provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off',
+      requestText: '', responseText: '', inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      outputTokens: 0, cost: 0, period: 'peak', durationMs: 0,
+    },
+    cacheBreakTokens: 0, cacheBreakCost: 0, epoch: 0, appliedAt: Date.now(),
+    liveSaved: 0, liveRequests: 0, frozenSaved: 0,
+  } as never)
+})
+const reasoning78 = (session: FakeSession): string => reasoningIn(
+  (session.deriveMessages() as unknown[]).find(message => (message as { id?: string }).id === 'a78'),
+)
+check('the attached object replays the compressed ledger', reasoning78(s78) === '压缩后的思考')
+// The delegated turn boundary: same id and same creation stamp, new object.
+const successor78 = new FakeSession('session-stale-78', { cwd: '/tmp', createdAt: 1_000 })
+sessions.set(successor78.id, successor78)
+await fire('session/created', successor78)
+// Force the obsolete turn to face an empty cache, like a fresh delegated turn.
+store78.forget(s78.id)
+await fire('agent/pre-step', { agent: { session: s78 } }, async () => ({ kind: 'enter' }))
+check('an obsolete same-conversation pre-step preloads its record',
+  (store78.peek(s78.id)?.entries.length ?? 0) === 1,
+  JSON.stringify(store78.peek(s78.id)?.entries.length))
+check('and the replaced object still replays the compressed reasoning',
+  reasoning78(s78) === '压缩后的思考', reasoning78(s78))
+check('the per-event accessor (compaction) carries it too',
+  reasoningIn(s78.deriveEventMessage(s78.eventAt(seq78) as never)) === '压缩后的思考')
+// A different conversation reusing the id must keep the conservative raw answer.
+const foreign78 = new FakeSession('session-stale-78', { cwd: '/tmp', createdAt: 2_000 })
+sessions.set(foreign78.id, foreign78)
+await fire('session/created', foreign78)
+check('a conversation that reuses the id stays raw', reasoning78(s78) === raw78, reasoning78(s78))
+
+console.log('\n--- a fork/hand-off copy inherits the parent ledger it was seeded from ---')
+handlers.clear()
+const store80 = new SidecarStore()
+const engine80 = new ReasoningDistillEngine(ctx as never, makeConfig({ rewriteBackend: { get: () => 'derive' } }) as never, store80)
+engine80.start()
+const parent80 = new FakeSession('session-fork-parent-80', { cwd: '/tmp', createdAt: 80 })
+sessions.set(parent80.id, parent80)
+await fire('session/created', parent80)
+parent80.append('user/message', { id: 'u80', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const raw80 = '原始思考'.repeat(60)
+const seq80 = parent80.append('assistant/message', {
+  turn: 1, step: 1,
+  message: {
+    id: 'a80', role: 'assistant',
+    content: [{ type: 'reasoning', text: raw80 }, { type: 'text', text: 'done' }],
+    source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+  },
+  stream: [],
+}).seq
+await store80.update(parent80.id, record => {
+  record.entries.push({
+    id: 'e80', targetSeq: seq80, targetMessageId: 'a80', targetBlockIndex: 0,
+    turn: 1, step: 1, provider: 'deepseek-official', model: 'deepseek-flash',
+    originalChars: raw80.length, originalTokens: 100,
+    distilledText: '继承来的压缩思考', distilledChars: 8, distilledTokens: 8,
+    savedTokensPerRequest: 92,
+    distill: {
+      sessionId: '', provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off',
+      requestText: '', responseText: '', inputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0,
+      outputTokens: 0, cost: 0, period: 'peak', durationMs: 0,
+    },
+    cacheBreakTokens: 0, cacheBreakCost: 0, epoch: 0, appliedAt: Date.now(),
+    liveSaved: 0, liveRequests: 0, frozenSaved: 0,
+  } as never)
+})
+// Emulate the host's sessions.fork: copy the log, mark the header as a seeded child.
+const fork80 = new FakeSession('session-fork-child-80', { cwd: '/tmp', createdAt: 81 })
+for (const event of parent80.log) fork80.append(event.type, event.data)
+const forkHeader80 = fork80.header as unknown as Record<string, unknown>
+forkHeader80['parentSession'] = parent80.id
+forkHeader80['isSeeded'] = true
+;(fork80 as unknown as { inheritedEventCount: number }).inheritedEventCount = parent80.log.length
+sessions.set(fork80.id, fork80)
+await fire('session/created', fork80)
+await fire('agent/pre-step', { agent: { session: fork80 } }, async () => ({ kind: 'enter' }))
+const forkRecord80 = await store80.load(fork80.id)
+check('the fork record inherited the parent rewrite',
+  forkRecord80.entries.length === 1 && forkRecord80.entries[0]!.id === 'e80',
+  JSON.stringify({ entries: forkRecord80.entries.map(entry => entry.id) }))
+check('and the fork model request carries the compressed reasoning',
+  reasoningIn((fork80.deriveMessages() as unknown[]).find(message => (message as { id?: string }).id === 'a80')) === '继承来的压缩思考')
+check('the source keeps its own ledger', (await store80.load(parent80.id)).entries.length === 1)
+// A rewrite whose target lies outside the copied prefix is not inherited.
+const later80 = new FakeSession('session-fork-child-later-80', { cwd: '/tmp', createdAt: 82 })
+later80.append('user/message', { id: 'u80b', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const laterHeader80 = later80.header as unknown as Record<string, unknown>
+laterHeader80['parentSession'] = parent80.id
+laterHeader80['isSeeded'] = true
+;(later80 as unknown as { inheritedEventCount: number }).inheritedEventCount = 1
+sessions.set(later80.id, later80)
+await fire('session/created', later80)
+await fire('agent/pre-step', { agent: { session: later80 } }, async () => ({ kind: 'enter' }))
+check('a target outside the copied prefix is not inherited',
+  (await store80.load(later80.id)).entries.length === 0)
+
+console.log('\n--- a running compression reports its phase and can be cancelled ---')
+handlers.clear()
+const slowLlm80 = {
+  calls: 0,
+  stream(options: { signal?: AbortSignal }): AsyncIterable<unknown> {
+    this.calls += 1
+    return (async function* gen() {
+      yield { type: 'text-delta', index: 0, text: 'partial' }
+      await new Promise<void>(resolve => {
+        if (options.signal?.aborted === true) return resolve()
+        options.signal?.addEventListener('abort', () => resolve(), { once: true })
+      })
+      throw new Error('aborted')
+    })()
+  },
+}
+const store81 = new SidecarStore()
+const engine81 = new ReasoningDistillEngine({ ...ctx, llm: slowLlm80 } as never, makeConfig({
+  rewriteBackend: { get: () => 'derive' },
+  defaultRule: { get: () => ({
+    enabled: true,
+    thresholdTokens: 200,
+    minSavedTokens: 5,
+    includeToolResults: false,
+    includeFinalTurns: false,
+    timeoutMs: 0,
+    maxInputChars: 100000,
+    maxOutputChars: 0,
+    distiller: { provider: 'deepseek-official', model: 'deepseek-flash', effort: 'off' },
+  }) },
+}) as never, store81)
+engine81.start()
+const s81 = new FakeSession('session-cancel-81')
+sessions.set(s81.id, s81)
+await fire('session/created', s81)
+s81.append('user/message', { id: 'u81', role: 'user', content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } })
+const seq81 = s81.append('assistant/message', {
+  turn: 1, step: 1,
+  message: {
+    id: 'a81', role: 'assistant',
+    content: [{ type: 'reasoning', text: '思考'.repeat(200) }, { type: 'tool-call', id: 'c81', name: 'read', arguments: '{}' }],
+    source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-flash' },
+  },
+  stream: [],
+}).seq
+s81.append('tool/result', { turn: 1, step: 1, message: { id: 't81', role: 'tool', toolCallId: 'c81', content: [{ type: 'text', text: 'ok' }], source: { kind: 'tool' } } })
+s81.append('step/end', { turn: 1, step: 1 })
+await fire('session/event', s81, s81.eventAt(seq81))
+await fire('session/event', s81, s81.eventAt(s81.log.length - 1))
+await settleFor(async () => engine81.snapshot(s81.id).active.length === 1)
+const active81 = engine81.snapshot(s81.id).active[0]!
+check('the running compression publishes a phase and a phase timestamp',
+  typeof active81.stage === 'string' && Number.isFinite(active81.stageStartedAt),
+  JSON.stringify({ stage: active81.stage, stageStartedAt: active81.stageStartedAt }))
+let next81 = false
+const nextFn81 = async (): Promise<{ kind: 'enter'; messages: unknown[] }> => {
+  next81 = true
+  return { kind: 'enter', messages: [] }
+}
+const preStep81 = fire('agent/pre-step', { agent: { session: s81 } }, nextFn81)
+await settleFor(async () => engine81.snapshot(s81.id).blockingSince !== null)
+check('the pre-step blocks on the running compression', next81 === false)
+const cancelled81 = engine81.cancelCompression(s81.id, active81.turn, active81.step)
+check('the report-level cancel is accepted', cancelled81.ok === true, JSON.stringify(cancelled81))
+await preStep81
+check('cancelling releases the waiting pre-step', next81 === true)
+await settleFor(async () => (await store81.load(s81.id)).entries.length === 1)
+const cancelledEntry81 = (await store81.load(s81.id)).entries[0]!
+check('the cancelled attempt is reported as a cancelled failure',
+  cancelledEntry81.failed === true && cancelledEntry81.distill.error === 'cancelled by user',
+  JSON.stringify({ failed: cancelledEntry81.failed, error: cancelledEntry81.distill.error }))
+check('the running list is cleared after cancellation', engine81.snapshot(s81.id).active.length === 0)
+
 await new Promise<void>(resolve => backend.close(() => resolve()))
 console.log(`\n${failures === 0 ? 'ALL CHECKS PASSED' : `${failures} CHECK(S) FAILED`}`)
 if (info.length > 0) console.log(`\nlogs:\n${info.slice(0, 6).map(line => `  ${line}`).join('\n')}`)

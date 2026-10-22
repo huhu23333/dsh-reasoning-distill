@@ -7,27 +7,11 @@
 import type { Volatile } from '@deepseek-ai/cosmokit'
 import z from '@deepseek-ai/schemastery'
 
+import { DEFAULT_PRICE_ENTRIES, type ModelPrices } from './prices.ts'
 import { legacyOneShotSwitch, mergeRule, withKindDefaults, type RuleOverride, type RuleSource } from './rule.ts'
 
-/** One API price bucket, in currency units per million tokens. */
-export interface PriceBucket {
-  /** Input billed against a cache hit. */
-  hit: number
-  /** Input billed without a cache hit. */
-  miss: number
-  /** Model output (reasoning tokens are output tokens). */
-  out: number
-}
-
-/** One model's price entry: two columns plus whether the second is used at all. */
-export interface ModelPrices {
-  /** The price actually used when peak pricing is off. */
-  peak: PriceBucket
-  /** Second column; only consulted when {@link ModelPrices.peakPricing} is set. */
-  off: PriceBucket
-  /** Whether this model's cost is attributed across the two columns. Pricing, not model behaviour. */
-  peakPricing?: boolean
-}
+export type { ModelPrices, PriceBucket } from './prices.ts'
+export { BUILTIN_PEAK, BUILTIN_PRICES, DEFAULT_PRICE_ENTRIES, peakEnabled, resolvePrices } from './prices.ts'
 
 /** The model route one distillation request runs on. */
 export interface DistillRoute {
@@ -135,16 +119,6 @@ export interface Config {
    * list as soon as the branch is on screen — and stays recoverable from the archive.
    */
   archiveSuperseded: Volatile<boolean>
-  /**
-   * Whether a conversation that still has background work of its own is left alone.
-   *
-   * A background job or a subagent run belongs to the conversation that started it, so a
-   * branch created mid-work would have to leave that work behind. On (the default), such a
-   * conversation is treated as if the reasoning were under the threshold: nothing is
-   * distilled and no branch is created. Off, compression runs and the replaced
-   * conversation waits to be archived until that work ends.
-   */
-  skipWhileBusy: Volatile<boolean>
   /** Distillation instruction; empty selects the built-in prompt. */
   prompt: Volatile<string>
   /**
@@ -226,27 +200,6 @@ export const BUILTIN_HOLIDAYS: readonly string[] = [
   '2026-10-05', '2026-10-06', '2026-10-07',
 ]
 
-/** Peak prices in 元 per million tokens, from the published DeepSeek price table. */
-const BUILTIN_PEAK: Record<string, PriceBucket> = {
-  'deepseek-flash': { hit: 0.04, miss: 2, out: 8 },
-  'deepseek-v4-pro': { hit: 0.3, miss: 9, out: 27 },
-}
-
-/**
- * Factory-default price entries: the built-in DeepSeek routes ship enabled with
- * both columns, so their published peak/off-peak pricing applies out of the box.
- * Every other model starts with no entry at all — no prices and no split — until
- * one is added.
- */
-export const DEFAULT_PRICE_ENTRIES: Record<string, ModelPrices> = Object.fromEntries(
-  Object.entries(BUILTIN_PEAK).map(([model, peak]) => [model, { peak, off: half(peak), peakPricing: true }]),
-)
-
-/** Off-peak is exactly half the peak price in the published table. */
-function half(bucket: PriceBucket): PriceBucket {
-  return { hit: bucket.hit / 2, miss: bucket.miss / 2, out: bucket.out / 2 }
-}
-
 /**
  * Whether distillation is on for a fresh install.
  *
@@ -258,7 +211,11 @@ export const DEFAULT_ENABLED = false
 /** The exported schema; the `id` of this plugin's Loader row is its namespace. */
 export const Config = z.object({
   enabled: z.boolean().default(DEFAULT_ENABLED).volatile(),
-  defaultRule: z.object(ModelRuleFields).default(DEFAULT_RULE).volatile(),
+  // Sparse default: an absent layer must resolve as "nothing stated", not as a
+  // full DEFAULT_RULE snapshot. The snapshot would sit ABOVE the retired
+  // top-level limits and shadow them, and it would also freeze today's defaults
+  // into every later resolution.
+  defaultRule: z.object(ModelRuleFields).default({}).volatile(),
   models: z.dict(z.object(ModelRuleFields)).default({}).volatile(),
   peakSource: z.string().default('builtin').volatile(),
   holidays: z.array(z.string()).default([...BUILTIN_HOLIDAYS]).volatile(),
@@ -270,39 +227,12 @@ export const Config = z.object({
   rewriteBackend: z.string().default('').volatile(),
   branchTimeoutMs: z.number().default(0).volatile(),
   archiveSuperseded: z.boolean().default(true).volatile(),
-  skipWhileBusy: z.boolean().default(true).volatile(),
   prompt: z.string().default('').volatile(),
   // Legacy top-level limit: a document narrowed before limits moved into each rule
   // still resolves through it, and its default is the same "no ceiling" the rule uses.
   maxInputChars: z.number().default(0).volatile(),
   maxOutputChars: z.number().default(0).volatile(),
 })
-
-/**
- * Resolve the price table for one model.
- * @param model - model id.
- * @param configured - user overrides keyed by model id.
- * @returns both columns, zero-filled when nothing is known.
- */
-export function resolvePrices(
-  model: string,
-  configured: Record<string, Partial<ModelPrices>> | undefined,
-): ModelPrices {
-  const user = configured?.[model]
-  const base = BUILTIN_PEAK[model]
-  const zero: PriceBucket = { hit: 0, miss: 0, out: 0 }
-  const peak: PriceBucket = {
-    ...(base ?? zero),
-    ...(user?.peak ?? {}),
-  }
-  const off: PriceBucket = {
-    ...(user?.off ?? half(peak)),
-  }
-  return { peak, off }
-}
-
-/** Built-in peak prices, exposed to the Settings page. */
-export const BUILTIN_PRICES = BUILTIN_PEAK
 
 /**
  * Fold the built-in default, the global default rule, and one model's override
@@ -312,6 +242,49 @@ export const BUILTIN_PRICES = BUILTIN_PEAK
  * @returns the effective rule.
  */
 export { withKindDefaults } from './rule.ts'
+
+/**
+ * Clamp one resolved rule's loose numbers.
+ *
+ * The settings schema is deliberately permissive (`z.number()` only), so a
+ * hand-edited or older document can carry `null`, negative or out-of-range
+ * values. Those are not "large" or "small" settings — they invert decisions
+ * (`saved < null` is `saved < 0`, a 0% occupancy cap refuses everything), so
+ * the resolver normalizes them to the shipped defaults / documented bounds.
+ * @param rule - merged rule.
+ * @returns the rule with finite, in-range numbers and boolean switches.
+ */
+export function sanitizeRule(rule: ModelRule): ModelRule {
+  const finite = (value: unknown, fallback: number): number =>
+    typeof value === 'number' && Number.isFinite(value) ? value : fallback
+  const clamp = (value: unknown, fallback: number, min: number, max = Number.POSITIVE_INFINITY): number =>
+    Math.min(max, Math.max(min, finite(value, fallback)))
+  const flag = (value: unknown, fallback: boolean): boolean =>
+    typeof value === 'boolean' ? value : fallback
+  const sanitized: ModelRule = {
+    ...rule,
+    enabled: flag(rule.enabled, DEFAULT_RULE.enabled),
+    continuableSubagents: flag(rule.continuableSubagents, DEFAULT_RULE.continuableSubagents),
+    oneShotSubagents: flag(rule.oneShotSubagents, DEFAULT_RULE.oneShotSubagents),
+    contextCap: flag(rule.contextCap, DEFAULT_RULE.contextCap),
+    includeToolResults: flag(rule.includeToolResults, DEFAULT_RULE.includeToolResults),
+    includeFinalTurns: flag(rule.includeFinalTurns, DEFAULT_RULE.includeFinalTurns),
+    continuableMaxDepth: clamp(rule.continuableMaxDepth, DEFAULT_RULE.continuableMaxDepth, 0),
+    oneShotMaxDepth: clamp(rule.oneShotMaxDepth, DEFAULT_RULE.oneShotMaxDepth, 0),
+    thresholdTokens: clamp(rule.thresholdTokens, DEFAULT_RULE.thresholdTokens, 0),
+    minSavedTokens: clamp(rule.minSavedTokens, DEFAULT_RULE.minSavedTokens, 0),
+    timeoutMs: clamp(rule.timeoutMs, DEFAULT_RULE.timeoutMs, 0),
+    maxInputChars: clamp(rule.maxInputChars, DEFAULT_RULE.maxInputChars, 0),
+    maxOutputChars: clamp(rule.maxOutputChars, DEFAULT_RULE.maxOutputChars, 0),
+    maxContextPercent: clamp(rule.maxContextPercent, DEFAULT_RULE.maxContextPercent, 1, 100),
+    distiller: {
+      provider: typeof rule.distiller?.provider === 'string' ? rule.distiller.provider : DEFAULT_RULE.distiller.provider,
+      model: typeof rule.distiller?.model === 'string' ? rule.distiller.model : DEFAULT_RULE.distiller.model,
+      effort: typeof rule.distiller?.effort === 'string' ? rule.distiller.effort : DEFAULT_RULE.distiller.effort,
+    },
+  }
+  return sanitized
+}
 
 export function resolveRule(model: string, config: RuleSource): ModelRule {
   const legacy = legacyOneShotSwitch(config)
@@ -325,9 +298,9 @@ export function resolveRule(model: string, config: RuleSource): ModelRule {
   // user set in the default rule or on one model. Sitting underneath, it still
   // applies whenever no stored layer states a ceiling, which is what a document
   // saved before the move relies on.
-  return mergeRule(
+  return sanitizeRule(mergeRule(
     { ...DEFAULT_RULE, ...limits },
     withKindDefaults(config.defaultRule.get() ?? {}, legacy),
     withKindDefaults(config.models.get()?.[model] ?? {}, legacy),
-  )
+  ))
 }

@@ -13,6 +13,7 @@
  */
 
 import type { ModelPrices, ModelRule } from '../config.ts'
+import { DEFAULT_PRICE_ENTRIES } from '../prices.ts'
 import { FALLBACK_RULE, mergeRule, withKindDefaults, withSubagentKindsOff, type RuleOverride, type RuleSource } from '../rule.ts'
 import { backendById, backendSelectable, masterSwitchState, type ProbeAnswer, type RewriteBackend } from '../backends.ts'
 import { entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
@@ -137,10 +138,13 @@ export function normalizeSettings(value: SettingsValue, legacyOneShot?: boolean)
     // On by default: the branch continues the same work, so the conversation it
     // replaced belongs in the archive unless the user says otherwise.
     archiveSuperseded: value.archiveSuperseded ?? true,
-    // On by default too: a branch cannot take background work with it.
-    skipWhileBusy: value.skipWhileBusy ?? true,
     holidays: [...(value.holidays ?? [])],
-    prices: structuredClone(value.prices ?? {}),
+    // The shipped entries are schema defaults, and a stored dict replaces the
+    // schema default wholesale. Materialising them here keeps the built-in
+    // DeepSeek rows visible/editable after any unrelated price save; the host
+    // resolver also falls back per field, so a stale stored entry cannot zero
+    // the off-peak column.
+    prices: { ...structuredClone(DEFAULT_PRICE_ENTRIES), ...structuredClone(value.prices ?? {}) },
     prompt: value.prompt ?? '',
   }
 }
@@ -210,24 +214,6 @@ export function withoutSubagentKinds(value: SettingsValue): SettingsValue {
 }
 
 /**
- * Pin the background-work skip on in one draft.
- *
- * Used while a branch backend is selected: applying a rewrite forks the conversation, and that
- * fork cannot carry the background work — a job or subagent run — the conversation it replaces
- * started. The option is therefore not offered with that backend, and the document the panel saves
- * states it on, so storage cannot disagree with what the engine enforces.
- *
- * Identity matters here: this returns the value it was given when the flag is already on, so the
- * effect that applies it cannot loop on its own new object.
- * @param value - the draft being edited.
- * @returns the draft with the skip pinned on, or the same object when it already is.
- */
-export function withBusySkipOn(value: SettingsValue): SettingsValue {
-  if (value.skipWhileBusy === true) return value
-  return { ...value, skipWhileBusy: true }
-}
-
-/**
  * Ask one backend whether it is installed, the way the chooser's table does.
  *
  * The same rule the panel's checklist uses, in one place so the master switch can ask about the
@@ -244,7 +230,10 @@ export function withBusySkipOn(value: SettingsValue): SettingsValue {
  */
 export async function backendReachable(backend: RewriteBackend): Promise<boolean | undefined> {
   const route = backend.probe
-  if (route === undefined) return false
+  // A backend with no route has no external dependency to prove: the derive
+  // mode is this plugin's own wrapper. A placeholder, by contrast, answers for
+  // nothing. (Returning false for both locked the master switch under derive.)
+  if (route === undefined) return backend.placeholder === true ? false : true
   const probe = async (path: string): Promise<ProbeAnswer> => {
     const response = await fetch(path, {
       method: 'POST',
@@ -351,6 +340,9 @@ export function owedInPlaceEntries(report: SessionReport | null | undefined): Co
   return report.entries.filter(entry =>
     entry.failed !== true
     && entry.skipped !== true
+    // A compaction can retire a target before its write-back landed; writing the
+    // old summary into a shadowed record would be a no-op at best.
+    && entry.active === true
     && entry.handoff === undefined
     // The engine settles what a delegated conversation owes the moment it is live again; that write
     // is already in the history, so the panel must not repeat it (an in-place rewrite is not
@@ -422,8 +414,6 @@ export type SettingsValue = {
   branchTimeoutMs: number
   /** Whether following a branch also archives the conversation it replaced. */
   archiveSuperseded: boolean
-  /** Whether a conversation with running background work is left uncompressed. */
-  skipWhileBusy: boolean
   prompt: string
   /** @deprecated Retired top-level limit; only a document saved before the move has it. */
   maxInputChars?: number
@@ -437,7 +427,7 @@ export type Operation = { op: 'set'; path: (string | number)[]; value: unknown }
 
 /** Scalar fields the panel writes as a whole. */
 const SCALAR_FIELDS = [
-  'enabled', 'defaultRule', 'prompt', 'peakSource', 'holidays', 'rewriteBackend', 'branchTimeoutMs', 'archiveSuperseded', 'skipWhileBusy',
+  'enabled', 'defaultRule', 'prompt', 'peakSource', 'holidays', 'rewriteBackend', 'branchTimeoutMs', 'archiveSuperseded',
 ] as const satisfies readonly (keyof SettingsValue)[]
 
 /** Fields keyed by model id, diffed per entry and per field. */
@@ -474,6 +464,21 @@ export function planSave(
 export function saveOperations(baseline: SettingsValue, draft: SettingsValue): Operation[] {
   const ops: Operation[] = []
   for (const field of SCALAR_FIELDS) pushDiff(ops, [field], baseline[field], draft[field])
+  // A stored layer that states `enabled` but neither kind switch is ambiguous:
+  // the resolver derives the continuable switch from `enabled`. Toggling main
+  // conversations off and on again would then silently start paid distillation
+  // inside continuable subagents. State both switches whenever this save writes
+  // the enabled flag (the same guard `sparseOverride` applies to model rows).
+  const writesDefaultEnabled = ops.some(op =>
+    op.op === 'set' && op.path.length === 2 && op.path[0] === 'defaultRule' && op.path[1] === 'enabled')
+  if (writesDefaultEnabled) {
+    for (const kind of ['continuableSubagents', 'oneShotSubagents'] as const) {
+      const path = ['defaultRule', kind]
+      if (ops.some(op => op.op === 'set' && op.path.length === 2
+        && op.path[0] === 'defaultRule' && op.path[1] === kind)) continue
+      ops.push({ op: 'set', path, value: draft.defaultRule[kind] })
+    }
+  }
   for (const field of DICT_FIELDS) {
     const before = (baseline[field] ?? {}) as Record<string, unknown>
     const after = (draft[field] ?? {}) as Record<string, unknown>

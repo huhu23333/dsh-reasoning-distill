@@ -171,7 +171,10 @@ try {
       const bytes = path === undefined ? '' : await readFile(path, 'utf8')
       check('the artifact bytes carry the new text and not the old one', bytes.includes(REWRITTEN) && !bytes.includes(ORIGINAL))
     } else {
-      check('the artifact is zstd-framed (text is not readable raw)', true, 'decoded read already proves the content')
+      const path = await findLogPath(fresh, session.id)
+      const raw = path === undefined ? Buffer.alloc(0) : await readFile(path)
+      const magic = raw.length >= 4 && raw[0] === 0x28 && raw[1] === 0xb5 && raw[2] === 0x2f && raw[3] === 0xfd
+      check('the artifact is zstd-framed', magic, raw.length + ' bytes')
     }
 
     console.log('')

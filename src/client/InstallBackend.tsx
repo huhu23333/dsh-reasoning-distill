@@ -38,9 +38,14 @@ export interface InstallBackendProps {
   t: Translate
 }
 
-/** The label of one step id, falling back to its raw id. */
-function stepLabel(steps: readonly { id: string; label: string }[], id: string): string {
-  return steps.find(step => step.id === id)?.label ?? id
+/** The localized label of one step id, falling back to its raw id. */
+function stepLabel(id: string, t: Translate): string {
+  const key = `install.step.${id}`
+  try {
+    return t(key as Key)
+  } catch {
+    return id
+  }
 }
 
 /**
@@ -148,7 +153,7 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
   }
 
   /** The prompt the agent route would seed, or an empty string while the host is unknown. */
-  const agentPrompt = status === null ? '' : installPromptFor(backendId, status.repo)
+  const agentPrompt = status === null ? '' : installPromptFor(backendId, status.repo) ?? ''
   // Whether the shell offered what the agent route needs to try opening a Session. A packaged
   // desktop build may publish neither, so this only decides whether that button is offered —
   // never whether the prompt itself is shown.
@@ -216,7 +221,7 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
             <ul className={css.steps}>
               {job.steps.map(step => <li key={step.id}>
                 <span>{stepMark(step.state, t)}</span>
-                <span>{stepLabel(steps, step.id)}</span>
+                <span>{stepLabel(step.id, t)}</span>
                 {step.error !== undefined && <strong className={css.error}>{step.error}</strong>}
               </li>)}
             </ul>
@@ -245,6 +250,7 @@ export function InstallBackendPanel({ open, onClose, t }: InstallBackendProps) {
           {/* The prompt is ALWAYS on screen and copyable. Opening a Session is a shell capability
               this panel cannot verify: a shell may accept the call without opening anything, and
               then a success notice would be the only thing the user gets. */}
+          {agentPrompt === '' && status !== null && <p className={css.note}>{t('install.promptUnavailable')}</p>}
           {agentPrompt !== '' && <>
             <p className={css.note}>{t('install.agentCopyHint')}</p>
             <textarea className={css.prompt} readOnly value={agentPrompt} onFocus={event => event.currentTarget.select()} />

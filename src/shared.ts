@@ -75,7 +75,7 @@ export interface CompressionEntry {
   originalTokens: number
   distilledChars: number
   distilledTokens: number
-  /** Estimated tokens removed from each request that replays it in the round that produced it. */
+  /** Estimated tokens removed from each request that replays it, in any round. */
   savedTokensPerRequest: number
   distill: DistillRun
   /**
@@ -96,7 +96,7 @@ export interface CompressionEntry {
   liveSaved: number
   /** Savings frozen when a compaction ended an epoch. Never resets. */
   frozenSaved: number
-  /** Answered requests in the producing round that were credited in the live epoch. */
+  /** Answered requests credited in the live epoch, across every round. */
   liveRequests: number
   /** Still contributing to the live epoch. */
   active: boolean
@@ -110,21 +110,22 @@ export interface CompressionPlacement {
 }
 
 /**
- * Whether a recorded compression is the one *this* conversation itself carries.
+ * Whether a recorded compression has a rewrite this conversation can replay.
  *
- * A successful hand-off moves the rewrite into the branch it created: the branch
- * inherited the entry with its own id as the destination, so the rewrite is in force
- * there — and not in the conversation it left behind, which keeps its pre-compression
- * history and earns neither a success nor any stock. Failed or skipped attempts never
- * substituted anything anywhere.
+ * A branch hand-off copies the rewrite into the new branch, but it must not take it
+ * out of the source conversation: the source can stay usable when the archive step is
+ * disabled or fails, and it may be reopened from the archive. Replaying the same
+ * compressed text in both copies is consistent (the target message is still the same
+ * event at the same seq), and the alternative — keeping the source raw simply because
+ * a copy exists elsewhere — would send the original reasoning again. Failed or skipped
+ * attempts never substituted anything anywhere.
  * @param entry - one recorded compression.
- * @param sessionId - the conversation the question is asked for.
+ * @param _sessionId - the conversation the question is asked for; kept for callers so
+ *   a future placement rule can look at it, but no placement currently excludes a copy.
  * @returns whether this conversation carries the rewrite.
  */
-export function entryInForceHere(entry: CompressionPlacement, sessionId: string): boolean {
-  if (entry.failed === true || entry.skipped === true) return false
-  const handoff = entry.handoff
-  return handoff?.state !== 'created' || handoff.branchId === undefined || handoff.branchId === sessionId
+export function entryInForceHere(entry: CompressionPlacement, _sessionId: string): boolean {
+  return entry.failed !== true && entry.skipped !== true
 }
 
 /**
@@ -159,22 +160,22 @@ export interface SessionReport {
   /**
    * Lifetime savings, including every frozen epoch. Never resets.
    *
-   * Only requests in the conversation round that produced a rewrite (after the
-   * newest user message) are credited: the API does not carry an earlier round's
-   * reasoning into a later one, so that replay is not a billed saving.
+   * Every answered request that replayed a rewrite is credited, whichever round
+   * it belongs to: DSH requests normally carry tools, so the whole history —
+   * reasoning included — is resent and a rewrite keeps saving until compaction
+   * removes its target.
    */
   savedTotal: number
   /**
-   * Tokens the current round's next request would carry less than it would
-   * without the rewrites that are in force right now. A stock, not a running
-   * total: it grows once per adopted rewrite and shrinks as compaction removes
-   * their targets. A rewrite from an earlier round does not count, because the
-   * API does not replay that round's reasoning.
+   * Tokens the next request would carry less than it would without the rewrites
+   * that are in force right now, from any round. A stock, not a running total: it
+   * grows once per adopted rewrite and shrinks as compaction removes their
+   * targets.
    */
   stockTokens: number
   /** {@link SessionReport.stockTokens} priced at the hit rate, an estimate. */
   stockSaved: number
-  /** Tokens every credited request in its own round saved in total, frozen rewards included. */
+  /** Tokens every credited request saved in total, frozen rewards included. */
   lifetimeTokens: number
   /** Attempts that produced an adopted rewrite (excludes failed and skipped). */
   succeeded: number
@@ -232,6 +233,9 @@ export interface SessionReport {
   }
 }
 
+/** The phase one running compression is currently in. */
+export type CompressionStage = 'preparing' | 'distilling' | 'recording' | 'writing-back'
+
 /** One compression that is running right now. */
 export interface ActiveCompression {
   turn: number
@@ -245,6 +249,10 @@ export interface ActiveCompression {
   originalTokens: number
   /** When the distillation started, epoch milliseconds. */
   startedAt: number
+  /** Current phase, so the report can say where a slow compression is stuck. */
+  stage: CompressionStage
+  /** When the current phase started, epoch milliseconds. */
+  stageStartedAt: number
 }
 
 /** What a compression wait is holding up. */
@@ -275,6 +283,8 @@ export interface CatalogModel {
 /** Everything the Settings page needs to render. */
 export interface CatalogReport {
   models: CatalogModel[]
+  /** Providers whose model list could not be read, with the reason. */
+  failures?: { provider: string; error: string }[]
   /** Built-in prompt, offered as the reset target. */
   defaultPrompt: string
   /** Built-in peak prices, 元 per million tokens, keyed by model id. */
@@ -316,6 +326,8 @@ export const INSTALL_ROUTE = '/api/reasoning-distill/install'
  * verdict when the body is the chooser's probe).
  */
 export const REWRITE_ROUTE = '/api/reasoning-distill/rewrite'
+/** Same-origin route that cancels one running compression before it is adopted. */
+export const CANCEL_ROUTE = '/api/reasoning-distill/cancel'
 
 /** What the host patch self-check found, as both halves of this plugin report it. */
 export interface HostPatchStatus {

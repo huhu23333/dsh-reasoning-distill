@@ -28,7 +28,7 @@ import { subagentKindsOffPatch } from './rule.ts'
 import { priceAt } from './peak.ts'
 import { DEFAULT_PROMPT, encloseDistillationData, looksLikeFinalReply } from './prompt.ts'
 import type { SessionRecord, SidecarStore, StoredEntry } from './store.ts'
-import type { ActiveCompression, BlockingReason, DistillRun, HostPatchStatus } from './shared.ts'
+import type { ActiveCompression, BlockingReason, CompressionStage, DistillRun, HostPatchStatus } from './shared.ts'
 import { entryInForceHere, exceedsContextCap } from './shared.ts'
 
 /**
@@ -36,6 +36,9 @@ import { entryInForceHere, exceedsContextCap } from './shared.ts'
  * in the derived message list. Captured at the event being accounted, because a
  * later compaction must not retroactively decide what an earlier request saved.
  */
+/** How long one obsolete same-conversation turn may wait for its sidecar preload. */
+const STALE_REQUEST_LOAD_BOUND_MS = 2_000
+
 interface Surface {
   nodes: ReadonlySet<number>
   slots: ReadonlyMap<number, number>
@@ -163,6 +166,21 @@ export class ReasoningDistillEngine {
   private readonly missCharged = new Set<string>()
   /** Attempts whose wait bound expired: their adopted result must not land late. */
   private readonly abandoned = new Set<string>()
+  /** Cancel hooks for the compressions in {@link inFlight}, keyed the same way. */
+  private readonly cancellations = new Map<string, { abort: AbortController; cancelled: Promise<void>; markCancelled: () => void; requested: boolean }>()
+  /** Attempts the user cancelled, so a late failure row can say why. */
+  private readonly cancelRequested = new Set<string>()
+  /**
+   * Ledger a seeded conversation (a host fork or a branch copy) inherits from its
+   * parent before its first request.
+   *
+   * The sidecar is keyed by session id, so a copied conversation starts with no
+   * record of its own. Without copying the parent's entries, a no-write (derive)
+   * compression would silently fall back to the original reasoning in the copy.
+   */
+  private readonly inheritPending = new Map<string, { parentId: string; inherited: number }>()
+  /** Seeded conversations whose ledger inheritance has been resolved. */
+  private readonly inherited = new Set<string>()
   /** Timers that would mark an attempt abandoned; cleared once it settles. */
   private readonly abandonTimers = new Map<string, ReturnType<typeof setTimeout>>()
   /**
@@ -193,14 +211,6 @@ export class ReasoningDistillEngine {
    */
   private readonly applied = new Map<string, Array<{ afterSeq: number; ids: Map<string, number> }>>()
 
-  /**
-   * Seq of the newest non-empty user message on each attached session.
-   *
-   * This is the billing scope: the API does not carry reasoning from an earlier
-   * conversation round into a later one, so only rewrites whose target lies after
-   * this marker (the round that is still running) may be credited. @see account
-   */
-  private readonly lastUserSeq = new Map<string, number>()
   private readonly rawDerive = new Map<string, () => Message[]>()
   /**
    * The unwrapped per-event derivation, per attached session object.
@@ -226,7 +236,7 @@ export class ReasoningDistillEngine {
    * The check is about the selection, not about any one turn, so it belongs to the first pre-step
    * of the process and to no other — a later turn must not pay for it again.
    */
-  private backendChecked = false
+  private backendCheckWork: { backend: string; work: Promise<void> } | undefined
 
   /** This host's in-place patch verdict, computed at most once per process. */
   private hostPatch: HostPatchStatus | undefined
@@ -297,20 +307,43 @@ export class ReasoningDistillEngine {
           // `attach` preloads the sidecar fire-and-forget, so on a resumed session
           // the first request could otherwise be assembled from raw reasoning while
           // the read is still in flight. Single-flight makes this join that read.
+          const session = payload.agent.session
           // The host passes the turn's signal, but its event declaration does not
           // always carry it, so read it defensively rather than trusting the type.
-          const session = payload.agent.session
+          const signal = (payload as { signal?: AbortSignal }).signal
           // A queued pre-step from a session object that a successor has replaced must
           // not act for the new one. Only a *different* known object counts: an id the
           // engine never attached (resumed before this plugin loaded) is left alone.
-          if (this.replaced(session)) return true
+          if (this.replaced(session)) {
+            // A delegated conversation is disposed and entered again between its
+            // turns, so one obsolete object can still have a queued pre-step while
+            // its successor carries the same conversation (same id#createdAt). That
+            // request must not fall back to raw reasoning: the ledger belongs to
+            // that same conversation. Load it before the host derives the prompt;
+            // the wrapper below then substitutes without touching successor state.
+            if (this.sameConversationStale(session)) {
+              const loaded = await this.waitUntil(
+                this.store.load(session.id).then(() => undefined).catch((error: unknown) => {
+                  this.ctx.logger.warn('reasoning-distill: an obsolete turn could not preload its record: %o', error)
+                }),
+                signal,
+                Date.now() + STALE_REQUEST_LOAD_BOUND_MS,
+              )
+              if (!loaded) {
+                this.ctx.logger.warn(
+                  'reasoning-distill: an obsolete turn for %s will replay raw reasoning (record not loaded in time)',
+                  session.id,
+                )
+              }
+            }
+            return true
+          }
           // Attach a session this plugin has not seen yet, after the replacement check so an
           // obsolete pre-step can never overwrite a successor. A delegated (subagent) session can
           // reach this hook without its creation ever being delivered here, and this registry is
           // what makes the engine the authority on it: staging, the derived-message wrapper and the
           // report route's lookup all key off it.
           if (this.sessionFor(session.id) !== session) this.attach(session)
-          const signal = (payload as { signal?: AbortSignal }).signal
           // A stalled sidecar read must not outlive a stop either: the host only looks
           // at its signal once this handler returns.
           let load = this.loadStarted.get(session.id)
@@ -460,13 +493,16 @@ export class ReasoningDistillEngine {
    * answer for its profile is not a reason to break the turn that happened to be first.
    */
   private async checkBackendOnce(): Promise<void> {
-    if (this.backendChecked) return
-    this.backendChecked = true
-    try {
-      await this.checkBackend()
-    } catch (error: unknown) {
+    // The check is about the *selection*, and the selection can change while the
+    // process runs (a backend plugin installed/removed). Re-run when the stored
+    // id differs; concurrent pre-steps join the same work.
+    const backend = this.config.rewriteBackend.get() ?? ''
+    if (this.backendCheckWork?.backend === backend) return this.backendCheckWork.work
+    const work = this.checkBackend().catch((error: unknown) => {
       this.ctx.logger.warn('reasoning-distill: backend check failed: %o', error)
-    }
+    })
+    this.backendCheckWork = { backend, work }
+    return work
   }
 
   /**
@@ -538,8 +574,53 @@ export class ReasoningDistillEngine {
    * @param generation - generation the compression started under.
    * @returns whether the history now carries the distilled text.
    */
+  /**
+   * Whether the log still carries the reasoning this rewrite was distilled from.
+   *
+   * The request path applies this guard before substituting; the owed write-back
+   * path must apply the same one, or a message the user edited after the
+   * distillation would be silently overwritten by a stale summary. A write that
+   * already landed (the log now carries the distilled text) counts as matching,
+   * which keeps the retry idempotent.
+   * @param session - session whose log is authoritative.
+   * @param entry - recorded rewrite.
+   * @returns whether writing this entry is still faithful to the log.
+   */
+  private reasoningStillMatches(session: Session, entry: StoredEntry): boolean {
+    const event = session.eventAt(entry.targetSeq as Parameters<Session['eventAt']>[0])
+    // No readable target means there is nothing to compare (and the host's own
+    // seq/message-id validation refuses the write anyway). Only a target that
+    // still carries reasoning can prove the source text changed.
+    if (event === undefined || event.type !== 'assistant/message') return true
+    const current = reasoningOf(event.data.message.content)
+    if (current.length === 0) return true
+    if (current === entry.distilledText) return true
+    if (entry.originalHash === undefined) return true
+    return hashText(current) === entry.originalHash
+  }
+
+  /** Retire one rewrite whose source text changed under it; never overwrite the edit. */
+  private async retireChangedEntry(sessionId: string, entry: StoredEntry): Promise<void> {
+    this.ctx.logger.warn(
+      'reasoning-distill: leaving %s alone: its target was edited after the distillation',
+      entry.id,
+    )
+    await this.store.update(sessionId, current => {
+      for (const item of current.entries) {
+        if (item.id === entry.id) item.inactive = true
+      }
+    }).catch((error: unknown) => {
+      this.ctx.logger.warn('reasoning-distill: could not retire a stale rewrite: %o', error)
+    })
+  }
+
   private async settleInPlaceEntry(session: Session, entry: StoredEntry): Promise<boolean> {
+    if (!this.active) return false
     if (entry.targetMessageId === '') return false
+    if (!this.reasoningStillMatches(session, entry)) {
+      await this.retireChangedEntry(session.id, entry)
+      return false
+    }
     const request = {
       seq: entry.targetSeq as SessionSeq,
       messageId: entry.targetMessageId,
@@ -554,12 +635,16 @@ export class ReasoningDistillEngine {
         const rewrite = rewriteEntryPoint(live)
         if (rewrite !== undefined) {
           rewrite(request)
+          // The persistence sink is queued asynchronously inside rewrite(); give
+          // it a turn to enter the write queue, then flush. A flush that fails
+          // must not be reported as "written": the artifact may not carry it.
+          await new Promise<void>(resolve => setTimeout(resolve, 0))
           await this.ctx.sessions.flush(live)
           await this.markInPlaceApplied(session.id, entry.id)
           return true
         }
       } catch (error: unknown) {
-        this.ctx.logger.debug('reasoning-distill: in-place write for %s on its live session failed: %o', session.id, error)
+        this.ctx.logger.warn('reasoning-distill: in-place write for %s on its live session failed: %o', session.id, error)
       }
     }
     // Deliberately live-only. Persistence can open a stored session for writing, but that takes
@@ -610,19 +695,65 @@ export class ReasoningDistillEngine {
       && (entry.handoff === undefined || entry.handoff.state === 'failed'))
     if (owed.length === 0) return
     const seqs = new Set<number>(session.ownEvents().map(event => event.seq as number))
+    const generation = this.generation.get(session.id) ?? 0
     let wrote = 0
     for (const entry of owed) {
       if (entry.targetMessageId === '' || !seqs.has(entry.targetSeq)) continue
-      const generation = this.generation.get(session.id) ?? 0
+      // A disposal/re-entry while this loop awaits must stop it: the object and
+      // record this iteration holds belong to the previous generation.
+      if (!this.active || this.replaced(session) || (this.generation.get(session.id) ?? 0) !== generation) break
       if (await this.settleInPlaceEntry(session, entry)) wrote += 1
     }
     if (wrote === 0) return
     this.ctx.logger.info('reasoning-distill: wrote back %d owed in-place rewrite(s) for %s', wrote, session.id)
   }
   /**
+   * Copy a fork's or branch copy's live ledger from the conversation it was seeded from.
+   *
+   * The sidecar is keyed by session id, so a copied conversation starts empty. Its history
+   * is the parent's prefix, message ids included, which means every inherited rewrite still
+   * targets the same event; without this copy a derive-mode compression would be lost and
+   * the copy would replay the original reasoning. Only entries inside the inherited prefix
+   * are copied, and a created branch hand-off that pointed at the parent is re-pointed at
+   * the copy so the copied conversation can replay it too.
+   * @param session - seeded conversation being attached.
+   */
+  private async ensureLedgerInherited(session: Session): Promise<void> {
+    const pending = this.inheritPending.get(session.id)
+    if (pending === undefined || this.current.get(session.id) !== session) return
+    try {
+      const parent = await this.store.load(pending.parentId)
+      const inheritedEntries = parent.entries.filter(entry => entry.targetSeq < pending.inherited)
+      if (inheritedEntries.length > 0) {
+        await this.store.update(session.id, record => {
+          // Nothing is overwritten: a compression this conversation already
+          // recorded (or a branch hand-off that copied its own ledger first) wins.
+          if (record.entries.length > 0) return
+          record.epoch = parent.epoch
+          record.countedThroughSeq = Math.min(parent.countedThroughSeq, Math.max(0, pending.inherited - 1))
+          record.entries = inheritedEntries.map(entry => {
+            const copy = structuredClone(entry)
+            if (copy.handoff?.state === 'created' && copy.handoff.branchId === pending.parentId) {
+              copy.handoff = { ...copy.handoff, branchId: session.id }
+            }
+            return copy
+          })
+        })
+      }
+      if (this.inheritPending.get(session.id) === pending) this.inheritPending.delete(session.id)
+      this.inherited.add(session.id)
+    } catch (error: unknown) {
+      // Best effort: a later pre-step retries. Until it succeeds the copy has no
+      // ledger and behaves exactly as it did before this feature.
+      this.ctx.logger.warn('reasoning-distill: could not inherit the ledger for %s from %s: %o', session.id, pending.parentId, error)
+    }
+  }
+
+  /**
    * Make sure one session's sidecar is in memory before its request is built.
    */
   private async ensureLoaded(session: Session): Promise<void> {
+    await this.ensureLedgerInherited(session)
     // The read is awaited, so its outcome belongs to the generation that asked for
     // it: a stale result must neither mark a successor's storage broken nor clear
     // a real failure and let it spend money on an unreadable record.
@@ -733,8 +864,17 @@ export class ReasoningDistillEngine {
     this.loadStarted.delete(sessionId)
     this.blocked.delete(sessionId)
     this.applied.delete(sessionId)
-    this.lastUserSeq.delete(sessionId)
     this.rawDerive.delete(sessionId)
+    this.inheritPending.delete(sessionId)
+    this.inherited.delete(sessionId)
+    for (const key of [...this.cancelRequested]) {
+      if (key.startsWith(prefix)) this.cancelRequested.delete(key)
+    }
+    for (const key of [...this.cancellations.keys()]) {
+      if (!key.startsWith(prefix)) continue
+      try { this.cancellations.get(key)?.abort.abort() } catch { /* already aborted */ }
+      this.cancellations.delete(key)
+    }
     for (const key of [...this.missCharged]) {
       if (key.startsWith(prefix)) this.missCharged.delete(key)
     }
@@ -838,6 +978,26 @@ export class ReasoningDistillEngine {
     return attached !== undefined && attached !== session
   }
 
+  /**
+   * Whether a replaced session object still belongs to the conversation now
+   * attached under the same id.
+   *
+   * A delegated conversation is disposed and re-entered every turn: the object a
+   * queued request still holds is not the attached one, but it describes the same
+   * log and the same ledger (identity is id + header.createdAt). Rewriting its
+   * derived history is safe and keeps that request from falling back to raw
+   * reasoning. A different conversation reusing the id, or an older header with
+   * no creation stamp, keeps the conservative raw answer.
+   * @param session - the no-longer-attached object.
+   * @returns whether it is the same conversation as the attached successor.
+   */
+  private sameConversationStale(session: Session): boolean {
+    const attached = this.current.get(session.id)
+    if (attached === undefined || attached === session) return false
+    const identity = conversationIdentity(session)
+    return identity !== undefined && this.conversationOf.get(session.id) === identity
+  }
+
   private attach(session: Session): void {
     if (this.wrapped.has(session)) return
     this.wrapped.add(session)
@@ -861,19 +1021,18 @@ export class ReasoningDistillEngine {
     this.disposedAt.delete(session.id)
     if (identity !== undefined) this.conversationOf.set(session.id, identity)
     this.current.set(session.id, session)
-    // Restore the round marker from the log. A resumed or forked session already
-    // carries its newest user message, and rewrites from before it belong to an
-    // earlier round that the API does not replay into this one.
-    const events = (session as unknown as { snapshotEvents?(): readonly SessionEvent[] }).snapshotEvents?.()
-    if (events !== undefined) {
-      for (let index = events.length - 1; index >= 0; index -= 1) {
-        const event = events[index]!
-        if (event.type !== 'user/message') continue
-        const content = (event.data as { content?: unknown }).content
-        if (!Array.isArray(content) || content.length === 0) continue
-        this.lastUserSeq.set(session.id, event.seq)
-        break
-      }
+    // A seeded conversation (a host fork, or a branch a backend created) starts with its
+    // parent's history but has its own session id and therefore no ledger. Copy the parent's
+    // live rewrites into the new record before its first request; otherwise a derive-mode
+    // compression is in force only in the parent and the copy replays the original reasoning.
+    const header = session.header as { parentSession?: unknown; isSeeded?: unknown; origin?: unknown } | undefined
+    const parentId = typeof header?.parentSession === 'string' ? header.parentSession : undefined
+    const inheritedCount = (session as unknown as { inheritedEventCount?: unknown }).inheritedEventCount
+    if (header?.isSeeded === true && parentId !== undefined && parentId !== session.id
+      && header.origin !== 'subagent'
+      && typeof inheritedCount === 'number' && inheritedCount > 0
+      && !this.inherited.has(session.id)) {
+      this.inheritPending.set(session.id, { parentId, inherited: inheritedCount })
     }
     const original = session.deriveMessages.bind(session)
     const engine = this
@@ -891,7 +1050,11 @@ export class ReasoningDistillEngine {
       writable: true,
       value: function deriveEventMessageDistilled(this: Session, event: SessionEvent): Message | null {
         const message = rawMessage(event)
-        if (message === null || !engine.active || engine.replaced(this)) return message
+        if (message === null || !engine.active) return message
+        // A replaced object whose id came back as the same conversation still
+        // carries that conversation's ledger (a delegated turn boundary). Only a
+        // foreign conversation reusing the id must stay raw.
+        if (engine.replaced(this) && !engine.sameConversationStale(this)) return message
         return engine.rewriteDerivedMessage(this, event, message) ?? message
       },
     })
@@ -901,9 +1064,12 @@ export class ReasoningDistillEngine {
       value: function deriveMessagesDistilled(this: Session): Message[] {
         const messages = original()
         // A loaded plugin must not keep rewriting prompts after it is unloaded, and
-        // a session object a successor has replaced must not be rewritten at all:
-        // its stale turn would otherwise receive another generation's rewrite.
-        if (!engine.active || engine.replaced(this)) return messages
+        // a session object a successor has replaced must not be rewritten with a
+        // *different* conversation's ledger: its stale turn would otherwise receive
+        // another generation's rewrite. A successor that is the same conversation
+        // (the delegated turn boundary) shares this ledger and is safe.
+        if (!engine.active) return messages
+        if (engine.replaced(this) && !engine.sameConversationStale(this)) return messages
         const result = engine.applyRewrites(this, messages)
         // Remember exactly what this request carried: accounting settles against
         // it rather than re-deriving an answer from a later surface.
@@ -967,8 +1133,9 @@ export class ReasoningDistillEngine {
    * @returns true when this entry still replaces a replayed message.
    */
   private survivesMessage(session: Session, entry: StoredEntry, message: Message | null, surface?: Surface): boolean {
-    // A rewrite handed off to a branch belongs to that branch: replaying this
-    // conversation must show its own, pre-compression reasoning.
+    // A branch hand-off copies the rewrite; it stays in force here too, because this
+    // conversation can remain usable (archive off/failed) and must not replay the
+    // original merely because a copy exists.
     if (!entryInForceHere(entry, String(session.id)) || entry.distilledText.length === 0) return false
     if (entry.inactive === true) return false
     const nodes = surface?.nodes ?? new Set<number>(session.surface.nodes)
@@ -1132,26 +1299,31 @@ export class ReasoningDistillEngine {
    */
   stock(sessionId: string): { tokens: number; saved: number; ids: string[] } | undefined {
     const raw = this.rawDerive.get(sessionId)
-    const session = this.sessionById(sessionId)
+    // Delegated conversations live in an agent's scope; the engine registry is
+    // the authority on those objects (the root store cannot be assumed to see
+    // them). Prefer it, exactly like the write path does.
+    const session = this.sessionFor(sessionId) ?? this.sessionById(sessionId)
     if (raw === undefined || session === undefined) return undefined
     const record = this.store.peek(sessionId)
     if (record === undefined) return undefined
-    // A rewrite from an earlier conversation round is not replayed into this one
-    // by the API, so it removes nothing from the round's next request.
-    const roundStart = this.lastUserSeq.get(sessionId) ?? -1
+    // Every rewrite still in force is replayed by the next request, including one
+    // from an earlier conversation round: DSH requests normally carry tools, and
+    // such requests resend the whole history, reasoning included.
     const { applied } = this.applyRewrites(session, raw())
     const byId = new Map(record.entries.map(entry => [entry.id, entry]))
     const prices = this.config.prices.get() ?? {}
     const now = Date.now()
+    const ids: string[] = []
     let tokens = 0
     let saved = 0
     for (const id of applied.keys()) {
       const entry = byId.get(id)
-      if (entry === undefined || entry.targetSeq <= roundStart) continue
+      if (entry === undefined) continue
       tokens += entry.savedTokensPerRequest
       saved += entry.savedTokensPerRequest * (priceAt(entry.model, prices, now, this.config).bucket.hit / 1_000_000)
+      ids.push(id)
     }
-    return { tokens, saved, ids: [...applied.keys()] }
+    return { tokens, saved, ids }
   }
 
   /**
@@ -1168,11 +1340,11 @@ export class ReasoningDistillEngine {
    * @returns whether work is running under it.
    */
   private busyWithWork(session: Session): boolean {
-    // A branch backend applies a rewrite by forking the conversation, and the fork cannot take the
-    // background work the conversation it replaces started with it. The option is therefore not
-    // offered while one is selected, and the engine honours it as always on: a profile edited
-    // outside the panel cannot leave such a branch mid-work either.
-    if (!branchBackendBlocksSubagents(this.config.rewriteBackend.get() ?? '') && !this.config.skipWhileBusy.get()) return false
+    // Only a branch backend needs this: applying a rewrite forks the conversation, and the fork
+    // cannot take the background work the conversation it replaces started with it. The other
+    // backends rewrite or replay in place and can run alongside background work, so they never
+    // pause for it.
+    if (!branchBackendBlocksSubagents(this.config.rewriteBackend.get() ?? '')) return false
     const jobs = (this.ctx as unknown as { get(key: string): unknown }).get('jobs') as
       { list?(caller?: unknown): readonly { status?: string; owner?: string }[] } | undefined
     if (jobs?.list === undefined) return false
@@ -1546,6 +1718,7 @@ export class ReasoningDistillEngine {
     blockIndex: number
     text: string
   }): Promise<{ ok: true; seq: number } | { ok: false; error: string }> {
+    if (!this.active) return { ok: false, error: 'the plugin is unloading' }
     const { sessionId, eventSeq, blockIndex, text } = request
     if (sessionId === '' || text === '') return { ok: false, error: 'sessionId and text are required' }
     if (!Number.isSafeInteger(eventSeq) || eventSeq < 0 || !Number.isSafeInteger(blockIndex) || blockIndex < 0) {
@@ -1568,22 +1741,34 @@ export class ReasoningDistillEngine {
     const entry = record.entries.find(item => item.targetSeq === eventSeq && item.targetBlockIndex === blockIndex)
     if (entry === undefined) return { ok: false, error: 'no recorded rewrite for that event and block' }
     if (entry.targetMessageId === '') return { ok: false, error: 'the recorded rewrite carries no message id' }
+    // The request body's text is deliberately not trusted: the sidecar record is
+    // the only source of what this plugin distilled (a same-origin caller could
+    // otherwise written arbitrary text into a session's reasoning). The `text`
+    // parameter is kept for wire compatibility and ignored.
+    void text
+    if (!this.reasoningStillMatches(session, entry)) {
+      await this.retireChangedEntry(sessionId, entry)
+      return { ok: false, error: 'the target message changed after the distillation' }
+    }
     try {
       rewrite({
         seq: eventSeq as SessionSeq,
         messageId: entry.targetMessageId,
         blockIndex,
-        text,
+        text: entry.distilledText,
       })
     } catch (error: unknown) {
       return { ok: false, error: error instanceof Error ? error.message : String(error) }
     }
-    // The rewritten record reaches storage through the session's own sink; this barrier is what
-    // lets the route answer "written" truthfully instead of promising a write that is still queued.
+    // The rewritten record reaches storage through the session's own sink; wait a
+    // turn for that write to enter the queue, then flush. A failing flush means
+    // the artifact may not carry the change, so it must not be reported as written.
     try {
+      await new Promise<void>(resolve => setTimeout(resolve, 0))
       await this.ctx.sessions.flush(session)
     } catch (error: unknown) {
       this.ctx.logger.warn('reasoning-distill: in-place rewrite for %s could not be flushed: %o', sessionId, error)
+      return { ok: false, error: 'the rewrite could not be flushed to storage; it will be retried' }
     }
     // Record the write host-side too: the panel remembers its own attempt, but another view, a
     // reload or a later pre-step must not repeat an in-place rewrite that already landed.
@@ -1621,7 +1806,10 @@ export class ReasoningDistillEngine {
     // session id could clear a hand-off this plugin still owes and stop the turn
     // with it. With nothing pending there is nothing to clear or stop, which is
     // why that call stays the no-op it always was.
-    const mine = entryId === undefined ? pending === undefined : pending === entryId
+    // Naming an entry is what authorises a settle. With no pending marker (an
+    // in-place write is settled after the engine already wrote it) the named
+    // entry is still ours; a branch hand-off that names a different entry is not.
+    const mine = entryId === undefined ? pending === undefined : pending === entryId || pending === undefined
     if (!mine) {
       if (error === undefined || entryId === undefined) return { ok: false, recorded: false }
       const outcome = { state: 'failed' as const, error, at: Date.now() }
@@ -1649,7 +1837,11 @@ export class ReasoningDistillEngine {
     // `ok` means "this settle took effect": with nothing pending there was nothing
     // of ours to settle. Ending a turn is a side effect, not the outcome — an
     // in-place settle never stops the turn yet has still settled successfully.
-    if (pending === undefined) return { ok: error !== undefined, recorded }
+    if (pending === undefined) {
+      // An in-place settle names its entry and has nothing to clear or stop:
+      // report it as the successful settle it is. Unnamed no-ops stay ok:false.
+      return { ok: error === undefined && entryId !== undefined, recorded }
+    }
     if (!cancel) return { ok: true, recorded }
     // Only a hand-off this plugin is completing may stop a turn: cancelling would
     // otherwise let any same-origin caller end an unrelated session's turn.
@@ -1782,9 +1974,9 @@ export class ReasoningDistillEngine {
             this.noteDecision(session.id, event, cap)
             return
           }
-          // A conversation whose own background work is still running is left alone when
-          // the configuration asks for it: a branch created now would have to leave that
-          // work behind, so this is treated as if the reasoning were under the threshold.
+          // A branch backend cannot take this conversation's background work into the
+          // branch it creates, so a session with running work is left alone until that work
+          // settles. Other backends do not consult the job registry at all.
           if (this.busyWithWork(session)) {
             this.pending.delete(key)
             if (this.inFlight.get(key) === gate) this.inFlight.delete(key)
@@ -1804,14 +1996,16 @@ export class ReasoningDistillEngine {
         if ((this.generation.get(session.id) ?? 0) === atStep) this.inFlight.set(key, gate)
         return
       }
-      case 'compaction/end':
-        void this.onCompaction(session).catch((error: unknown) => {
-          this.ctx.logger.warn('reasoning-distill: epoch close failed: %o', error)
-        })
-        return
-      case 'user/message': {
-        const content = (event.data as { content?: unknown }).content
-        if (Array.isArray(content) && content.length > 0) this.lastUserSeq.set(session.id, event.seq)
+      case 'compaction/end': {
+        // The host appends compaction/end for a FAILED compaction too, with an
+        // `error` field. Nothing was replaced in that case, so the epoch must not
+        // close and no survivor may be re-priced at the miss rate.
+        const failed = (event.data as { error?: unknown } | undefined)?.error !== undefined
+        if (!failed) {
+          void this.onCompaction(session).catch((error: unknown) => {
+            this.ctx.logger.warn('reasoning-distill: epoch close failed: %o', error)
+          })
+        }
         return
       }
       default:
@@ -1909,7 +2103,8 @@ export class ReasoningDistillEngine {
       return
     }
     this.pending.delete(key)
-    this.waitBound.set(key, { timeoutMs: target.rule.timeoutMs, launchedAt: Date.now() })
+    const launchedAt = Date.now()
+    this.waitBound.set(key, { timeoutMs: target.rule.timeoutMs, launchedAt })
     this.running.set(key, {
       sessionId: session.id,
       turn: target.turn,
@@ -1918,8 +2113,13 @@ export class ReasoningDistillEngine {
       model: target.model,
       distiller: `${target.rule.distiller.provider}/${target.rule.distiller.model}`,
       originalTokens: target.reasoningTokens,
-      startedAt: Date.now(),
+      startedAt: launchedAt,
+      stage: 'preparing',
+      stageStartedAt: launchedAt,
     })
+    let markCancelled: () => void = () => undefined
+    const cancelled = new Promise<void>(resolve => { markCancelled = resolve })
+    this.cancellations.set(key, { abort: new AbortController(), cancelled, markCancelled, requested: false })
     const promise = this.compress(session, target).catch((error: unknown) => {
       this.ctx.logger.warn('reasoning-distill: compression failed: %o', error)
     })
@@ -1944,12 +2144,63 @@ export class ReasoningDistillEngine {
       if (this.running.get(key) === record) this.running.delete(key)
       if (this.waitBound.get(key) !== undefined) this.waitBound.delete(key)
       this.abandoned.delete(key)
+      this.cancelRequested.delete(key)
+      if (this.cancellations.get(key)?.cancelled === cancelled) this.cancellations.delete(key)
       const timer = this.abandonTimers.get(key)
       if (timer !== undefined) {
         clearTimeout(timer)
         this.abandonTimers.delete(key)
       }
     })
+  }
+
+  /** Move one running compression to a new phase, keeping the UI truthful. */
+  private setStage(key: string, stage: CompressionStage): void {
+    const record = this.running.get(key)
+    if (record === undefined) return
+    record.stage = stage
+    record.stageStartedAt = Date.now()
+  }
+
+  /**
+   * Cancel one compression that has not been adopted yet.
+   *
+   * Cancelling before adoption means: the distiller request is aborted, the result is
+   * never substituted, and the pre-step waiting on it stops waiting. A compression that
+   * already adopted its rewrite is past the point of cancellation — the text is in the
+   * record and the model already carries it — so the call refuses instead of pretending
+   * it can take it back.
+   * @param sessionId - conversation the compression belongs to.
+   * @param turn - the staged step's turn.
+   * @param step - the staged step's step.
+   * @returns whether the attempt was cancelled, or why it could not be.
+   */
+  cancelCompression(sessionId: string, turn: number, step: number): { ok: boolean; error?: string } {
+    const key = this.pendingKey(sessionId, turn, step)
+    const running = this.running.get(key)
+    const cancellation = this.cancellations.get(key)
+    if (running === undefined || cancellation === undefined) {
+      return { ok: false, error: 'no running compression for that step' }
+    }
+    if (running.stage === 'writing-back') {
+      return { ok: false, error: 'the compression is already adopted; only its write-back is running' }
+    }
+    if (cancellation.requested) return { ok: true }
+    cancellation.requested = true
+    this.cancelRequested.add(key)
+    // Marking it abandoned is what keeps a late result from being adopted; aborting is
+    // what stops the provider call, and resolving the cancellation promise releases the
+    // pre-step that may be waiting on it.
+    this.abandoned.add(key)
+    try { cancellation.abort.abort() } catch { /* already aborted */ }
+    cancellation.markCancelled()
+    if (this.inFlight.get(key) !== undefined) this.inFlight.delete(key)
+    if (this.running.get(key) === running) this.running.delete(key)
+    this.ctx.logger.info(
+      'reasoning-distill: cancelled the compression for %s turn %d step %d',
+      sessionId, turn, step,
+    )
+    return { ok: true }
   }
 
   /**
@@ -1984,10 +2235,15 @@ export class ReasoningDistillEngine {
       // unlimited), so a stalled launch cannot pin the pre-step forever.
       const backstop = this.ruleBackstopMs()
       const waits = mine.map(async ([key, promise]) => {
+        // A user cancellation must release the pre-step even if the provider ignores
+        // its abort signal; the attempt itself stays abandoned and cannot be adopted.
+        const cancellation = this.cancellations.get(key)?.cancelled
+        const awaited = cancellation === undefined ? promise : Promise.race([promise, cancellation])
         const recorded = this.waitBound.get(key)
         const bound = recorded ?? (backstop > 0 ? { timeoutMs: backstop, launchedAt: this.loadStarted.get(sessionId)?.at ?? startedAt } : undefined)
         if (bound === undefined || bound.timeoutMs === 0) {
-          await promise
+          await awaited
+          if (current() && this.cancelRequested.has(key)) this.abandoned.add(key)
           return
         }
         const remaining = bound.timeoutMs - (Date.now() - bound.launchedAt)
@@ -2005,7 +2261,7 @@ export class ReasoningDistillEngine {
         })
         let timedOut = false
         const winner = Promise.race([
-          promise.then(() => 'done' as const),
+          awaited.then(() => 'done' as const),
           deadline.then(() => { timedOut = true; return 'deadline' as const }),
         ])
         try {
@@ -2013,7 +2269,9 @@ export class ReasoningDistillEngine {
         } finally {
           if (timer !== undefined) clearTimeout(timer)
         }
-        if (current() && (timedOut || Date.now() >= bound.launchedAt + bound.timeoutMs)) this.abandoned.add(key)
+        if (current() && (timedOut || this.cancelRequested.has(key) || Date.now() >= bound.launchedAt + bound.timeoutMs)) {
+          this.abandoned.add(key)
+        }
       })
       await this.untilAborted(Promise.all(waits), signal)
       if (signal?.aborted && current()) {
@@ -2187,12 +2445,12 @@ export class ReasoningDistillEngine {
     // never paid for. Without a map (no request derived here yet, e.g. right
     // after a reload) fall back to the surface view, the weaker but still
     // bounded answer.
-    // Only inside the round that produced it: the API does not carry an earlier
-    // round's reasoning into a later one, so a replay after the next user message
-    // is not a billed saving and must not be credited. The round marker is the
-    // newest non-empty user message, so a fork's empty trigger does not close it.
-    // Bind the credit to the request that carried these rewrites: pick the newest
-    // derivation that happened at or before this response's seq.
+    // Credit every request that replayed a rewrite, whichever round it belongs to:
+    // DSH requests normally carry tools, so the whole history — reasoning included —
+    // is resent and a rewrite keeps saving on all later requests until compaction
+    // removes its target. Bind the credit to the request that carried these
+    // rewrites: pick the newest derivation that happened at or before this
+    // response's seq.
     // The answered request's own record: the newest one taken before this response.
     // It is not filtered against the current node set, because a projection that
     // lands while the response is in flight must not retroactively revoke a saving
@@ -2203,10 +2461,8 @@ export class ReasoningDistillEngine {
     // the request) may not credit anything: the request demonstrably predates that
     // move, so this answer is not evidence that the rewrite shipped. Only a
     // session with no recorded request at all falls back to the surface itself.
-    const roundStart = this.lastUserSeq.get(sessionId) ?? -1
     const counting = record.entries.filter(entry =>
       (carried === undefined ? (history.length === 0 ? this.survives(session, entry, surface) : false) : carried.has(entry.id))
-      && entry.targetSeq > roundStart
       && entry.targetSeq < seq
       && entry.appliedAt <= time
       && entry.savedTokensPerRequest > 0)
@@ -2295,28 +2551,25 @@ export class ReasoningDistillEngine {
       return this.abandoned.has(attemptKey)
         || (bound !== undefined && bound.timeoutMs > 0 && Date.now() >= bound.launchedAt + bound.timeoutMs)
     }
-    const maxInput = target.rule.maxInputChars
-    // The reasoning is the *subject* of the rewrite, not context: silently sending
-    // only its prefix would let the distiller drop decisions it never saw while
-    // the entry still reports a saving measured on the full text. A step too large
-    // to hand over whole is left alone instead.
-    if (maxInput > 0 && reasoning.length > maxInput) {
-      this.ctx.logger.info(
-        'reasoning-distill: leaving %s undistilled (reasoning %d chars exceeds the %d-char input limit)',
-        target.model, reasoning.length, maxInput,
-      )
-      return
-    }
+    // maxInputChars bounds the *context* blocks handed to the distiller, not the
+    // reasoning being rewritten: the reasoning is the subject, and truncating or
+    // skipping it would silently change what the rewrite is allowed to say.
     const input = reasoning
     const userText = this.buildRequestText(session, target, input)
     const prompt = this.config.prompt.get() || DEFAULT_PROMPT
     const startedAt = Date.now()
     const opened = await this.createCompressionSession(session, prompt, userText)
+    const sessionId = opened.id
     // The attempt opening the session is also the last chance to notice an
-    // expired wait bound: the request has already gone out with raw reasoning, so
-    // paying for a distillation now would buy nothing.
+    // expired wait bound or a cancellation: the request has already gone out with
+    // raw reasoning, so paying for a distillation now would buy nothing.
     if (abandonedNow()) {
-      this.ctx.logger.warn('reasoning-distill: not starting a distillation for %s: the wait bound already expired', target.model)
+      const cancelled = this.cancelRequested.has(attemptKey)
+      this.failCompressionSession(sessionId, cancelled ? 'cancelled by user' : 'the wait bound expired before the distiller started')
+      this.ctx.logger.warn(
+        'reasoning-distill: not starting a distillation for %s: %s',
+        target.model, cancelled ? 'cancelled by user' : 'the wait bound already expired',
+      )
       return
     }
     // The three shapes an attempt can be recorded in; the entry ids share the
@@ -2324,16 +2577,20 @@ export class ReasoningDistillEngine {
     const failedId = `${target.seq}-${startedAt}-failed`
     const skippedId = `${target.seq}-${startedAt}-skipped`
     const adoptedId = `${target.seq}-${startedAt}`
-    const sessionId = opened.id
     if (!opened.ok) {
       this.ctx.logger.warn(
         'reasoning-distill: compressing without an auditable session for %s (create=%s)',
         target.model, sessionId === '' ? 'failed' : 'partial',
       )
     }
+    this.setStage(attemptKey, 'distilling')
     const outcome = await this.runDistiller(target, prompt, userText, startedAt)
+    this.setStage(attemptKey, 'recording')
     // Every path records which compression session this attempt opened.
     outcome.run.sessionId = sessionId
+    if (this.cancelRequested.has(attemptKey) && outcome.run.error === undefined) {
+      outcome.run.error = 'cancelled by user'
+    }
     if (outcome.failed || outcome.text === undefined) {
       // Timeout or empty answer: give up on this compression outright. The
       // reasoning stays raw and nothing is substituted, so the session keeps
@@ -2379,7 +2636,7 @@ export class ReasoningDistillEngine {
       return
     }
     const ceiling = target.rule.maxOutputChars
-    const distilled = ceiling > 0 && outcome.text.length > ceiling ? outcome.text.slice(0, ceiling) : outcome.text
+    const distilled = ceiling > 0 ? sliceCodePoints(outcome.text, ceiling) : outcome.text
     const originalTokens = estimateTextTokens(reasoning)
     const distilledTokens = estimateTextTokens(distilled)
     const saved = originalTokens - distilledTokens
@@ -2483,12 +2740,20 @@ export class ReasoningDistillEngine {
         // attempt (same id as the adopted entry, so a late audit settle still
         // finds this row) and say why.
         record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq || (item.failed !== true && item.skipped !== true))
-        record.entries.push({ ...entry, failed: true, distill: { ...entry.distill, error: 'abandoned before the wait bound expired' } })
+        record.entries.push({
+          ...entry,
+          failed: true,
+          distill: { ...entry.distill, error: this.cancelRequested.has(attemptKey) ? 'cancelled by user' : 'abandoned before the wait bound expired' },
+        })
         return
       }
       record.entries = record.entries.filter(item => item.targetSeq !== entry.targetSeq)
       record.entries.push(entry)
       adopted = true
+      // Past this point the rewrite is committed; cancellation must refuse rather than
+      // claim it can still take it back. The finalize pass below can still roll this
+      // back when the attempt was abandoned while the write was in flight.
+      this.setStage(attemptKey, 'writing-back')
     }, (_candidate, before) => {
       // The candidate is staged but not yet committed or visible. The wait bound
       // (or a superseding session) can change during staging; the pre-step may
@@ -2498,7 +2763,11 @@ export class ReasoningDistillEngine {
       if (adopted && abandonedNow()) {
         const rolled = structuredClone(before)
         rolled.entries = rolled.entries.filter(item => item.targetSeq !== entry.targetSeq || (item.failed !== true && item.skipped !== true))
-        rolled.entries.push({ ...entry, failed: true, distill: { ...entry.distill, error: 'abandoned while the commit was in flight' } })
+        rolled.entries.push({
+          ...entry,
+          failed: true,
+          distill: { ...entry.distill, error: this.cancelRequested.has(attemptKey) ? 'cancelled by user' : 'abandoned while the commit was in flight' },
+        })
         adopted = false
         return rolled
       }
@@ -2510,12 +2779,15 @@ export class ReasoningDistillEngine {
     // while the queued write is in flight, and re-checking it here would adopt the
     // rewrite yet refuse to hand it over.
     const backend = backendById(this.config.rewriteBackend.get())
-    if (adopted && !stale() && this.config.enabled.get() && backend !== undefined) {
+    if (adopted) this.setStage(attemptKey, 'writing-back')
+    if (adopted && !stale() && this.active && this.config.enabled.get() && backend !== undefined) {
       if (backend.kind === 'in-place') {
         // Write it at *this* step boundary rather than at the next pre-step. The step that ends a
         // turn has no next pre-step, and a delegated conversation is disposed as soon as its turn
         // ends, so the last reasoning before a reply had no writer until the conversation ran again.
-        if (await this.settleInPlaceEntry(session, entry)) this.pendingBranch.delete(session.id)
+        if (await this.settleInPlaceEntry(session, entry)) {
+          this.pendingBranch.delete(session.id)
+        }
       } else if (backend.kind === 'derive') {
         // Nothing is written: the derived-message wrapper already carries this rewrite on every
         // request. There is no hand-off to stage and no pending marker to clear, so the log (and
@@ -2540,6 +2812,10 @@ export class ReasoningDistillEngine {
   /** Build the user message handed to the distiller. */
   private buildRequestText(session: Session, target: PendingTarget, reasoning: string): string {
     const parts = ['## Original reasoning', reasoning]
+    // maxInputChars bounds each *context block*; the reasoning above is the
+    // subject and is always sent whole.
+    const cap = target.rule.maxInputChars
+    const clip = (text: string): string => cap > 0 ? sliceCodePoints(text, cap) : text
     // Everything the step produced after the reasoning is context, not content to
     // rewrite: without it the distiller cannot tell what the reasoning was
     // answering, and it would drop decisions that only make sense next to the
@@ -2547,7 +2823,7 @@ export class ReasoningDistillEngine {
     const visible = target.content.filter((block): block is { type: 'text'; text: string } => block.type === 'text' && block.text.trim() !== '')
     if (visible.length > 0) {
       parts.push('## Assistant text from this step (context only, never copy)')
-      for (const block of visible) parts.push(block.text)
+      for (const block of visible) parts.push(clip(block.text))
     }
     // The step's tool calls always travel: they are what the reasoning decided,
     // and the distiller needs them to keep the decisions that led somewhere.
@@ -2555,18 +2831,17 @@ export class ReasoningDistillEngine {
     if (calls.length > 0) {
       parts.push('## Tool calls from this step (context only, never copy)')
       for (const call of calls) {
-        parts.push(`- ${call.name}(${call.arguments})`)
+        parts.push(`- ${call.name}(${clip(call.arguments)})`)
       }
       if (target.rule.includeToolResults) {
         const results = collectToolResults(session, target.turn, target.step)
         if (results.length > 0) {
           // Tool results can be far larger than the reasoning they justify; bound
           // this block on its own so one huge output cannot dominate the input.
-          const cap = target.rule.maxInputChars
           parts.push('## Tool results (context only, never copy)')
           // Each result is its own context block, so the limit applies to each of
           // them rather than to their concatenation.
-          parts.push(results.map(result => cap > 0 && result.length > cap ? result.slice(0, cap) : result).join('\n\n'))
+          parts.push(results.map(result => clip(result)).join('\n\n'))
         }
       }
     }
@@ -2601,7 +2876,12 @@ export class ReasoningDistillEngine {
     try {
       const assembler = new BlockAssembler()
       const timeout = target.rule.timeoutMs
-      const signal = timeout > 0 ? AbortSignal.timeout(timeout) : undefined
+      const attemptKey = this.pendingKey(target.sessionId, target.turn, target.step)
+      const cancellation = this.cancellations.get(attemptKey)
+      const signals: AbortSignal[] = []
+      if (timeout > 0) signals.push(AbortSignal.timeout(timeout))
+      if (cancellation !== undefined) signals.push(cancellation.abort.signal)
+      const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals)
       const stream = this.ctx.llm.stream({
         provider: route.provider,
         model: route.model,
@@ -2613,6 +2893,7 @@ export class ReasoningDistillEngine {
       })
       let sawFinish = false
       let timedOut = false
+      let cancelled = false
       const collect = (async (): Promise<void> => {
         for await (const chunk of stream) {
           // Count as it arrives: a stream that throws part-way still generated
@@ -2622,31 +2903,30 @@ export class ReasoningDistillEngine {
           assembler.push(chunk)
         }
       })()
-      if (target.rule.timeoutMs > 0) {
-        // An adapter that ignores its abort signal would otherwise keep this
-        // attempt alive past its own timeout and let a stale result land after the
-        // next request has already been sent. The deadline therefore ends the
-        // attempt here, and whatever the abandoned stream does later is ignored.
-        let timer: ReturnType<typeof setTimeout> | undefined
-        const deadline = new Promise<void>(resolve => {
-          timer = setTimeout(() => { timedOut = true; resolve() }, target.rule.timeoutMs)
+      // The rule timeout and the user's cancel are both reasons to stop waiting for
+      // an adapter that may ignore its abort signal. Whichever arrives first ends the
+      // attempt; the abandoned stream is drained briefly so usage already produced can
+      // still be reported.
+      let timer: ReturnType<typeof setTimeout> | undefined
+      const deadline = target.rule.timeoutMs > 0
+        ? new Promise<'timeout'>(resolve => {
+          timer = setTimeout(() => resolve('timeout'), target.rule.timeoutMs)
           timer.unref?.()
         })
-        await Promise.race([collect, deadline])
-        if (timer !== undefined) clearTimeout(timer)
-        if (timedOut) {
-          // Bounded drain: a cooperative adapter hands over the usage it already
-          // produced (the attempt was paid for and must be reported), while the
-          // text is discarded below. The abandoned stream can no longer affect
-          // anything after this point.
-          await Promise.race([
-            collect.catch(() => undefined),
-            new Promise<void>(resolve => { const timer = setTimeout(resolve, 250); timer.unref?.() }),
-          ])
-          run.error = `timed out after ${target.rule.timeoutMs}ms`
-        }
-      } else {
-        await collect
+        : undefined
+      const racers: Array<Promise<'done' | 'timeout' | 'cancelled'>> = [collect.then(() => 'done' as const)]
+      if (deadline !== undefined) racers.push(deadline)
+      if (cancellation !== undefined) racers.push(cancellation.cancelled.then(() => 'cancelled' as const))
+      const winner = await Promise.race(racers)
+      if (timer !== undefined) clearTimeout(timer)
+      if (winner !== 'done' || this.cancelRequested.has(attemptKey)) {
+        timedOut = winner === 'timeout'
+        cancelled = winner === 'cancelled' || this.cancelRequested.has(attemptKey)
+        await Promise.race([
+          collect.catch(() => undefined),
+          new Promise<void>(resolve => { const timer = setTimeout(resolve, 250); timer.unref?.() }),
+        ])
+        run.error = cancelled ? 'cancelled by user' : `timed out after ${target.rule.timeoutMs}ms`
       }
 
       // An interrupted or truncated stream can still carry text, but that text is
@@ -2658,7 +2938,7 @@ export class ReasoningDistillEngine {
       // default kind, which says nothing about success: partial text must not be
       // substituted for a real distillation.
       // A timed-out attempt is never usable, whatever the adapter eventually sent.
-      const usable = !timedOut && sawFinish && finish !== 'aborted' && finish !== 'error' && finish !== 'max-tokens'
+      const usable = !timedOut && !cancelled && sawFinish && finish !== 'aborted' && finish !== 'error' && finish !== 'max-tokens'
       let blocks: ContentBlock[] = []
       try { blocks = assembler.blocks() } catch { blocks = [] }
       const text = blocks.filter(block => block.type === 'text').map(block => block.text).join('').trim()
@@ -2678,6 +2958,11 @@ export class ReasoningDistillEngine {
       if (failureReason !== undefined) run.error = failureReason
     } catch (error: unknown) {
       run.error = error instanceof Error ? error.message : String(error)
+    }
+    // A cancellation is the explanation even when the abort surfaced as a stream
+    // error; the row should say why the attempt stopped rather than quote the adapter.
+    if (this.cancelRequested.has(this.pendingKey(target.sessionId, target.turn, target.step))) {
+      run.error = 'cancelled by user'
     }
     if (!reported) {
       // An interrupted or failed call reports no usage, but it did send a prompt
@@ -2734,6 +3019,15 @@ export class ReasoningDistillEngine {
       // exists and the entry must be able to name and open it.
       id = created.id
       this.ownSessions.add(id)
+      // `create()` announces the session synchronously, so the engine attached it
+      // before the id could be marked plugin-owned. Detach it again: an audit
+      // session is not a conversation, and pinning one per compression in the
+      // per-session maps would grow for the life of the process.
+      if (this.current.get(id) === created) {
+        this.current.delete(id)
+        this.releaseSession(id)
+        this.ownSessions.add(id)
+      }
       created.append('turn/start', { turn: 1 })
       created.append('step/start', { turn: 1, step: 1 })
       created.append('user/message', createUserMessage({
@@ -2917,6 +3211,18 @@ function hashText(text: string): string {
   let hash = 5381
   for (let index = 0; index < text.length; index += 1) hash = ((hash * 33) ^ text.charCodeAt(index)) | 0
   return `${hash >>> 0}:${text.length}`
+}
+
+/**
+ * Cut text to a number of code points, never splitting a surrogate pair.
+ * @param text - input text.
+ * @param limit - maximum code points; 0 or less returns the text unchanged.
+ * @returns the prefix, or the input when it already fits.
+ */
+function sliceCodePoints(text: string, limit: number): string {
+  if (limit <= 0) return text
+  if (text.length <= limit) return text
+  return Array.from(text).slice(0, limit).join('')
 }
 
 function withDistilledReasoning(message: Message, text: string): Message | undefined {

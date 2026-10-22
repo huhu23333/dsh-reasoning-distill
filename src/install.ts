@@ -67,9 +67,36 @@ export function pluginRoot(here: string = import.meta.url): string {
  * @param cwd - working directory for the child; the current one by default.
  * @returns a spawner the runner can drive.
  */
-export function scriptedSpawner(script: string, cwd: string = process.cwd()): InstallSpawner {
+export interface SpawnerOptions {
+  /** Working directory for the installer; the current one by default. */
+  cwd?: string
+  /** Environment for the installer; the host's own by default. */
+  env?: NodeJS.ProcessEnv
+}
+
+/** How long the installer's process tree gets between SIGTERM and SIGKILL. */
+const CANCEL_GRACE_MS = 5_000
+
+export function scriptedSpawner(script: string, options: SpawnerOptions = {}): InstallSpawner {
+  const cwd = options.cwd ?? process.cwd()
+  const env = options.env ?? process.env
   return backendId => {
-    const child = spawn('bash', [script, backendId], { cwd, env: process.env })
+    // The installer drives node/pnpm/python children. Without a process group,
+    // killing bash leaves them running while the panel says "cancelled".
+    const detached = process.platform !== 'win32'
+    const child = spawn('bash', [script, backendId], { cwd, env, detached })
+    let escalation: ReturnType<typeof setTimeout> | undefined
+    const signalGroup = (signal: NodeJS.Signals): void => {
+      if (detached && child.pid !== undefined) {
+        try {
+          process.kill(-child.pid, signal)
+          return
+        } catch {
+          // fall through to the direct child
+        }
+      }
+      try { child.kill(signal) } catch { /* already gone */ }
+    }
     return {
       onLine: handler => {
         let buffer = ''
@@ -85,12 +112,26 @@ export function scriptedSpawner(script: string, cwd: string = process.cwd()): In
         child.stdout.on('data', drain)
         child.stderr.on('data', drain)
       },
-      onExit: handler => { child.once('close', code => handler(code)) },
+      onExit: handler => {
+        child.once('close', code => {
+          if (escalation !== undefined) clearTimeout(escalation)
+          handler(code)
+        })
+      },
       // A spawn that never got its program running reports through `error` and may
       // still emit `close` afterwards; both end up in the runner's single terminal
       // step, which settles the job only once.
-      onError: handler => { child.once('error', handler) },
-      kill: () => { child.kill('SIGTERM') },
+      onError: handler => {
+        child.once('error', error => {
+          if (escalation !== undefined) clearTimeout(escalation)
+          handler(error)
+        })
+      },
+      kill: () => {
+        signalGroup('SIGTERM')
+        escalation ??= setTimeout(() => signalGroup('SIGKILL'), CANCEL_GRACE_MS)
+        escalation.unref?.()
+      },
     }
   }
 }
@@ -166,19 +207,26 @@ export class InstallRunner {
     return true
   }
 
+  /** Append one log line, keeping the bounded tail. */
+  private pushLog(job: InstallJob, line: string): void {
+    job.log.push(line)
+    if (job.log.length > INSTALL_LOG_LIMIT) job.log.splice(0, job.log.length - INSTALL_LOG_LIMIT)
+  }
+
   /** Fold one output line into the job. */
   private consume(job: InstallJob, line: string): void {
     if (job.endedAt !== undefined) return
     const marker = /^##(STEP|DONE|FAIL)\s+(\S+)(?:\s+(.*))?$/.exec(line)
     if (marker === null) {
-      job.log.push(line)
-      if (job.log.length > INSTALL_LOG_LIMIT) job.log.splice(0, job.log.length - INSTALL_LOG_LIMIT)
+      this.pushLog(job, line)
       return
     }
     const [, kind, id, rest] = marker
     const step = job.steps.find(candidate => candidate.id === id)
     if (step === undefined) {
-      job.log.push(line)
+      // An unknown step id (script/plugin version skew) still has to obey the
+      // cap: serializing an unbounded log on every poll would grow the host.
+      this.pushLog(job, line)
       return
     }
     if (kind === 'STEP') step.state = 'running'
@@ -213,6 +261,13 @@ export class InstallRunner {
     if (this.job === job) this.child = undefined
     job.endedAt = this.now()
     if (this.cancelled.has(job)) {
+      // A cancel request must not rewrite a result the script already produced:
+      // keep an explicit failure, and treat "all steps done" as done.
+      if (job.phase === 'failed') return
+      if (job.steps.every(step => step.state === 'done')) {
+        job.phase = 'done'
+        return
+      }
       job.phase = 'cancelled'
       return
     }

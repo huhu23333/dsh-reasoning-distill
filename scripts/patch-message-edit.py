@@ -428,6 +428,16 @@ function splicedAssistantEvent(event, blockIndex, text) {
 \t\t...data.message.content[blockIndex],
 \t\ttext
 \t};
+\t// A replay signature describes the text it was issued for. Keeping it next to
+\t// the rewritten text makes the stored branch internally inconsistent, so scrub
+\t// the replaced block's replay payload too.
+\tconst replay = data.message.source?.replayState;
+\tif (replay !== void 0 && Array.isArray(replay.blocks)) {
+\t\tdata.message.source = {
+\t\t\t...data.message.source,
+\t\t\treplayState: { ...replay, blocks: replay.blocks.map((block, index) => index === blockIndex ? { type: "reasoning" } : block) }
+\t\t};
+\t}
 \tdata.stream = [];
 \treturn {
 \t\t...event,
@@ -864,8 +874,15 @@ def patch(target: pathlib.Path) -> int:
             print(f"nothing written (node --check failed): {target}")
             print(check.stderr.rstrip())
             return 1
+        # Keep one backup per bundle: re-patching (after every reinstall) used to
+        # accumulate an .orig copy per run inside the profile.
+        for stale in target.parent.glob(target.name + '.orig-*'):
+            stale.unlink(missing_ok=True)
         backup = target.with_name(target.name + '.orig-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ'))
         backup.write_bytes(target.read_bytes())
+        # NamedTemporaryFile is 0600; os.replace would otherwise replace the
+        # installed bundle's 0644/0664 with an unreadable-by-others mode.
+        os.chmod(temporary, target.stat().st_mode & 0o777)
         os.replace(temporary, target)
         temporary = None
     finally:

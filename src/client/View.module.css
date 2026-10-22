@@ -15,4 +15,4 @@
 .activityWhy{overflow:hidden;text-overflow:ellipsis;color:var(--dsw-alias-label-tertiary,#8a918e)}
 @keyframes rdPulse{0%,100%{opacity:.35}50%{opacity:1}}
 .blockedBanner{display:flex;align-items:center;gap:8px;margin:0 0 10px;padding:8px 10px;border:1px solid #d98324;border-radius:9px;background:rgba(217,131,36,.08)}
-.activeRow{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1,#dde2e1);border-radius:9px}
+.activeRow{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid var(--dsw-alias-border-l1,#dde2e1);border-radius:9px;flex-wrap:wrap}.stage{font-variant-numeric:tabular-nums;color:var(--dsw-alias-label-secondary,#617073)}

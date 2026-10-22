@@ -18,6 +18,7 @@ import { Config, resolveRule } from './config.ts'
 import type { Config as PluginConfig } from './config.ts'
 import { ReasoningDistillEngine } from './engine.ts'
 import { InstallRunner, installerScript, scriptedSpawner } from './install.ts'
+import { configureWhaleProfile } from './peak.ts'
 import { registerRoutes } from './route.ts'
 import { SETTINGS_NS } from './shared.ts'
 import { SidecarStore } from './store.ts'
@@ -81,9 +82,26 @@ export function apply(ctx: Context, config: PluginConfig): void {
   }
   const engine = new ReasoningDistillEngine(ctx, config, store, archive, () => activePlugins(ctx))
   engine.start()
+  // The running profile is a host fact the child installer and the whale lookup
+  // both need. DSH_PROFILE is exported into shell tools, not into this process,
+  // so reading it from the environment would target the wrong profile.
+  const profile = (ctx as unknown as { get(key: string): unknown }).get('profileContext') as
+    { name?: unknown; dir?: unknown; cwd?: unknown; patchPath?: unknown } | undefined
+  const profileName = typeof profile?.name === 'string' && profile.name !== '' ? profile.name : undefined
+  const profileDir = typeof profile?.dir === 'string' && profile.dir !== '' ? profile.dir : undefined
+  configureWhaleProfile(profileDir)
+  const installEnv: NodeJS.ProcessEnv = { ...process.env }
+  if (profileName !== undefined) installEnv['DSH_PROFILE'] = profileName
+  if (profileDir !== undefined) {
+    installEnv['DSH_PROFILE_DIR'] = profileDir
+    installEnv['DSH_PLUGIN_ROOTS'] ??= `${profileDir}/node_modules`
+  }
   // One installer at a time, in this process: the quick-install page can be closed and
   // reopened without losing progress, and cancellation is a kill.
-  const runner = new InstallRunner(scriptedSpawner(installerScript()))
+  const runner = new InstallRunner(scriptedSpawner(installerScript(), {
+    cwd: typeof profile?.cwd === 'string' && profile.cwd !== '' ? profile.cwd : process.cwd(),
+    env: installEnv,
+  }))
   registerRoutes(ctx, config, store, engine, runner)
   ctx.effect(() => () => { runner.cancel() })
   // This plugin ships its own Settings page, so the generic schema form is off.

@@ -7,7 +7,7 @@ import { CATALOG_ROUTE } from '../shared.ts'
 import type { ModelPrices, ModelRule } from '../config.ts'
 import { NS, type Key } from './locales.ts'
 import {
-  NEW_MODEL_RULE, REWRITE_BACKENDS, backendById, backendReachable, backendOptionsVisible, forcesMasterOff, masterSwitchState, nextBackend, normalizeSettings, planSave, ruleFieldsIdle, subagentKindControls, withBusySkipOn, withoutSubagentKinds,
+  NEW_MODEL_RULE, REWRITE_BACKENDS, backendById, backendReachable, backendOptionsVisible, forcesMasterOff, masterSwitchState, nextBackend, normalizeSettings, planSave, ruleFieldsIdle, subagentKindControls, withoutSubagentKinds,
   type ProbeAnswer,
   type Operation, type SettingsValue, type StoredRule,
 } from './ops.ts'
@@ -55,7 +55,16 @@ function normalize(value: SettingsValue): Draft {
 }
 
 function numberValue(raw: string): number {
-  return raw === '' ? 0 : Number(raw)
+  if (raw === '') return 0
+  const value = Number(raw)
+  return Number.isFinite(value) ? value : 0
+}
+
+/** Keep a numeric form value inside its documented range. */
+export function clampNumber(value: number, min: number, max?: number): number {
+  const lower = Number.isFinite(min) ? min : 0
+  const bounded = Math.max(lower, Number.isFinite(value) ? value : lower)
+  return max === undefined ? bounded : Math.min(max, bounded)
 }
 
 /**
@@ -74,8 +83,10 @@ function BackendChooser({ value, onSelect, t }: {
   t: Translate
 }) {
   const [available, setAvailable] = useState<Record<string, boolean | undefined>>({})
+  const [attempt, setAttempt] = useState(0)
   useEffect(() => {
     let alive = true
+    setAvailable({})
     /** One probe: status, content type and a short body — everything worth comparing. */
     const probe = async (path: string, body: Record<string, unknown>): Promise<ProbeAnswer> => {
       const response = await fetch(path, {
@@ -117,16 +128,20 @@ function BackendChooser({ value, onSelect, t }: {
         })
     }
     return () => { alive = false }
-  }, [])
+  }, [attempt])
   return <div className={css.checks}>
     {REWRITE_BACKENDS.map(backend => {
-      const installed = available[backend.id] === true
+      const state = available[backend.id]
+      const installed = state === true
       const selected = value === backend.id
       return <label key={backend.id} className={css.inline}>
         <input
           type="checkbox"
           checked={selected}
-          disabled={!installed}
+          // A probe that failed is not proof of absence: keep the row usable so
+          // the user can clear a stale selection, instead of greying it out as
+          // "not installed" on one transient failure.
+          disabled={!installed && !selected}
           onChange={() => onSelect(nextBackend(value, backend.id))}
         />
         {backend.placeholder === true
@@ -135,10 +150,13 @@ function BackendChooser({ value, onSelect, t }: {
             <span>{backend.id} · {backend.kind === 'branch' ? t('settings.backendBranch') : backend.kind === 'derive' ? t('settings.backendDerive') : t('settings.backendInPlace')}</span>
             <span className={css.muted}>{installed
               ? t('settings.backendInstalled')
-              : backend.hostPatch === true ? t('settings.backendNeedsPatch') : t('settings.backendMissing')}</span>
+              : state === undefined
+                ? t('settings.backendUnknown')
+                : backend.hostPatch === true ? t('settings.backendNeedsPatch') : t('settings.backendMissing')}</span>
           </>}
       </label>
     })}
+    <button type="button" className={css.secondary} onClick={() => setAttempt(current => current + 1)}>{t('settings.recheckBackends')}</button>
     <span className={css.note}>{t('settings.backendHint')}</span>
   </div>
 }
@@ -152,7 +170,7 @@ function Toggle({ label, checked, onChange, disabled = false }: {
 function Count({ label, value, onChange, disabled = false, min = 0, max }: {
   label: string; value: number; onChange: (value: number) => void; disabled?: boolean; min?: number; max?: number
 }) {
-  return <label className={css.field}><span>{label}</span><input type="number" min={min} max={max} step="1" value={value} disabled={disabled} onChange={event => onChange(numberValue(event.target.value))} /></label>
+  return <label className={css.field}><span>{label}</span><input type="number" min={min} max={max} step="1" value={value} disabled={disabled} onChange={event => onChange(clampNumber(numberValue(event.target.value), min, max))} /></label>
 }
 
 function RouteFields({ rule, catalog, onChange, t, disabled = false }: {
@@ -246,7 +264,9 @@ function PriceEditor({ model, prices, builtin, onChange, onRemove, t }: {
       <div className={css.priceGrid}>
         {PERIODS.map(period => <fieldset key={period} disabled={period === 'off' && !current.peakPricing}><legend>{t(!current.peakPricing && period === 'peak' ? 'settings.priceOnce' : `settings.${period}` as Key)}</legend><div className={css.route}>{FIELDS.map(field => <label className={css.field} key={field}><span>{t(`settings.${field}` as Key)}</span><input type="number" min="0" step="any" placeholder={String(period === 'peak' ? base[field] : base[field] / 2)} value={prices?.[period]?.[field] ?? ''} onChange={event => onChange({ ...current, [period]: { ...current[period], [field]: numberValue(event.target.value) } })} /></label>)}</div></fieldset>)}
       </div>
-      <div className={css.actions}><button type="button" className={css.secondary} onClick={onRemove}>{t('settings.remove')}</button></div>
+      {/* Shipped entries are defaults, not user rows: removing one from the form
+          cannot remove the built-in price, so do not offer the action. */}
+      {!builtin && <div className={css.actions}><button type="button" className={css.secondary} onClick={onRemove}>{t('settings.remove')}</button></div>}
     </div>
   </details>
 }
@@ -371,11 +391,11 @@ export function ReasoningDistillSettings({ form, t }: Props) {
   }, [draft, selectedReachable])
   // The same rule for the two subagent switches and for the background-work skip: a value this
   // backend cannot honour must not stay the other way in storage, or the panel would show one thing
-  // while the engine enforced another. Both helpers return their input unchanged once the value is
-  // already what they pin, so this effect settles instead of looping on its own new object.
+  // while the engine enforced another. The helper returns its input unchanged once the value is
+  // already what it pins, so this effect settles instead of looping on its own new object.
   useEffect(() => {
     if (draft == null || !branchBackendBlocksSubagents(draft.rewriteBackend)) return
-    setDraft(current => current == null ? current : withBusySkipOn(withoutSubagentKinds(current)))
+    setDraft(current => current == null ? current : withoutSubagentKinds(current))
   }, [draft])
 
   if (snapshot.status === 'loading' || !draft) return <div className={css.page}>{t('settings.loading')}</div>
@@ -441,6 +461,9 @@ export function ReasoningDistillSettings({ form, t }: Props) {
     <section className={css.section}><h3>{t('settings.default')}</h3><RuleFields rule={draft.defaultRule} catalog={catalog} t={t} subagentsLocked={subagentsLocked} onChange={defaultRule => update(current => ({ ...current, defaultRule }))} /></section>
     <section className={css.section}><div className={css.sectionHeading}><h3>{t('settings.models')}</h3>{catalogError && <button type="button" className={css.iconButton} title={t('settings.retry')} aria-label={t('settings.retry')} onClick={() => setCatalogAttempt(n => n + 1)}><IconRefreshOutlineRegular /></button>}</div>
       {catalogError && <p role="alert" className={css.error}>{t('settings.catalogFailure')}</p>}
+      {(catalog?.failures?.length ?? 0) > 0 && <p role="alert" className={css.error}>
+        {t('settings.catalogFailures')} {catalog!.failures!.map(failure => failure.provider).join(', ')}
+      </p>}
       <p className={css.note}>{t('settings.modelsHint')}</p>
       <ModelPicker catalog={catalog} taken={ruleIds} label={t('settings.addModel')} t={t}
         onPick={model => update(current => ({
@@ -480,10 +503,15 @@ export function ReasoningDistillSettings({ form, t }: Props) {
               ? `${t('settings.whaleFound')} · ${catalog.peak?.whaleHolidays ?? 0} ${t('settings.holidaysUnit')}`
               : t('settings.whaleMissing')}
         </p>
-        <label className={css.field}><span>{t('settings.holidays')}</span>
-          <textarea className={css.holidayBox} value={draft.holidays.join('\n')} onChange={event => update(current => ({ ...current, holidays: event.target.value.split('\n').map(line => line.trim()).filter(line => line !== '') }))} />
-        </label>
-        <div className={css.actions}><button type="button" className={css.secondary} disabled={catalog === null} onClick={() => update(current => ({ ...current, holidays: [...(catalog?.peak?.builtinHolidays ?? [])] }))}>{t('settings.holidaysReset')}</button></div>
+        {draft.peakSource === 'whale'
+          // The sources are exclusive: the widget owns this source's holiday table.
+          ? <p className={css.note}>{t('settings.holidaysFromWhale')}</p>
+          : <>
+            <label className={css.field}><span>{t('settings.holidays')}</span>
+              <textarea className={css.holidayBox} value={draft.holidays.join('\n')} onChange={event => update(current => ({ ...current, holidays: event.target.value.split('\n').map(line => line.trim()).filter(line => line !== '') }))} />
+            </label>
+            <div className={css.actions}><button type="button" className={css.secondary} disabled={catalog === null} onClick={() => update(current => ({ ...current, holidays: [...(catalog?.peak?.builtinHolidays ?? [])] }))}>{t('settings.holidaysReset')}</button></div>
+          </>}
       </details>
       <p className={css.note}>{t('settings.pricesHint')}</p>
       <ModelPicker catalog={catalog} taken={priceIds} label={t('settings.addPrice')} t={t}

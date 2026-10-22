@@ -28,10 +28,12 @@ if [ "$backend" = "in-place" ]; then
   # this process's working directory and from the host's own resolved session package, and says
   # everything it tried when it finds nothing.
   checkoutArgs=()
-  if [ -n "${DSH_CHECKOUT:-}" ]; then
-    checkoutArgs=(--checkout "$DSH_CHECKOUT")
-  elif [ -n "${DSH_HOST_CHECKOUT:-}" ]; then
+  # Same precedence as scripts/lib/dsh-paths.mjs and the agent prompt:
+  # --checkout > $DSH_HOST_CHECKOUT > $DSH_CHECKOUT > discovery.
+  if [ -n "${DSH_HOST_CHECKOUT:-}" ]; then
     checkoutArgs=(--checkout "$DSH_HOST_CHECKOUT")
+  elif [ -n "${DSH_CHECKOUT:-}" ]; then
+    checkoutArgs=(--checkout "$DSH_CHECKOUT")
   fi
   located=""
   if ! located="$(node "$patch" --locate ${checkoutArgs[@]+"${checkoutArgs[@]}"} 2>&1)"; then
@@ -40,7 +42,7 @@ if [ "$backend" = "in-place" ]; then
     for cand in "${DSH_HOST_CHECKOUT:-}" "${DSH_CHECKOUT:-}" "$PWD"; do
       [ -n "$cand" ] || continue
       if [ -f "$cand/package.json" ] && [ -d "$cand/node_modules/@deepseek-ai/dsh" ] && [ ! -f "$cand/packages/core/session/src/surface.ts" ]; then
-        fail resolve "这是打包版 DSH（$cand：只有 node_modules、没有源码，且通常只读）。in-place 后端需要可写的 DSH 源码树，无法在这种安装里使用；请改用 message-edit 后端"
+        fail resolve "这是打包版 DSH（$cand：只有 node_modules、没有源码，且通常只读）。in-place 后端需要可写的 DSH 源码树，无法在这种安装里使用；请改用无需安装的 derive（无写入）后端"
       fi
     done
     fail resolve "定位 DSH checkout 失败（可用 DSH_CHECKOUT 指定 DSH 源码目录）：$located"
@@ -86,9 +88,21 @@ step resolve
 : "${DSH_HOME:=$HOME/.dsh}"
 profile="${DSH_PROFILE:-web}"
 tgz="$root/vendor/dsh-message-edit-0.2.3-patched4.tgz"
-checkout="${DSH_CHECKOUT:-$(pwd)}"
+checkout="${DSH_HOST_CHECKOUT:-${DSH_CHECKOUT:-$(pwd)}}"
 [ -f "$tgz" ] || fail resolve "找不到打好补丁的包：$tgz"
-[ -f "$checkout/package.json" ] || fail resolve "工作目录不像 DSH checkout：$checkout（可用 DSH_CHECKOUT 指定）"
+# Provenance, not just bytes: a replaced tarball would pass a comparison against
+# itself. The digest is part of the repository.
+if [ -f "$tgz.sha256" ]; then
+  expected="$(cut -d' ' -f1 "$tgz.sha256")"
+  actual="$(node -e 'const fs=require("fs"),c=require("crypto");process.stdout.write(c.createHash("sha256").update(fs.readFileSync(process.argv[1])).digest("hex"))' "$tgz")"
+  [ "$actual" = "$expected" ] || fail resolve "vendor 包 sha256 不一致：期望 $expected，实际 $actual"
+  printf 'vendor sha256=%s\n' "$actual"
+fi
+# A source checkout is the normal case; a packaged install has no source tree but
+# does ship the CLI, so accept either shape instead of requiring any package.json.
+if [ ! -f "$checkout/packages/core/session/src/surface.ts" ] && [ ! -d "$checkout/node_modules/@deepseek-ai/dsh" ]; then
+  fail resolve "工作目录不像 DSH checkout：$checkout（可用 DSH_HOST_CHECKOUT / DSH_CHECKOUT 指定）"
+fi
 printf 'checkout=%s\nprofile=%s\nhome=%s\n' "$checkout" "$profile" "$DSH_HOME"
 finish resolve
 

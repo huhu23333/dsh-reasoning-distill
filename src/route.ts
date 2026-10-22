@@ -10,7 +10,7 @@ import type { Config } from './config.ts'
 import { buildCatalog, buildReport } from './report.ts'
 import type { ActiveCompression, BlockingReason, HostPatchStatus } from './shared.ts'
 import type { SidecarStore } from './store.ts'
-import { CATALOG_ROUTE, HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE } from './shared.ts'
+import { CANCEL_ROUTE, CATALOG_ROUTE, HANDOFF_ROUTE, INSTALL_ROUTE, REPORT_ROUTE, REWRITE_ROUTE } from './shared.ts'
 import { INSTALLABLE_BACKENDS, INSTALL_STEPS, installableBackend } from './install-shared.ts'
 import { pluginRoot, type InstallRunner } from './install.ts'
 
@@ -57,6 +57,8 @@ export function registerRoutes(
      * Optional on the type so the route can be driven by a stub that models only one half.
      */
     handoff(sessionId: string, cancel?: boolean, error?: string, entryId?: string, generation?: number): Promise<{ ok: boolean; recorded: boolean }>
+    /** Cancel one running compression that has not been adopted yet. */
+    cancel?(sessionId: string, turn: number, step: number): { ok: boolean; error?: string }
     hostPatchStatus(): HostPatchStatus
     applyInPlace(request: { sessionId: string; eventSeq: number; blockIndex: number; text: string }): Promise<{ ok: true; seq: number } | { ok: false; error: string }>
   },
@@ -75,9 +77,11 @@ export function registerRoutes(
       requestBody: 'buffered',
       fetch: async (request: Request): Promise<Response> => {
         let sessionId = ''
+        let detail = true
         try {
-          const body = await request.json() as { sessionId?: unknown }
+          const body = await request.json() as { sessionId?: unknown; detail?: unknown }
           if (typeof body.sessionId === 'string') sessionId = body.sessionId
+          if (body.detail === false) detail = false
         } catch {
           return json({ error: 'invalid body' }, 400)
         }
@@ -89,17 +93,37 @@ export function registerRoutes(
         // with no record has nothing to disclose. The record itself comes from the store, which
         // answers a blank record for an id it has never seen.
         const sessions = child.get('sessions') as { get(id: string): unknown } | undefined
+        // Compression audit sessions are memory-only: after a restart every one of
+        // them answers "gone". Caching that answer briefly keeps the 2s/4s pollers
+        // from re-running one filesystem lookup per historical entry.
+        const availabilityCache = new Map<string, { at: number; live: boolean }>()
+        const availabilityOf = async (id: string): Promise<boolean> => {
+          if (sessions?.get(id) !== undefined) return true
+          const cached = availabilityCache.get(id)
+          const now = Date.now()
+          if (cached !== undefined && now - cached.at < 30_000) return cached.live
+          let live = false
+          try {
+            const persistence = child.get('sessionPersistence') as { stat(id: string): Promise<unknown> }
+            live = await persistence.stat(id) !== undefined
+          } catch {
+            live = false
+          }
+          availabilityCache.set(id, { at: now, live })
+          return live
+        }
         try {
           const record = await store.load(sessionId)
-          const persistence = child.get('sessionPersistence') as { stat(id: string): Promise<unknown> }
           const linked = [...new Set(record.entries.map(entry => entry.distill.sessionId).filter(Boolean))]
           const availability = new Map(await Promise.all(linked.map(async id =>
-            [id, sessions?.get(id) !== undefined || await persistence.stat(id) !== undefined] as const)))
+            [id, await availabilityOf(id)] as const)))
+          const snapshot = engine.snapshot(sessionId)
           return json(buildReport(sessionId, record, config, {
-            ...engine.snapshot(sessionId),
+            ...snapshot,
             // The engine alone can say which rewrites still replace reasoning in
             // the prompt a request would carry now.
             stock: engine.stock(sessionId),
+            detail,
             isLive: (id: string) => availability.get(id) === true,
           }))
         } catch (error: unknown) {
@@ -199,6 +223,28 @@ export function registerRoutes(
       },
     }), 'reasoning-distill: handoff route')
 
+    child.effect(() => register({
+      path: CANCEL_ROUTE,
+      methods: ['POST'],
+      requestBody: 'buffered',
+      // The report shows a stage and a cancel button for each running compression; this
+      // is the only route that can stop one before its rewrite is adopted.
+      fetch: async (request: Request): Promise<Response> => {
+        try {
+          const body = await request.json() as { sessionId?: unknown; turn?: unknown; step?: unknown }
+          const sessionId = typeof body.sessionId === 'string' ? body.sessionId : ''
+          const turn = typeof body.turn === 'number' && Number.isSafeInteger(body.turn) ? body.turn : Number.NaN
+          const step = typeof body.step === 'number' && Number.isSafeInteger(body.step) ? body.step : Number.NaN
+          if (sessionId === '' || !Number.isSafeInteger(turn) || !Number.isSafeInteger(step)) {
+            return json({ ok: false, error: 'sessionId, turn and step are required' }, 400)
+          }
+          const result = engine.cancel?.(sessionId, turn, step) ?? { ok: false, error: 'this engine cannot cancel compressions' }
+          return json(result, result.ok ? 200 : 409)
+        } catch (error: unknown) {
+          return json({ ok: false, error: error instanceof Error ? error.message : String(error) }, 500)
+        }
+      },
+    }), 'reasoning-distill: cancel route')
     child.effect(() => register({
       path: REWRITE_ROUTE,
       methods: ['GET', 'POST'],

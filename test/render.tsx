@@ -13,7 +13,7 @@ import { renderToStaticMarkup } from 'react-dom/server'
 import { ReasoningDistillView, ReportBody, stockOfEntry } from '../src/client/View.tsx'
 import { CompressionActivity, freshHandoff, shouldArchiveSuperseded } from '../src/client/ActivityChip.tsx'
 import { REWRITE_ROUTE, type SessionReport } from '../src/shared.ts'
-import { NEW_MODEL_RULE, REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendReachable, backendSelectable, backendUnusable, claimRewriteAttempt, hostPatchReady, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, withBusySkipOn, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
+import { NEW_MODEL_RULE, REWRITE_BACKENDS, backendById, backendInstalled, backendMissingFrom, backendReachable, backendSelectable, backendUnusable, claimRewriteAttempt, hostPatchReady, forcesMasterOff, missingBackendFixup, owedInPlaceEntries, backendOptionsVisible, masterSwitchState, nextBackend, planSave, rememberRewriteOutcome, rewriteRequest, saveOperations, subagentKindControls, type SettingsValue, normalizeSettings, withoutSubagentKinds } from '../src/client/ops.ts'
 import { branchBackendBlocksSubagents } from '../src/backends.ts'
 import { FALLBACK_RULE } from '../src/client/Settings.tsx'
 import { mergeRule, sparseOverride } from '../src/rule.ts'
@@ -109,6 +109,7 @@ function modernReport(): SessionReport {
     active: [{
       turn: 2, step: 1, provider: 'deepseek-official', model: 'deepseek-flash',
       distiller: 'deepseek-official/deepseek-flash', originalTokens: 900, startedAt: 5000,
+      stage: 'distilling', stageStartedAt: 5200,
     }],
     blockingSince: 6000,
     blockingReason: 'tool',
@@ -123,20 +124,24 @@ check('the in-progress section shows the running compression', modern.includes('
 check('the blocking banner names the reason', modern.includes('activity.blocked') && modern.includes('activity.reason.tool'))
 check('elapsed seconds are computed, not NaN', modern.includes('3s') && !modern.includes('NaN'))
 check('the compression session id is shown so it can be opened', modern.includes('session-compress-1'))
+const withCancel = tryRender(<ReportBody report={modernReport()} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t}
+  cancelling={new Set()} onCancel={noop} />)
+check('a running compression names its phase and offers a cancel button',
+  withCancel.includes('view.stage') && withCancel.includes('view.stage.distilling') && withCancel.includes('view.cancel'))
 check('a non-failed entry does not claim to be abandoned', !modern.includes('view.abandoned'))
-// A compression handed off to a branch is in force in that branch; the conversation
-// that keeps its pre-compression reasoning earns no success and carries no stock.
+// A branch hand-off copies the rewrite; the source may stay usable when archiving is
+// off or fails, so it must keep carrying the compression instead of reverting to raw.
 const handedOffEntry = {
   ...modernReport().entries[0]!,
   handoff: { state: 'created' as const, branchId: 'branch-9', at: 30 },
 }
-check('a compression moved to a branch carries no stock in the conversation it left',
-  stockOfEntry(handedOffEntry, 'session-1') === 0)
-check('and it still carries its stock in the branch it moved to',
+check('a compression copied to a branch still carries its stock in the conversation it came from',
+  stockOfEntry(handedOffEntry, 'session-1') > 0)
+check('and it carries its stock in the branch copy too',
   stockOfEntry(handedOffEntry, 'branch-9') > 0)
-const movedMarkup = tryRender(<ReportBody report={{ ...modernReport(), entries: [handedOffEntry] }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
-check('the panel reports the rewrite as moved, not as adopted here',
-  movedMarkup.includes('view.branchedAway') && movedMarkup.includes('view.branchedAwayNote'))
+const branchedMarkup = tryRender(<ReportBody report={{ ...modernReport(), entries: [handedOffEntry] }} loading={false} error={undefined} now={9000} onRefresh={noop} openSession={noop} t={t} />)
+check('the panel still counts a branching rewrite as adopted here and explains why',
+  branchedMarkup.includes('view.branchAlsoInForceNote') && !branchedMarkup.includes('view.abandoned'))
 // The reworked figures: success is shown apart from attempts, the per-request
 // figure is a stock, and the retired cache-break card is gone.
 check('success and attempts are shown apart',
@@ -227,6 +232,11 @@ const reportInPlace = {
 check('a rewrite with no hand-off note is still owed by an in-place backend',
   owedInPlaceEntries(reportInPlace).map(item => item.id).join(',') === 'owed-1',
   JSON.stringify(owedInPlaceEntries(reportInPlace).map(item => item.id)))
+check('a rewrite retired by compaction is not owed any more',
+  owedInPlaceEntries({
+    ...reportInPlace,
+    entries: [{ ...reportInPlace.entries[0]!, active: false }],
+  }).length === 0)
 check('a branch backend leaves its write-back to the host',
   owedInPlaceEntries({ ...reportInPlace, config: { rewriteBackend: 'message-edit' } } as never).length === 0)
 const claimStore = (() => {
@@ -368,6 +378,13 @@ check('the no-write backend is listed and never asks for a write',
   && !backendUnusable('derive', ['dsh-base'], undefined))
 check('and the master switch stays openable for it',
   !masterSwitchState('derive', true, true).locked && masterSwitchState('derive', true, true).checked === true)
+// The probe-less backend must not be mistaken for an absent one: that read locked
+// the master switch under derive and made the 0.1.11 headline mode unusable.
+const deriveProbe = await backendReachable(backendById('derive')!)
+check('a backend with no route needs no probe and unlocks the switch',
+  deriveProbe === true && !masterSwitchState('derive', true, deriveProbe).locked
+  && masterSwitchState('derive', true, deriveProbe).checked === true,
+  String(deriveProbe))
 // With no backend selected the master switch must stay locked off, exactly as before.
 check('no backend selected still locks the master switch off',
   masterSwitchState('', true).locked && masterSwitchState('', true).checked === false
@@ -384,6 +401,19 @@ check('clicking a backend when none is chosen selects it', nextBackend('', 'mess
 // A radio input cannot fire change once checked, which is exactly why the panel
 // must model deselection itself.
 check('clicking the chosen backend clears the choice', nextBackend('message-edit', 'message-edit') === '')
+// Toggling the default rule's `enabled` must state both kind switches: a layer
+// with only `enabled` lets the resolver derive continuable-subagent distillation
+// on, so off→on silently starts paying for subagents.
+const toggleBase = settings({ enabled: false })
+toggleBase.defaultRule = { ...toggleBase.defaultRule, enabled: false, continuableSubagents: false, oneShotSubagents: false }
+const toggleDraft = { ...toggleBase, defaultRule: { ...toggleBase.defaultRule, enabled: true } }
+const toggleOps = saveOperations(toggleBase, toggleDraft)
+const togglePaths = toggleOps.filter(op => op.op === 'set').map(op => op.path.join('.'))
+check('toggling the default rule writes both subagent switches',
+  togglePaths.includes('defaultRule.enabled')
+  && togglePaths.includes('defaultRule.continuableSubagents')
+  && togglePaths.includes('defaultRule.oneShotSubagents'),
+  JSON.stringify(toggleOps))
 console.log('render: a report from an older host (version skew)')
 const legacy = modernReport()
 // Fields added by later host versions are absent, as they would be mid-upgrade.
@@ -606,20 +636,6 @@ check('an already-pinned document is returned as the same object, so the effect 
 check('and a document that needs pinning is a new one',
   pinned !== subagentsOn)
 
-// The background-work skip is not offered while a branch backend is selected; the stored value is
-// pinned on instead, so the panel and the engine cannot disagree about whether it applies.
-console.log('client: a branch backend pins the background-work skip on')
-const busyOff = settings({ skipWhileBusy: false })
-const busyOn = withBusySkipOn(busyOff)
-check('the skip is turned on', busyOn.skipWhileBusy === true && busyOff.skipWhileBusy === false)
-check('an already-skipping document is returned as the same object, so the effect cannot loop',
-  withBusySkipOn(busyOn) === busyOn)
-check('and every other stored field is left alone',
-  busyOn.rewriteBackend === busyOff.rewriteBackend
-  && busyOn.archiveSuperseded === busyOff.archiveSuperseded
-  && busyOn.branchTimeoutMs === busyOff.branchTimeoutMs
-  && busyOn.defaultRule === busyOff.defaultRule)
-
 // Both rows the panel draws — the default rule and each model's own entry — go through
 // `subagentKindControls`, so a model row cannot be treated differently from the default one.
 const modelRow = mergeRule(FALLBACK_RULE, subagentsOn.defaultRule, { continuableSubagents: true, oneShotSubagents: true })
@@ -731,7 +747,9 @@ check('the quick-install page is absent while it is closed',
   tryRender(<InstallBackendPanel open={false} onClose={noop} t={t} />) === '')
 const installPage = tryRender(<InstallBackendPanel open onClose={noop} t={t} />)
 check('it lists the installable backends and their install note',
-  installPage.includes('message-edit') && installPage.includes('install.note.message-edit')
+  installPage.includes('message-edit') && installPage.includes('in-place')
+  // The recommended backend is preselected, so its note is the one rendered.
+  && installPage.includes('install.note.in-place')
   // The built-in in-place backend is installable too, and the page has to offer it: its install
   // is the host patch, which is a route, not a package.
   // Both ids are listed; the note shown belongs to the selected one, so the notes are checked

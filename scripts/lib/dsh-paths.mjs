@@ -80,7 +80,7 @@ export function packagedInstallNote(candidates) {
   for (const candidate of candidates) {
     if (typeof candidate === 'string' && candidate !== '' && isPackagedHarness(candidate)) {
       return 'note: ' + candidate + ' is a packaged DSH install (node_modules only, no source tree);'
-        + ' the in-place backend needs a writable source checkout and cannot be installed there — use the message-edit backend instead'
+        + ' the in-place backend needs a writable source checkout and cannot be installed there — use the no-write (derive) backend instead'
     }
   }
   return ''
@@ -170,5 +170,9 @@ export function argOf(argv, flag) {
  * @throws when no checkout can be found.
  */
 export function checkoutFromArgv(argv, env = process.env) {
-  return requireCheckout({ explicit: argOf(argv, '--checkout'), env })
+  const explicit = argOf(argv, '--checkout')
+  if (argv.includes('--checkout') && (explicit === undefined || explicit.trim() === '')) {
+    throw new Error('--checkout requires a directory path')
+  }
+  return requireCheckout({ explicit, env })
 }

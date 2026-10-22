@@ -5,7 +5,7 @@
 // restoreReleasedV4Artifact + assertReleasedV4Relationships. Reproducing that here
 // reports exactly which stored logs the host will refuse, and why -- before a restart.
 //
-// Usage: node scripts/scan-session-logs.mjs [--root <sessions dir>] [--all]
+// Usage: node scripts/scan-session-logs.mjs [--root <sessions dir>]
 import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -22,16 +22,27 @@ const checkout = checkoutFromArgv(process.argv).root;
 
 const session = await import(pathToFileURL(path.join(checkout, 'packages/core/session/lib/index.js')).href);
 const format = await import(pathToFileURL(path.join(checkout, 'packages/session/session-format-v3-to-v4/lib/index.js')).href);
-const known = new Set([...session.KNOWN_SESSION_EVENT_TYPES, "message-edit/version"]);
+// The host's own set, nothing added: a plugin event is legal only when its
+// envelope is ignorable, which the format validator enforces. Adding a private
+// event type here would accept logs the host refuses.
+const known = new Set(session.KNOWN_SESSION_EVENT_TYPES);
 
 function findLogs(dir) {
   const found = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) found.push(...findLogs(full));
-    else if (entry.name === 'session.v4.jsonl.zstd') found.push(full);
+    else if (entry.name === 'session.v4.jsonl.zstd' || entry.name === 'session.v4.jsonl') found.push(full);
   }
   return found;
+}
+
+/** Decode one artifact body: zstd-frame or plain JSONL. */
+function readLog(file) {
+  if (file.endsWith('.zstd')) {
+    return execFileSync('zstd', ['-d', '-c', file], { maxBuffer: 512 * 1024 * 1024 }).toString('utf8');
+  }
+  return fs.readFileSync(file, 'utf8');
 }
 
 let ok = 0;
@@ -39,10 +50,10 @@ const failures = new Map();
 for (const file of findLogs(root)) {
   let records;
   try {
-    records = execFileSync('zstd', ['-d', '-c', file], { maxBuffer: 512 * 1024 * 1024 })
-      .toString('utf8').trim().split('\n').map(line => JSON.parse(line));
+    records = readLog(file).trim().split('\n').map(line => JSON.parse(line));
   } catch (error) {
-    failures.set(String(error).slice(0, 60), [...(failures.get(String(error).slice(0, 60)) ?? []), path.basename(path.dirname(file))]);
+    const reason = String(error).slice(0, 60);
+    failures.set(reason, [...(failures.get(reason) ?? []), path.basename(path.dirname(file))]);
     continue;
   }
   const wire = records[0];
@@ -84,3 +95,4 @@ for (const file of findLogs(root)) {
 
 console.log(`VALID ${String(ok)}`);
 for (const [reason, ids] of failures) console.log(`INVALID x${String(ids.length)}: ${reason}\n  ${ids.slice(0, 12).join(' ')}\n  ...`);
+if (failures.size > 0) process.exitCode = 1;

@@ -189,9 +189,10 @@ export class SidecarStore {
     const reading = (async (): Promise<SessionRecord> => {
       /** A blank record is the answer when nothing on disk belongs to this id. */
       const blank = (): SessionRecord => {
-        const fresh = emptyRecord(sessionId)
-        this.cache.set(sessionId, fresh)
-        return fresh
+        // Deliberately NOT cached: the report route answers any id it is given,
+        // and caching one blank record per probed id would grow without bound.
+        // A later write publishes its committed record through `update` itself.
+        return emptyRecord(sessionId)
       }
       let raw: string
       let legacy = false

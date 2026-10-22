@@ -42,7 +42,7 @@
  */
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync } from 'node:fs'
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 // The one place that knows how to find a DSH checkout on whatever machine this runs on.
@@ -133,6 +133,9 @@ const SESSION_MEMBERS = [
   '    if (request.text === block.text) return current',
   '    const content = message.content.map((item, index) =>',
   "      index === request.blockIndex ? { type: 'reasoning' as const, text: request.text } : item)",
+  // Deliberately leaves message.source alone: changing this inserted block would
+  // make an already-patched host report "not patched" and a re-apply duplicate the
+  // members. The replay-payload caveat stays documented instead.
   '    const data = snapshotJsonValue({ ...current.data, message: { ...message, content } })',
   "    const next = deepFreeze({ ...current, data }) as SessionEvent<'assistant/message'>",
   '    validateSessionEventData(next, `rewritten assistant/message at seq ${next.seq}`)',
@@ -637,20 +640,37 @@ function run(root, mode) {
   const todo = states.filter(edit => edit.state === wanted)
   if (todo.length === 0) return states
   const originals = new Map(FILES.map(file => [file, readTarget(root, file)]))
-  try {
-    for (const file of FILES) {
-      let text = originals.get(file)
-      for (const edit of todo.filter(item => item.file === file)) {
-        const from = mode === '--apply' ? edit.variant.before : edit.variant.after
-        const to = mode === '--apply' ? edit.variant.after : edit.variant.before
-        const next = text.replace(from, () => to)
-        if (next === text) throw new Error(edit.id + ': replacement found no anchor')
-        text = next
-      }
-      writeFileSync(join(root, file), text)
+  // Compute every replacement before touching the tree: an anchor failure must
+  // leave the checkout exactly as it was.
+  const nextTexts = new Map()
+  for (const file of FILES) {
+    let text = originals.get(file)
+    for (const edit of todo.filter(item => item.file === file)) {
+      const from = mode === '--apply' ? edit.variant.before : edit.variant.after
+      const to = mode === '--apply' ? edit.variant.after : edit.variant.before
+      const next = text.replace(from, () => to)
+      if (next === text) throw new Error(edit.id + ': replacement found no anchor')
+      text = next
     }
+    nextTexts.set(file, text)
+  }
+  // Stage then rename per file: process death leaves each target either fully old
+  // or fully new (never truncated), and `--revert` can recover a mixed tree.
+  const staged = []
+  try {
+    for (const [file, text] of nextTexts) {
+      const target = join(root, file)
+      const temporary = `${target}.rd-patch-${process.pid}-${Date.now()}.tmp`
+      writeFileSync(temporary, text, 'utf8')
+      const fd = openSync(temporary, 'r+')
+      try { fsyncSync(fd) } finally { closeSync(fd) }
+      staged.push({ temporary, target })
+    }
+    for (const item of staged) renameSync(item.temporary, item.target)
   } catch (error) {
-    for (const [file, text] of originals) writeFileSync(join(root, file), text)
+    for (const item of staged) {
+      try { rmSync(item.temporary, { force: true }) } catch { /* best effort */ }
+    }
     throw error
   }
   return states
@@ -658,9 +678,15 @@ function run(root, mode) {
 
 /** Type-check and emit the patched packages' projects. */
 function build(root) {
+  // Prefer the checkout's own TypeScript binary: an in-place quick install only
+  // promises node, not pnpm, and the build must not be reported as skipped
+  // merely because pnpm is absent.
+  const local = join(root, 'node_modules', 'typescript', 'bin', 'tsc')
+  const useLocal = existsSync(local)
   for (const project of BUILD_PROJECTS) {
     console.log('building ' + project + '...')
-    execFileSync('pnpm', ['exec', 'tsc', '-b', project], { cwd: root, stdio: 'inherit' })
+    if (useLocal) execFileSync(process.execPath, [local, '-b', project], { cwd: root, stdio: 'inherit' })
+    else execFileSync('pnpm', ['exec', 'tsc', '-b', project], { cwd: root, stdio: 'inherit' })
   }
 }
 
@@ -674,6 +700,11 @@ function reportMissingCheckout(located, options) {
 
 function main() {
   const options = parseArgs(process.argv.slice(2))
+  if (process.argv.includes('--checkout') && (options.checkout === undefined || options.checkout.trim() === '')) {
+    // Silently falling back to discovery here is how the wrong tree gets patched.
+    console.error('dsh-inplace-patch: --checkout requires a directory path')
+    process.exit(2)
+  }
   const located = locateCheckout({ explicit: options.checkout })
   if (options.mode === '--locate') {
     if (located.root === undefined) {

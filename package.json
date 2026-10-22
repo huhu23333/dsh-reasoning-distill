@@ -1,6 +1,6 @@
 {
   "name": "dsh-reasoning-distill",
-  "version": "0.1.11",
+  "version": "0.1.14",
   "type": "module",
   "description": "Distill over-long model reasoning into its useful core and replay the distilled version on every later request, with a per-session cost report.",
   "license": "MIT",
@@ -28,7 +28,9 @@
     "scripts/dsh-inplace-patch.mjs",
     "scripts/probe-inplace-durability.mjs",
     "scripts/patch-message-edit.py",
-    "vendor/dsh-message-edit-0.2.3-patched4.tgz"
+    "scripts/scan-session-logs.mjs",
+    "vendor/dsh-message-edit-0.2.3-patched4.tgz",
+    "vendor/dsh-message-edit-0.2.3-patched4.tgz.sha256"
   ],
   "scripts": {
     "build": "tsdown",

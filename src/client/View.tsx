@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import { IconCopyOutlineRegular, IconRefreshOutlineRegular } from '@deepseek-ai/dsh-client-ui-primitives'
-import { availableSessionStorage, backendById, httpFailure, isStaleResponse, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
-import { HANDOFF_ROUTE, REPORT_ROUTE, entryInForceHere, type CompressionEntry, type SessionReport } from '../shared.ts'
+import { availableSessionStorage, backendById, claimRewriteAttempt, httpFailure, isStaleResponse, pendingRewriteOutcome, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
+import { CANCEL_ROUTE, HANDOFF_ROUTE, REPORT_ROUTE, entryInForceHere, type ActiveCompression, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { settleHandoff } from './handoff.ts'
 import { NS, type Key } from './locales.ts'
 import css from './View.module.css'
@@ -18,6 +18,11 @@ type Props = PropsRuntime<'conversation.view'> & PropsLocale<typeof NS> & {
 }
 type Translate = Props['t']
 type Cached = { report?: SessionReport; loading: boolean; error?: string }
+
+/** Stable identity of one running compression, shared by the row key and cancel state. */
+function activeKey(item: ActiveCompression): string {
+  return `${item.startedAt}-${item.turn}-${item.step}`
+}
 
 function money(amount: number): string {
   return `¥${(Number.isFinite(amount) ? amount : 0).toFixed(6)}`
@@ -112,17 +117,18 @@ function Entry({ entry, sessionId, t, liveStockIds }: {
 }) {
   const run = entry.distill
   const estimated = run.estimated === true
-  // The rewrite moved into the branch this hand-off created: this conversation keeps
-  // its pre-compression history, so the entry is an attempt here, never a success.
-  const moved = entry.handoff?.state === 'created' && entry.handoff.branchId !== undefined && entry.handoff.branchId !== sessionId
-  const notAdopted = entry.failed === true || entry.skipped === true || moved
-  const verdict = entry.failed === true ? t('view.abandoned') : moved ? t('view.branchedAway') : t('view.skipped')
+  // A branch hand-off creates a copy; it does not move the rewrite out of this
+  // conversation. The copy and this one both replay the same compressed text, which
+  // is what keeps a still-usable source from sending the original again.
+  const branched = entry.handoff?.state === 'created' && entry.handoff.branchId !== undefined && entry.handoff.branchId !== sessionId
+  const notAdopted = entry.failed === true || entry.skipped === true
+  const verdict = entry.failed === true ? t('view.abandoned') : t('view.skipped')
   return <details className={css.entry}><summary><span className={css.entryTitle}>{t('view.turn')} {entry.turn} · {t('view.step')} {entry.step}</span><span className={css.muted}>{entry.provider}/{entry.model}</span><span className={css.metric}>{count(entry.originalChars)} {t('view.chars')} · {t('view.estimate')} {count(entry.originalTokens)} {t('view.tokens')}</span>{notAdopted
     ? <span className={css.error}>{verdict} · {t('view.cost')} {money(run.cost)}{estimated ? ` (${t('view.estimated')})` : ''}</span>
     : <span className={`${css.metric} ${entryNet(entry) > 0 ? css.negative : css.positive}`}>{signedMoney(increasedOfEntry(entry))} − {money(reducedOfEntry(entry))} = {signedMoney(entryNet(entry))}</span>}</summary>
     <div className={css.entryBody}>
       {entry.skipped === true && <p role="status" className={css.note}>{t('view.skippedNote')}</p>}
-      {moved && <p role="status" className={css.note}>{t('view.branchedAwayNote')}</p>}
+      {branched && <p role="status" className={css.note}>{t('view.branchAlsoInForceNote')}</p>}
       {run.error && <p role="alert" className={css.error}>{t('view.abandoned')}: {run.error}</p>}
       <div className={css.facts}>
         <div><span>{t('view.original')}</span><strong>{count(entry.originalChars)} {t('view.chars')} / {count(entry.originalTokens)} {t('view.tokens')} ({t('view.estimated')})</strong></div>
@@ -134,8 +140,8 @@ function Entry({ entry, sessionId, t, liveStockIds }: {
         <div><span>{t('view.cost')}</span><strong>{money(run.cost)}{estimated ? ` (${t('view.estimated')})` : ''}</strong></div>
         <div><span>{t('view.period')}</span><strong>{t(run.period === 'peak' ? 'view.peak' : 'view.off')}</strong></div>
         <div><span>{t('view.avoided')}</span><strong>{signedMoney(-reducedOfEntry(entry))}</strong></div>
-        {entry.handoff?.state === 'skipped' && <div><span>交接已跳过</span><strong>{entry.handoff.error ?? ''}</strong></div>}
-        {entry.handoff?.state === 'failed' && <div><span>{t('view.branchFailed')}</span><strong className={css.error}>{entry.handoff.error ?? ''} · {t('view.branchKept')}</strong></div>}
+        {entry.handoff?.state === 'skipped' && <div><span>{t('view.handoffSkipped')}</span><strong>{entry.handoff.error ?? ''}</strong></div>}
+        {entry.handoff?.state === 'failed' && <div><span>{t('view.handoffFailed')}</span><strong className={css.error}>{entry.handoff.error ?? ''} · {t('view.handoffKept')}</strong></div>}
         {entry.handoff?.state === 'created' && <div><span>{t('view.branchCreated')}</span><strong>{entry.handoff.branchId ?? ''}</strong></div>}
         <div><span>{t('view.stock')}</span><strong>{t('view.estimate')} {count(stockOfEntry(entry, sessionId, liveStockIds))} token</strong> · <strong>{t('view.estimate')} {signedCount(-entry.savedTokensPerRequest * entry.liveRequests)} {t('view.tokens')} {t('view.lifetime')}</strong></div>
       </div>
@@ -333,6 +339,9 @@ export function ReasoningDistillView({ sessionId, openSession, refreshTranscript
     if (request === undefined) return
     /** Tell the host how the hand-off went; in-place keeps the turn going. */
 
+    // The chip and this panel can both drive in-place backends. Claim the
+    // attempt the same way the chip does before sending the non-idempotent POST.
+    if (!claimRewriteAttempt(availableSessionStorage(), attemptKey, Date.now())) return
     applyingPending.current.add(attemptKey)
     void fetch(request.path, {
       method: 'POST',
@@ -393,7 +402,35 @@ export function ReasoningDistillView({ sessionId, openSession, refreshTranscript
     const timer = setInterval(() => setNow(Date.now()), 1000)
     return () => clearInterval(timer)
   }, [activity])
-  return <ReportBody report={report} loading={current?.loading === true} error={current?.error} now={now} onRefresh={retry} openSession={openSession} t={t} />
+  const [cancelling, setCancelling] = useState<ReadonlySet<string>>(new Set())
+  const [cancelError, setCancelError] = useState('')
+  const cancelCompression = useCallback((item: ActiveCompression): void => {
+    const key = activeKey(item)
+    setCancelError('')
+    setCancelling(current => new Set([...current, key]))
+    void fetch(CANCEL_ROUTE, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sessionId, turn: item.turn, step: item.step }),
+    }).then(async response => {
+      const payload = await response.json().catch(() => null) as { ok?: unknown; error?: unknown } | null
+      if (!response.ok || payload?.ok !== true) {
+        const stated = typeof payload?.error === 'string' && payload.error !== '' ? payload.error : `HTTP ${response.status}`
+        setCancelError(stated)
+      }
+      readRef.current()
+    }).catch((reason: unknown) => {
+      setCancelError(reason instanceof Error ? reason.message : String(reason))
+    }).finally(() => {
+      setCancelling(current => {
+        const next = new Set(current)
+        next.delete(key)
+        return next
+      })
+    })
+  }, [sessionId])
+  return <ReportBody report={report} loading={current?.loading === true} error={current?.error} now={now} onRefresh={retry} openSession={openSession} t={t}
+    cancelling={cancelling} cancelError={cancelError} onCancel={cancelCompression} />
 }
 
 /**
@@ -403,7 +440,7 @@ export function ReasoningDistillView({ sessionId, openSession, refreshTranscript
  * @param props - report plus the clock and callbacks the body needs.
  * @returns the panel markup.
  */
-export function ReportBody({ report, loading, error, now, onRefresh, openSession, t }: {
+export function ReportBody({ report, loading, error, now, onRefresh, openSession, t, cancelling, cancelError, onCancel }: {
   report: SessionReport | undefined
   loading: boolean
   error: string | undefined
@@ -411,6 +448,12 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
   onRefresh: () => void
   openSession: (id: string) => void
   t: Translate
+  /** Active compression keys that have a cancel request in flight. */
+  cancelling?: ReadonlySet<string>
+  /** The server's reason the last cancel request could not be honoured. */
+  cancelError?: string
+  /** Ask the host to stop one running compression before it is adopted. */
+  onCancel?: (item: ActiveCompression) => void
 }) {
   // Every entry ever recorded, including ones a compaction has since shadowed.
   const stockTokens = report?.stockTokens ?? 0
@@ -435,14 +478,29 @@ export function ReportBody({ report, loading, error, now, onRefresh, openSession
 
       {activity && <section className={css.section}><h3>{t('view.active')}</h3><p className={css.note}>{t('view.activeHint')}</p>
         {report?.blockingSince != null && <p role="status" className={css.blockedBanner}><span className={css.activityDotBlocked} aria-hidden /><strong>{t('activity.blocked')}</strong> · {t(`activity.reason.${report.blockingReason ?? 'other'}` as 'activity.reason.tool')} · {Math.max(0, Math.round((now - report.blockingSince) / 1000))}s</p>}
-        {(report?.active ?? []).map(item => <div key={`${item.startedAt}-${item.turn}-${item.step}`} className={css.activeRow}>
-          <span className={css.activityDot} aria-hidden />
-          <span>{t('view.turn')} {item.turn} · {t('view.step')} {item.step}</span>
-          <span className={css.muted}>{item.provider}/{item.model}</span>
-          <span className={css.metric}>{t('view.estimate')} {count(item.originalTokens)} {t('view.tokens')}</span>
-          <span className={css.muted}>{item.distiller}</span>
-          <span className={css.metric}>{Math.max(0, Math.round((now - item.startedAt) / 1000))}s</span>
-        </div>)}
+        {cancelError !== undefined && cancelError !== '' && <p role="alert" className={css.error}>{t('view.cancelFailed')}: {cancelError}</p>}
+        {(report?.active ?? []).map(item => {
+          const key = activeKey(item)
+          const cancellingThis = cancelling?.has(key) === true
+          // A client bundle can be older than the host: fall back to the first
+          // phase and the overall start when the wire lacks the newer fields.
+          const stage = item.stage ?? 'distilling'
+          const stageStartedAt = Number.isFinite(item.stageStartedAt) ? item.stageStartedAt : item.startedAt
+          // A compression that already adopted its rewrite is past cancellation;
+          // the button is disabled rather than pretending the host can undo it.
+          const cancellable = onCancel !== undefined && stage !== 'writing-back'
+          return <div key={key} className={css.activeRow}>
+            <span className={css.activityDot} aria-hidden />
+            <span>{t('view.turn')} {item.turn} · {t('view.step')} {item.step}</span>
+            <span className={css.muted}>{item.provider}/{item.model}</span>
+            <span className={css.metric}>{t('view.estimate')} {count(item.originalTokens)} {t('view.tokens')}</span>
+            <span className={css.stage}>{t('view.stage')}: {t(`view.stage.${stage}` as Key)} · {Math.max(0, Math.round((now - stageStartedAt) / 1000))}s</span>
+            <span className={css.muted}>{item.distiller}</span>
+            <span className={css.metric}>{Math.max(0, Math.round((now - item.startedAt) / 1000))}s</span>
+            {cancellable && <button type="button" className={css.secondary} disabled={cancellingThis}
+              onClick={() => onCancel?.(item)}>{cancellingThis ? t('view.cancelling') : t('view.cancel')}</button>}
+          </div>
+        })}
       </section>}
       <section className={css.section}><h3>{t('view.entries')}</h3>{report.entries.length === 0 && <p className={css.muted}>{t('view.empty')}</p>}
         {/* "Why did nothing happen" is the one question the entries cannot answer, and it stays

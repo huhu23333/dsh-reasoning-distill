@@ -69,10 +69,12 @@ export interface InstallStatus {
  * it: the in-place install has no companion package, so its `install` step says exactly that.
  */
 export const INSTALL_STEPS: readonly { id: string; label: string }[] = [
-  { id: 'resolve', label: '定位 DSH checkout 与 profile' },
-  { id: 'install', label: '安装前置插件（官方 CLI 写入 profile）' },
-  { id: 'patch', label: '应用本仓库补丁（幂等）' },
-  { id: 'verify', label: '校验安装件与 vendor 逐字节一致' },
+  // Labels are fallbacks for a client that cannot translate the id; the panel
+  // resolves `install.step.<id>` from its own locale catalog.
+  { id: 'resolve', label: 'Locate the DSH checkout and profile' },
+  { id: 'install', label: 'Install prerequisites (the built-in backend skips this)' },
+  { id: 'patch', label: 'Apply the patch' },
+  { id: 'verify', label: 'Verify the result' },
 ]
 
 /**
@@ -83,8 +85,11 @@ export const INSTALL_STEPS: readonly { id: string; label: string }[] = [
  * backend whose entire prerequisite is a patch to the host, so its quick install *is* that patch.
  */
 export const INSTALLABLE_BACKENDS: readonly InstallableBackend[] = [
-  { id: 'message-edit' },
+  // The recommended backend first: in-place is the one this repository has
+  // verified per DSH release, while message-edit is experimental and documented
+  // as not recommended.
   { id: 'in-place' },
+  { id: 'message-edit' },
 ]
 
 /** The installable entry for one backend id, when the page knows it. */
@@ -102,7 +107,7 @@ export function installableBackend(id: string): InstallableBackend | undefined {
  * @param repo - this plugin's checkout, so the agent reads the real instructions.
  * @returns the prompt text.
  */
-export function installPromptFor(backendId: string, repo: string): string {
+export function installPromptFor(backendId: string, repo: string): string | undefined {
   if (backendId === 'in-place') {
     return [
       '请为这台机器上的 DSH 打上「原位改写」后端的宿主补丁：这个后端内置在本插件里，安装就是打补丁，不需要安装任何伴随包。',
@@ -128,17 +133,20 @@ export function installPromptFor(backendId: string, repo: string): string {
       `回退：node ${repo}/scripts/dsh-inplace-patch.mjs --revert --build`,
     ].join('\n')
   }
+  if (backendId !== 'message-edit') return undefined
   return [
-    `请在本工作区里安装并接入 DSH 的「助手消息改写后端」：${backendId}。`,
+    '请在本工作区里安装并接入 DSH 的「助手消息改写后端」：message-edit（实验性，不推荐日常使用）。',
     '',
-    `第一步先读 ${repo}/README.md 的「助手消息改写后端」一节（含「旧后端 \`message-edit\`（保留兼容，不推荐）」与「（旧）\`message-edit\` 后端安装流程」）——它是这条流程的事实来源。`,
+    `第一步先读 ${repo}/README.md 的「旧后端 message-edit（实验性，不推荐）」与「（旧）message-edit 后端安装流程」两节——它们是这条流程的事实来源。`,
     '',
-    '注意这是**旧后端（不推荐）**：每压缩一次就多一个分支会话（会堆满对话/归档列表），且要额外安装并修补 `dsh-message-edit`。请严格按 README 的流程做（装 vendor/dsh-message-edit-0.2.3-patched4.tgz 或原版后跑 scripts/patch-message-edit.py），每步都用 README 给出的校验命令确认。',
+    '注意这是**实验性分支后端**：每压缩一次就多一个分支会话（会堆满对话/归档列表），且要额外安装并修补 `dsh-message-edit`。优先使用本仓库验证过的脚本流程：',
+    `  bash ${repo}/scripts/install-backend.sh message-edit`,
+    '它依次执行：官方 CLI 安装 vendor/dsh-message-edit-0.2.3-patched4.tgz → scripts/patch-message-edit.py → 与 vendor 逐字节校验。',
     '',
     '硬性要求：',
-    `1. 只改与该后端安装相关的文件；不要改动本仓库的 scripts/**、src/**、vendor/**（除非你确认那正是修复所需，并在报告里逐条说明）。`,
-    `2. 安装走官方 CLI：「pnpm dsh plugin --profile web add <包名或 tgz>」；装完用「node ${repo}/scripts/scan-session-logs.mjs」复检已有会话仍可加载。`,
-    `3. 需要重启「dsh web」才生效的步骤，**不要自己重启**，把命令写进报告让用户执行。`,
+    '1. 只改与该后端安装相关的文件；不要改动本仓库的 scripts/**、src/**、vendor/**（除非你确认那正是修复所需，并在报告里逐条说明）。',
+    `2. 装完用「node ${repo}/scripts/scan-session-logs.mjs」复检已有会话仍可加载。`,
+    '3. 需要重启「dsh web」才生效的步骤，**不要自己重启**，把命令写进报告让用户执行。',
     '4. 最后给出报告：装了什么包（确切名字与版本）、改了什么、验证了什么（命令与输出要点）、哪些假定没被证实、以及用户下一步该做什么。',
   ].join('\n')
 }

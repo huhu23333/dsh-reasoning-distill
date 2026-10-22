@@ -7,7 +7,7 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
-import { availableSessionStorage, claimRewriteAttempt, isStaleResponse, owedInPlaceEntries, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest } from './ops.ts'
+import { availableSessionStorage, claimRewriteAttempt, isStaleResponse, owedInPlaceEntries, rememberRewriteOutcome, rewriteApplyOutcome, rewriteRequest, shouldRetrySettle } from './ops.ts'
 import { settleHandoff } from './handoff.ts'
 import { REPORT_ROUTE, type BlockingReason, type CompressionEntry, type SessionReport } from '../shared.ts'
 import { NS } from './locales.ts'
@@ -151,6 +151,17 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, re
    * each attempt in browser storage first so the report panel cannot send it too.
    * @param report - the session's latest report.
    */
+  const settleWithRetry = (report: SessionReport, entryId: string, error?: string): void => {
+    void (async () => {
+      // A settle that never reached the host is still owed; retry it a few times
+      // rather than leaving the host's pending marker behind.
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const { verdict, recorded } = await settleHandoff(report, entryId, error)
+        if (!shouldRetrySettle(verdict, recorded)) return
+        await new Promise<void>(resolve => setTimeout(resolve, 5_000))
+      }
+    })()
+  }
   const applyInPlace = (report: SessionReport | null): void => {
     for (const entry of owedInPlaceEntries(report)) {
       if (report === null) return
@@ -171,19 +182,23 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, re
         const outcome = rewriteApplyOutcome(response.ok, payload)
         if (!outcome.done) {
           // Released so a later poll retries, and remembered so the panel reports the refusal
-          // instead of writing the rewrite a second time.
+          // instead of writing the rewrite a second time. The failure also has to reach the
+          // entry, or the report would show an adopted write that never landed.
           applyingInPlace.current.delete(key)
           rememberRewriteOutcome(availableSessionStorage(), key, outcome.error)
+          settleWithRetry(report, entry.id, outcome.error)
           return
         }
         rememberRewriteOutcome(availableSessionStorage(), key)
         // The record changed at its own seq, so nothing was appended and this open view still holds
         // the superseded text; ask the shell to rebuild it now rather than at the next reload.
         refreshTranscript?.(report.sessionId)
-        await settleHandoff(report, entry.id)
+        settleWithRetry(report, entry.id)
       }).catch(() => {
         applyingInPlace.current.delete(key)
-        rememberRewriteOutcome(availableSessionStorage(), key, 'the rewrite request failed')
+        const detail = 'the rewrite request failed'
+        rememberRewriteOutcome(availableSessionStorage(), key, detail)
+        settleWithRetry(report, entry.id, detail)
       })
     }
   }
@@ -200,7 +215,7 @@ export function CompressionActivity({ sessionId, openSession, archiveSession, re
       void fetch(REPORT_ROUTE, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify({ sessionId, detail: false }),
       }).then(async response => response.ok ? await response.json() as SessionReport : null).then(report => {
         if (!alive || isStaleResponse(request, applied.current)) return
         applied.current = request

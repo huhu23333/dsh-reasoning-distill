@@ -204,6 +204,12 @@ export function withKindDefaults(
 
 /** The retired global one-shot switch, if a document still carries it. */
 export function legacyOneShotSwitch(holder: unknown): boolean | undefined {
-  const legacy = (holder as { compressSubagents?: { get(): unknown } } | undefined)?.compressSubagents?.get()
+  const raw = (holder as { compressSubagents?: unknown } | undefined)?.compressSubagents
+  // Older documents carried a volatile wrapper; the current schema no longer
+  // declares the key, so a resolved document keeps the retired setting as a
+  // plain boolean. Both shapes have to be read or the migration silently drops it.
+  const legacy = typeof (raw as { get?: unknown } | undefined)?.get === 'function'
+    ? (raw as { get(): unknown }).get()
+    : raw
   return typeof legacy === 'boolean' ? legacy : undefined
 }

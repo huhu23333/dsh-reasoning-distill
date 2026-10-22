@@ -6,6 +6,7 @@
 import { backendById } from './backends.ts'
 import { BUILTIN_HOLIDAYS, BUILTIN_PRICES, resolveRule, type Config } from './config.ts'
 import { priceAt, resolvePeakSource, whaleStatus } from './peak.ts'
+import { DEFAULT_PRICE_ENTRIES, peakEnabled } from './prices.ts'
 import type { SessionRecord } from './store.ts'
 import type { ActiveCompression, BlockingReason, CatalogModel, CatalogReport, CompressionEntry, PeakInfo, SessionReport } from './shared.ts'
 import { entryInForceHere } from './shared.ts'
@@ -19,7 +20,10 @@ import { DEFAULT_PROMPT } from './prompt.ts'
 function peakInfo(config: Config): PeakInfo {
   const source = resolvePeakSource(config)
   const entries = config.prices.get() ?? {}
-  const modelsEnabled = Object.values(entries).filter(entry => entry.peakPricing === true).length
+  // Count the split each model actually gets: an unstated flag inherits the
+  // shipped answer, so a sparse stored entry must not read as "off".
+  const models = new Set([...Object.keys(DEFAULT_PRICE_ENTRIES), ...Object.keys(entries)])
+  const modelsEnabled = [...models].filter(model => peakEnabled(entries, model)).length
   return { source: source.id, label: source.label, detail: source.detail, modelsEnabled }
 }
 
@@ -58,6 +62,8 @@ export function buildReport(
     generation?: number
     /** Entry awaiting a backend hand-off, when one is owed. */
     pendingBranch?: string | null
+    /** When true (default) include the full distillation request/response text. */
+    detail?: boolean
   } = { active: [], blockingSince: null, blockingReason: null },
 ): SessionReport {
   const entries: CompressionEntry[] = record.entries
@@ -87,7 +93,11 @@ export function buildReport(
       distilledChars: entry.distilledChars,
       distilledTokens: entry.distilledTokens,
       savedTokensPerRequest: entry.savedTokensPerRequest,
-      distill: entry.distill,
+      // The poller only needs the economics while it is driving a write-back;
+      // the full prompt/response is shown by the report view when requested.
+      distill: live.detail === false
+        ? { ...entry.distill, requestText: '', responseText: '' }
+        : entry.distill,
       cacheBreakTokens: entry.cacheBreakTokens,
       cacheBreakCost: entry.cacheBreakCost,
       liveSaved: entry.liveSaved,
@@ -116,19 +126,20 @@ export function buildReport(
     savedTotal += entry.liveSaved + entry.frozenSaved
     // Lifetime tokens survive a frozen epoch: the request count is kept when the
     // live money is frozen, so a retired rewrite still reports what it saved.
-    // The count itself only covers requests in the round that produced the
-    // rewrite (see engine.account): the API does not replay an earlier round's
-    // reasoning into a later one.
+    // The count covers every credited request, in any round: DSH requests normally
+    // carry tools, so the whole history — reasoning included — is resent and a
+    // rewrite saves on every later request until compaction removes its target.
     lifetimeTokens += entry.savedTokensPerRequest * entry.liveRequests
-    // A compression handed off to a branch is in force there, not here: this
-    // conversation keeps the pre-compression history, so it earns no success and no stock.
+    // A branch hand-off copies the rewrite; it stays in force here too, because this
+    // conversation can remain usable (archive off/failed) and must not replay the
+    // original reasoning merely because a copy exists. Both copies report their own
+    // requests.
     const adopted = entryInForceHere(entry, sessionId)
     if (adopted) succeeded += 1
-    // The stock counts only rewrites the current round's next request would
-    // carry, priced at the hit rate of the model that would send them: those
-    // tokens sit in a stable prefix, so the money is an estimate and is labelled
-    // as one. A rewrite from an earlier round is not counted, because the API
-    // does not replay that round's reasoning.
+    // The stock counts every rewrite the next request would carry, from any round
+    // (DSH requests normally carry tools, which resends the whole history), priced
+    // at the hit rate of the model that would send them: those tokens sit in a
+    // stable prefix, so the money is an estimate and is labelled as one.
     if (entry.active && adopted && entry.distilledTokens < entry.originalTokens) {
       stockTokens += entry.savedTokensPerRequest
       stockSaved += entry.savedTokensPerRequest * (priceAt(entry.model, prices, pricedAt, config).bucket.hit / 1_000_000)
@@ -191,11 +202,13 @@ export async function buildCatalog(
   infoFor: (provider: string, model: string) => Promise<{ reasoningEfforts: string[]; defaultEffort?: string }>,
 ): Promise<CatalogReport> {
   const models: CatalogModel[] = []
+  const failures: { provider: string; error: string }[] = []
   for (const provider of providers) {
     let listed: readonly { id: string; name?: string; contextWindow?: number }[]
     try {
       listed = await modelsFor(provider)
-    } catch {
+    } catch (reason: unknown) {
+      failures.push({ provider, error: reason instanceof Error ? reason.message : String(reason) })
       continue
     }
     for (const model of listed) {
@@ -221,6 +234,7 @@ export async function buildCatalog(
   const whale = whaleStatus()
   return {
     models,
+    ...failures.length === 0 ? {} : { failures },
     defaultPrompt: DEFAULT_PROMPT,
     builtinPrices: { ...BUILTIN_PRICES },
     peak: {

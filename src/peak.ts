@@ -15,11 +15,12 @@
  * @module dsh-reasoning-distill/peak
  */
 
-import { readFileSync, readdirSync } from 'node:fs'
+import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 
-import type { Config, PriceBucket, ModelPrices } from './config.ts'
-import { BUILTIN_HOLIDAYS, resolvePrices } from './config.ts'
+import type { Config } from './config.ts'
+import { BUILTIN_HOLIDAYS } from './config.ts'
+import { peakEnabled, resolvePrices, type ModelPrices, type PriceBucket } from './prices.ts'
 import { dshHome } from './store.ts'
 
 /** Peak windows in Beijing wall-clock hours, half-open `[start, end)`. */
@@ -42,9 +43,29 @@ interface WhaleConstants {
   path: string
   peakHours: readonly (readonly [number, number])[]
   holidays: readonly string[]
+  /** File identity, so an in-place update of the widget is picked up. */
+  mtimeMs: number
+  size: number
 }
 
 let whaleCache: WhaleConstants | null | undefined
+/**
+ * The profile this host actually serves, when the entry point can tell us.
+ *
+ * Falling back to "any profile that has the widget" made the attribution depend
+ * on readdir order when several profiles are installed.
+ */
+let whaleProfileDir: string | undefined
+
+/**
+ * Point the whale lookup at the profile this host serves.
+ * @param dir - the running profile directory, or undefined when unknown.
+ */
+export function configureWhaleProfile(dir: string | undefined): void {
+  if (whaleProfileDir === dir) return
+  whaleProfileDir = dir
+  whaleCache = undefined
+}
 /** When a *negative* whale result was cached; only absences expire. */
 let whaleMissAt = 0
 /**
@@ -101,16 +122,28 @@ function parseHolidays(source: string): readonly string[] | undefined {
  */
 function readWhale(): WhaleConstants | null {
   if (whaleCache !== undefined) {
-    // A cached *miss* expires so a later install is picked up; a hit is kept.
-    if (whaleCache !== null || Date.now() - whaleMissAt < WHALE_MISS_TTL_MS) return whaleCache
-    whaleCache = undefined
+    if (whaleCache !== null) {
+      // A hit is revalidated against the file identity: the widget's constants
+      // change only when the package is reinstalled, and a stale answer would
+      // price the report against last season's holidays.
+      try {
+        const info = statSync(whaleCache.path)
+        if (info.mtimeMs === whaleCache.mtimeMs && info.size === whaleCache.size) return whaleCache
+      } catch {
+        // fall through: the bundle is gone, re-discover.
+      }
+      whaleCache = undefined
+    } else if (Date.now() - whaleMissAt < WHALE_MISS_TTL_MS) return whaleCache
+    else whaleCache = undefined
   }
   whaleCache = null
   whaleMissAt = Date.now()
   try {
     const profiles = join(dshHome(), 'profiles')
-    for (const profile of readdirSync(profiles)) {
-      const bundle = join(profiles, profile, 'node_modules', 'dsh-whale-widget', 'lib', 'index.js')
+    const candidates = whaleProfileDir !== undefined
+      ? [join(whaleProfileDir, 'node_modules', 'dsh-whale-widget', 'lib', 'index.js')]
+      : readdirSync(profiles).map(profile => join(profiles, profile, 'node_modules', 'dsh-whale-widget', 'lib', 'index.js'))
+    for (const bundle of candidates) {
       let source: string
       try {
         source = readFileSync(bundle, 'utf8')
@@ -119,7 +152,12 @@ function readWhale(): WhaleConstants | null {
       }
       const peakHours = parsePeakHours(source)
       if (peakHours === undefined) continue
-      whaleCache = { path: bundle, peakHours, holidays: parseHolidays(source) ?? [] }
+      // A partial parse is not a whale source: the contract says fall back to the
+      // built-in rules when any constant cannot be read.
+      const holidays = parseHolidays(source)
+      if (holidays === undefined) continue
+      const info = statSync(bundle)
+      whaleCache = { path: bundle, peakHours, holidays, mtimeMs: info.mtimeMs, size: info.size }
       break
     }
   } catch {
@@ -149,6 +187,9 @@ export function resolvePeakSource(config: Config): PeakSource {
   const wantsWhale = config.peakSource.get() === 'whale'
   const found = wantsWhale ? readWhale() : null
   if (found !== null) {
+    // The two sources are alternatives, not layers: when whale is selected it
+    // owns both the windows and the holiday table. The user-editable list below
+    // belongs to the built-in source only.
     const days = new Set(found.holidays)
     const hours = found.peakHours
     return {
@@ -200,18 +241,7 @@ export function periodFor(time: number, peakPricing: boolean, config: Config, so
   return resolved.isPeak(time) ? 'peak' : 'off'
 }
 
-/**
- * Whether one model's price entry opts into the two-column split.
- * @param configured - user price entries keyed by model id.
- * @param model - model id.
- * @returns true when that entry set `peakPricing`.
- */
-export function peakEnabled(
-  configured: Record<string, Partial<ModelPrices>> | undefined,
-  model: string,
-): boolean {
-  return configured?.[model]?.peakPricing === true
-}
+export { peakEnabled } from './prices.ts'
 
 /**
  * Pick the bucket of one resolved price table for a period.

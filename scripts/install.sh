@@ -14,7 +14,7 @@ set -euo pipefail
 # after every npm install, or the plugin cannot resolve the host runtime.
 
 PLUGIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROFILE="${1:-web}"
+PROFILE="${1:-${DSH_PROFILE:-web}}"
 DSH_HOME="${DSH_HOME:-$HOME/.dsh}"
 PROFILE_DIR="$DSH_HOME/profiles/$PROFILE"
 SHARED="$DSH_HOME/profiles/node_modules/@deepseek-ai"
@@ -38,8 +38,13 @@ echo "install: adding the plugin to profile '$PROFILE'"
 # reconciles newly installed bundles into dsh.profile.bundles.
 # The DSH source checkout is FOUND, never assumed: an explicit DSH_CHECKOUT wins, otherwise the
 # plugin's shared resolver walks up from this process's cwd and from the host's session package.
-CHECKOUT="${DSH_CHECKOUT:-${DSH_HOST_CHECKOUT:-$(node "$PLUGIN_DIR/scripts/dsh-inplace-patch.mjs" --locate)}}"
-(cd "$CHECKOUT" && pnpm dsh plugin --profile "$PROFILE" add "$PLUGIN_DIR")
+CHECKOUT="${DSH_HOST_CHECKOUT:-${DSH_CHECKOUT:-$(node "$PLUGIN_DIR/scripts/dsh-inplace-patch.mjs" --locate)}}"
+CLI="$CHECKOUT/node_modules/@deepseek-ai/dsh/lib/bin.js"
+if [ -f "$CLI" ]; then
+  (cd "$DSH_HOME" && node "$CLI" plugin --profile "$PROFILE" add "$PLUGIN_DIR")
+else
+  (cd "$CHECKOUT" && pnpm dsh plugin --profile "$PROFILE" add "$PLUGIN_DIR")
+fi
 
 echo
 echo "install: done. Restart 'dsh web' once so the Loader rescans the profile"
