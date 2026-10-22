@@ -4,11 +4,11 @@
 
 ## 0.1.16
 
-- 仅版本号重发：0.1.14 与 0.1.15 在 npm 侧被 staged-publishing 的注册表 bug 卡住（`npm publish` 返回成功但版本未上线，`npm stage list` 也没有记录可 approve/reject；见 npm/cli#9889）。改用 npm 12 的发布路径重试；代码与 0.1.14 相同。
+- 仅版本号重发。0.1.14/0.1.15 发布后 npm registry 异步处理较慢，期间一度按 staged-publishing 问题处理；实际三者最终都已上线，0.1.16 为当前 latest。代码与 0.1.14 相同。
 
 ## 0.1.15
 
-- 仅版本号重发：0.1.14 被同一 npm staged-publishing bug 卡住；按 npm/cli#9889 的通用做法 bump patch 后重新发布。代码与 0.1.14 相同。
+- 仅版本号重发；npm registry 异步处理延迟，最终上线。代码与 0.1.14 相同。
 
 ## 0.1.14
 
