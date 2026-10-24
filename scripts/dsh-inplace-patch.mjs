@@ -37,7 +37,8 @@
  * refused, never guessed at.
  *
  * Covered host versions (patch applied, checked, reverted, and type-checked on an isolated clone):
- * 0.2.1-alpha.1 through 0.2.1-alpha.5. Only 0.2.1-alpha.1 has also been run against real sessions.
+ * 0.2.1-alpha.1 through 0.2.1-alpha.5. Real-session runs: 0.2.1-alpha.1, and 0.2.1-rc.3 (updated
+ * host; patch --check PATCHED, in-place backend used in a live web session).
  * @module dsh-reasoning-distill/scripts/dsh-inplace-patch
  */
 

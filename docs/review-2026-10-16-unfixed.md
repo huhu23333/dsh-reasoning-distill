@@ -86,7 +86,8 @@ npm run check                 # typecheck + smoke + render
 node scripts/dsh-inplace-patch.mjs --check --checkout <DSH 源码目录>
 ```
 
-- 本清单基于 2026-10-22 的只读复核 + 修复后回归；宿主 checkout 为 0.2.1-alpha.1，补丁 `--check` 为 PATCHED。
+- 本清单基于 2026-10-22 的只读复核 + 修复后回归；当时宿主 checkout 为 0.2.1-alpha.1，补丁 `--check` 为 PATCHED。
+- 2026-10-24 宿主更新到 `0.2.1-rc.3`，在其上实际使用 in-place 后端完成改写（补丁 `--check` 为 PATCHED）；README 的支持范围已扩到 rc.3。
 - 未做真实 provider 的缓存/计费实验；N6 的结论来自宿主上报与代码可达性。
 - 0.2.1-alpha.3+ 的补丁变体未在本机实际执行（本地 tag 只到 alpha.1），相关锚点仅按脚本变体逻辑审阅。
 - 未验证 DeepSeek 对"旧签名+新文本"的服务端行为（1.2）。

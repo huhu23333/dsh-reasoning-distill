@@ -2,6 +2,10 @@
 
 本插件的版本变更记录。
 
+## Unreleased
+
+- 文档/兼容性：DSH 支持范围扩到 `0.2.0-rc.1` ～ `0.2.1-rc.3`，并把 `0.2.1-rc.3` 加入「已知可运行 in-place」列表（在更新后的宿主上实测，补丁 `--check` 为 PATCHED）；`package.json` 的 `dsh.compatibility.dshReleases` 同步加入 rc.3。
+
 ## 0.1.16
 
 - 仅版本号重发。0.1.14/0.1.15 发布后 npm registry 异步处理较慢，期间一度按 staged-publishing 问题处理；实际三者最终都已上线，0.1.16 为当前 latest。代码与 0.1.14 相同。
