@@ -2,9 +2,9 @@
 
 本插件的版本变更记录。
 
-## Unreleased
+## 0.1.17
 
-- 文档/兼容性：DSH 支持范围扩到 `0.2.0-rc.1` ～ `0.2.1-rc.3`，并把 `0.2.1-rc.3` 加入「已知可运行 in-place」列表（在更新后的宿主上实测，补丁 `--check` 为 PATCHED）；`package.json` 的 `dsh.compatibility.dshReleases` 同步加入 rc.3。
+- 文档/兼容性更新，代码与 0.1.16 相同：DSH 支持范围扩到 `0.2.0-rc.1` ～ `0.2.1-rc.3`，并把 `0.2.1-rc.3` 加入「已知可运行 in-place」列表（在更新后的宿主上实测，补丁 `--check` 为 PATCHED）；`package.json` 的 `dsh.compatibility.dshReleases` 同步加入 rc.3。
 
 ## 0.1.16
 
